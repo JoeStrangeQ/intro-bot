@@ -60,4 +60,21 @@ lua badge-test/sim.lua
 
 The test lives outside `badge/` so it isn't uploaded. It needs `python3` (`pda.py`).
 It also checks the badge's instructions and account decoding against the program's
-fixtures in `../intro-bot-program/tests/fixtures` (or set `FIXTURES=<dir>`).
+fixtures in `tests/fixtures` (or set `FIXTURES=<dir>`).
+
+## Local end-to-end
+
+```sh
+pnpm install
+pnpm e2e
+```
+
+Runs the whole flow on your machine, nothing public: the program on a local chain,
+the relay under `wrangler dev`, `badge-test/wallet.mjs` as the phone wallet, and
+`badge-test/e2e.lua` using the badge's own `lib/` code. Throwaway keys go in
+`target/e2e` (gitignored).
+
+It runs twice: on `solana-test-validator` (program loaded upgradeable), then on
+`surfpool --offline` with time travel for withdraw (24h) and both refunds (72h, 7 days).
+Needs the Solana CLI, `cargo build-sbf`, surfpool, Lua, Node, Python 3 and curl, with
+ports 8899, 8787, 18899 and 18787 free.
