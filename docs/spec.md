@@ -93,12 +93,15 @@ Text fields are fixed-size byte arrays (`target: [u8;64]`, `telegram: [u8;32]`,
 `offer: [u8;64]`), zero-padded, so offsets never move.
 
 ## Badge app (`badge/`)
-Permissions: `http` (host `intro.botbotcap.com`), `storage`. Optionally `led`.
-Screens (320×218): Home (machine value ticker + sparkline, jobs, queue count, next min bid,
-"Ask me about BotBot"), Hire me (QR → `https://intro.botbotcap.com/b/<wallet>`),
-Queue (list: target, @tg, bid, status; SELECT → action QR for accept / made / decline),
-Job done animation when `jobs` increases, Setup (enter wallet once with `ui.input`, or
-scan-to-register QR). Poll `/api/badge/:wallet` every 20 s. Never store or make keys.
+Permissions: `rpc`, `http` (host `relay.botbotcap.com`), `storage`, `mesh`, `led`.
+Never store or make keys; the user's wallet address (public) is entered once.
+- **Introer:** Home (machine value "demo value" ticker + sparkline, jobs, open queue, min bid,
+  "Ask me about BotBot · botbotcap.com"), Queue (target, @tg, bid, status; SELECT → accept /
+  made / decline QR), job-done animation + LED when a Receipt lands. Register via QR.
+- **Requester:** Find (introers on-chain, nearby badges first via mesh beacon of the introer's
+  wallet), Bid (`ui.input` target and Telegram, amount; beat the lowest when 5 are open), My
+  requests (confirm, withdraw, refund when expired). Each action → relay QR → phone signs.
+- Poll the chain every 20 s within the 30 RPC calls/min budget.
 
 ## Trust model
 No disputes and no arbiter. The introer is paid only when the requester confirms. If the
