@@ -90,7 +90,7 @@
       "docs": [
         "Posts a request with `amount` lamports held in the request account.",
         "With `MAX_OPEN` open requests, `lowest` must be the lowest of them",
-        "(the other open ones go in remaining accounts); it is refunded."
+        "(as tracked in `introer.open`); it is refunded and closed."
       ],
       "discriminator": [
         199,
@@ -442,8 +442,8 @@
     {
       "name": "init_config",
       "docs": [
-        "Creates the config. Only the program's upgrade authority can call it;",
-        "the signer becomes the admin."
+        "Creates the config and directory. Only the program's upgrade",
+        "authority can call it; the signer becomes the admin."
       ],
       "discriminator": [
         23,
@@ -514,15 +514,13 @@
           "address": "11111111111111111111111111111111"
         }
       ],
-      "args": [
-        {
-          "name": "cap_total",
-          "type": "u64"
-        }
-      ]
+      "args": []
     },
     {
       "name": "mark_made",
+      "docs": [
+        "Introer marks the intro made, within `WORK_WINDOW` of accepting."
+      ],
       "discriminator": [
         138,
         172,
@@ -953,53 +951,6 @@
       ]
     },
     {
-      "name": "set_cap",
-      "discriminator": [
-        209,
-        207,
-        121,
-        129,
-        115,
-        39,
-        220,
-        4
-      ],
-      "accounts": [
-        {
-          "name": "admin",
-          "signer": true,
-          "relations": [
-            "config"
-          ]
-        },
-        {
-          "name": "config",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  99,
-                  111,
-                  110,
-                  102,
-                  105,
-                  103
-                ]
-              }
-            ]
-          }
-        }
-      ],
-      "args": [
-        {
-          "name": "cap_total",
-          "type": "u64"
-        }
-      ]
-    },
-    {
       "name": "set_paused",
       "discriminator": [
         91,
@@ -1110,7 +1061,7 @@
     {
       "name": "withdraw",
       "docs": [
-        "Requester takes back an open request."
+        "Requester takes back an open request, once `WITHDRAW_DELAY` passed."
       ],
       "discriminator": [
         183,
@@ -1417,8 +1368,8 @@
     },
     {
       "code": 6006,
-      "name": "OverCap",
-      "msg": "Escrow cap reached"
+      "name": "SelfBid",
+      "msg": "Introers can't bid on themselves"
     },
     {
       "code": 6007,
@@ -1452,11 +1403,21 @@
     },
     {
       "code": 6013,
+      "name": "TooEarly",
+      "msg": "Too early to withdraw"
+    },
+    {
+      "code": 6014,
+      "name": "WorkExpired",
+      "msg": "Work window has passed"
+    },
+    {
+      "code": 6015,
       "name": "NotExpired",
       "msg": "Not expired yet"
     },
     {
-      "code": 6014,
+      "code": 6016,
       "name": "Overflow",
       "msg": "Math overflow"
     }
@@ -1512,13 +1473,6 @@
             "type": "bool"
           },
           {
-            "name": "cap_total",
-            "docs": [
-              "Max lamports held across all requests."
-            ],
-            "type": "u64"
-          },
-          {
             "name": "total_held",
             "docs": [
               "Sum of the bids of all live requests."
@@ -1548,7 +1502,8 @@
       "name": "Directory",
       "docs": [
         "Ring of recently registered introer wallets, for clients that can't",
-        "list program accounts."
+        "list program accounts. Anyone can push old entries out by registering",
+        "new wallets; clients should not rely on it alone."
       ],
       "type": {
         "kind": "struct",
@@ -1558,6 +1513,10 @@
             "docs": [
               "Next slot to write."
             ],
+            "type": "u8"
+          },
+          {
+            "name": "bump",
             "type": "u8"
           },
           {
@@ -1603,6 +1562,9 @@
           },
           {
             "name": "open_count",
+            "docs": [
+              "Number of used entries at the front of `open`."
+            ],
             "type": "u8"
           },
           {
@@ -1627,6 +1589,22 @@
               "array": [
                 "u8",
                 64
+              ]
+            }
+          },
+          {
+            "name": "open",
+            "docs": [
+              "Open requests; entries past `open_count` are zero."
+            ],
+            "type": {
+              "array": [
+                {
+                  "defined": {
+                    "name": "OpenSlot"
+                  }
+                },
+                5
               ]
             }
           }
@@ -1674,6 +1652,25 @@
           {
             "name": "made_at",
             "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OpenSlot",
+      "docs": [
+        "One open (not yet accepted) request of an introer."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "id",
+            "type": "u64"
+          },
+          {
+            "name": "bid",
+            "type": "u64"
           }
         ]
       }

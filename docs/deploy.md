@@ -6,7 +6,7 @@ The program keypair lives at `~/.config/intro-bot/intro_escrow-keypair.json`, ne
 ## Plan
 
 1. A hot "deployer" key deploys and runs `init_config` (it becomes admin).
-2. Admin moves to the Ledger (admin can only pause bids and set the cap).
+2. Admin moves to the Ledger (admin can only pause new bids).
 3. Upgrade authority moves to the Ledger.
 4. After the checklist passes, the program is made immutable.
 
@@ -34,9 +34,8 @@ solana program deploy target/deploy/intro_escrow.so \
   --with-compute-unit-price 10000
 ```
 
-3. Run `init_config(cap_total)` signed by the deployer key, e.g. with the Anchor TS
-   client and `idl/intro_escrow.json`. It creates `Config` and `Directory`. Start with a
-   small cap (for example 50 SOL = `50_000_000_000`).
+3. Run `init_config()` signed by the deployer key, e.g. with the Anchor TS client and
+   `idl/intro_escrow.json`. It creates `Config` and `Directory`.
 
 4. `set_admin(<LEDGER>)`, signed by the deployer. Check the `Config` bytes
    (`solana account <config PDA>`): admin at offset 8 is the Ledger.
@@ -59,7 +58,7 @@ If a deploy fails midway, `solana program show --buffers` lists the buffer; clos
 
 - [ ] Deployed code matches the reviewed commit: `solana-verify` or
       `solana program dump <id> out.so` and compare hash with `target/deploy/intro_escrow.so`.
-- [ ] `Config` exists: admin = Ledger, `paused = false`, cap set. `Directory` exists.
+- [ ] `Config` exists: admin = Ledger, `paused = false`. `Directory` exists.
 - [ ] Ledger can sign `set_paused` (test pause and unpause once).
 - [ ] One full real job on mainnet with a small bid: register, bid, accept, made, confirm.
       Introer got the bid, requester got the rent back, `total_held` back to 0.
@@ -68,20 +67,20 @@ If a deploy fails midway, `solana program show --buffers` lists the buffer; clos
 - [ ] IDL in repo matches the deployed build.
 - [ ] Everyone agrees: no more code changes are possible after `--final`.
 
-## Cost estimate (from the built .so, 329,688 bytes)
+## Cost estimate (from the built .so, 330,720 bytes)
 
 Rent = `(128 + bytes) × 6,960` lamports (same as `solana rent <bytes>`).
 
 | Item | Bytes | SOL | Kept? |
 | --- | --- | --- | --- |
-| ProgramData (45 + .so, `--max-len` = .so size) | 329,733 | 2.2958 | locked forever once immutable |
+| ProgramData (45 + .so, `--max-len` = .so size) | 330,765 | 2.3030 | locked forever once immutable |
 | Program account | 36 | 0.0011 | locked |
-| Buffer during deploy (37 + .so) | 329,725 | 2.2958 | returned after deploy |
+| Buffer during deploy (37 + .so) | 330,757 | 2.3030 | returned after deploy |
 | Deploy tx fees (~340 writes × 5,000 + priority) | | ~0.002–0.01 | spent |
-| Config account | 58 | 0.0013 | locked |
-| Directory account | 1,033 | 0.0081 | locked |
-| Each introer (paid by introer) | 150 | 0.0019 | stays |
+| Config account | 50 | 0.0012 | locked |
+| Directory account | 1,034 | 0.0081 | locked |
+| Each introer (paid by introer) | 230 | 0.0025 | stays |
 | Each request (paid by requester) | 210 | 0.0024 | returned to requester on settle |
 
-Net cost: about **2.31 SOL**. Have about **4.7 SOL** in the deployer key during deploy, since
+Net cost: about **2.32 SOL**. Have about **4.7 SOL** in the deployer key during deploy, since
 the buffer is funded before it is returned.

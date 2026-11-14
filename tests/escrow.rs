@@ -3,16 +3,14 @@
 
 use anchor_lang::{
     prelude::Pubkey,
-    solana_program::{
-        bpf_loader_upgradeable,
-        instruction::{AccountMeta, Instruction},
-    },
+    solana_program::{bpf_loader_upgradeable, instruction::Instruction},
     AccountDeserialize, InstructionData, ToAccountMetas,
 };
 use intro_escrow::{
-    accounts as acc, instruction as ix, Config, Directory, Introer, Request, CONFIRM_WINDOW,
-    DIRECTORY_LEN, LAMPORTS_PER_SOL as SOL, MAX_BID, MAX_OFFER, MAX_OPEN, MAX_TARGET, MAX_TELEGRAM,
-    MIN_BID_FLOOR, STATUS_ACCEPTED, STATUS_MADE, STATUS_OPEN, WORK_WINDOW,
+    accounts as acc, instruction as ix, Config, Directory, Introer, OpenSlot, Request,
+    CONFIRM_WINDOW, DIRECTORY_LEN, LAMPORTS_PER_SOL as SOL, MAX_BID, MAX_OFFER, MAX_OPEN,
+    MAX_TARGET, MAX_TELEGRAM, MIN_BID_FLOOR, STATUS_ACCEPTED, STATUS_MADE, STATUS_OPEN,
+    WITHDRAW_DELAY, WORK_WINDOW,
 };
 use litesvm::LiteSVM;
 use solana_clock::Clock;
@@ -21,7 +19,6 @@ use solana_signer::Signer;
 use solana_transaction::Transaction;
 
 const PROGRAM: &str = "../target/deploy/intro_escrow.so";
-const CAP: u64 = 1_000 * SOL;
 const FEE: u64 = 5_000;
 /// Half the default per-instruction budget of 200k CU.
 const CU_LIMIT: u64 = 100_000;
@@ -121,7 +118,7 @@ fn fails_bid(result: Result<Pubkey, String>, code: &str) {
     fails(result.map(|_| ()), code);
 }
 
-fn init_config_ix(authority: Pubkey, cap_total: u64) -> Instruction {
+fn init_config_ix(authority: Pubkey) -> Instruction {
     build(
         acc::InitConfig {
             authority,
@@ -131,7 +128,7 @@ fn init_config_ix(authority: Pubkey, cap_total: u64) -> Instruction {
             program_data: program_data(),
             system_program: anchor_lang::system_program::ID,
         },
-        ix::InitConfig { cap_total },
+        ix::InitConfig {},
     )
 }
 
@@ -159,17 +156,13 @@ fn funded(svm: &mut LiteSVM, sol: u64) -> Keypair {
 
 impl T {
     fn new() -> Self {
-        Self::with_cap(CAP)
+        Self::with_admin(Keypair::new())
     }
 
-    fn with_cap(cap: u64) -> Self {
-        Self::with_admin(Keypair::new(), cap)
-    }
-
-    fn with_admin(admin: Keypair, cap: u64) -> Self {
+    fn with_admin(admin: Keypair) -> Self {
         let mut svm = chain(Some(admin.pubkey()));
         svm.airdrop(&admin.pubkey(), 10 * SOL).unwrap();
-        send(&mut svm, &admin, init_config_ix(admin.pubkey(), cap)).unwrap();
+        send(&mut svm, &admin, init_config_ix(admin.pubkey())).unwrap();
         Self {
             svm,
             admin,
@@ -237,6 +230,36 @@ impl T {
             sum += request.bid;
         }
         assert_eq!(self.config().total_held, sum, "total_held");
+        // Each introer's open list matches its open requests.
+        let mut introers: Vec<Pubkey> = vec![];
+        for key in &self.live {
+            let request = self.request(key);
+            if !introers.contains(&request.introer) {
+                introers.push(request.introer);
+            }
+        }
+        for introer in introers {
+            let data = self.svm.get_account(&introer).unwrap().data;
+            let state = Introer::try_deserialize(&mut data.as_slice()).unwrap();
+            let count = usize::from(state.open_count);
+            let mut listed: Vec<OpenSlot> = state.open[..count].to_vec();
+            assert!(state.open[count..]
+                .iter()
+                .all(|s| *s == OpenSlot::default()));
+            let mut open: Vec<OpenSlot> = self
+                .live
+                .iter()
+                .map(|k| self.request(k))
+                .filter(|r| r.introer == introer && r.status == STATUS_OPEN)
+                .map(|r| OpenSlot {
+                    id: r.id,
+                    bid: r.bid,
+                })
+                .collect();
+            listed.sort_by_key(|s| s.id);
+            open.sort_by_key(|s| s.id);
+            assert_eq!(listed, open, "open slots");
+        }
     }
 
     fn run(&mut self, payer: &Keypair, ix: Instruction) -> Result<(), String> {
@@ -262,14 +285,13 @@ impl T {
         wallet: &Pubkey,
         amount: u64,
         lowest: Option<(Pubkey, Pubkey)>,
-        others: &[Pubkey],
     ) -> Instruction {
         let introer = introer_key(wallet);
         let next = self
             .svm
             .get_account(&introer)
             .map_or(0, |_| self.introer(wallet).next_id);
-        let mut ix = build(
+        build(
             acc::Bid {
                 requester: *requester,
                 config: self.config,
@@ -284,10 +306,7 @@ impl T {
                 telegram: pad("@alice"),
                 amount,
             },
-        );
-        ix.accounts
-            .extend(others.iter().map(|k| AccountMeta::new_readonly(*k, false)));
-        ix
+        )
     }
 
     fn try_bid(
@@ -296,10 +315,9 @@ impl T {
         wallet: &Pubkey,
         amount: u64,
         lowest: Option<(Pubkey, Pubkey)>,
-        others: &[Pubkey],
     ) -> Result<Pubkey, String> {
         let key = request_key(&introer_key(wallet), self.introer(wallet).next_id);
-        let ix = self.bid_ix(&requester.pubkey(), wallet, amount, lowest, others);
+        let ix = self.bid_ix(&requester.pubkey(), wallet, amount, lowest);
         send(&mut self.svm, requester, ix)?;
         self.live.push(key);
         self.check_books();
@@ -307,7 +325,7 @@ impl T {
     }
 
     fn bid(&mut self, requester: &Keypair, wallet: &Pubkey, amount: u64) -> Pubkey {
-        self.try_bid(requester, wallet, amount, None, &[]).unwrap()
+        self.try_bid(requester, wallet, amount, None).unwrap()
     }
 
     fn step_ix(accept: bool, wallet: Pubkey, request: Pubkey) -> Instruction {
@@ -349,6 +367,8 @@ impl T {
         wallet: &Pubkey,
         request: Pubkey,
     ) -> Result<(), String> {
+        // Past the withdraw delay; `withdraw_waits_a_day` checks the delay.
+        self.warp(WITHDRAW_DELAY);
         let ix = self.withdraw_ix(requester.pubkey(), wallet, request);
         self.run(requester, ix)
     }
@@ -495,7 +515,6 @@ fn init_config_sets_upgrade_authority_as_admin() {
     let t = T::new();
     let config = t.config();
     assert_eq!(config.admin, t.admin.pubkey());
-    assert_eq!(config.cap_total, CAP);
     assert_eq!(config.total_held, 0);
     assert!(!config.paused);
     let directory = t.directory();
@@ -509,7 +528,7 @@ fn init_config_rejects_non_upgrade_authority() {
     let mut svm = chain(Some(authority.pubkey()));
     let other = funded(&mut svm, 5);
     fails(
-        send(&mut svm, &other, init_config_ix(other.pubkey(), CAP)),
+        send(&mut svm, &other, init_config_ix(other.pubkey())),
         "NotUpgradeAuthority",
     );
     assert!(svm.get_account(&config_key()).is_none());
@@ -520,7 +539,7 @@ fn init_config_rejects_everyone_when_program_is_immutable() {
     let mut svm = chain(None);
     let other = funded(&mut svm, 5);
     fails(
-        send(&mut svm, &other, init_config_ix(other.pubkey(), CAP)),
+        send(&mut svm, &other, init_config_ix(other.pubkey())),
         "NotUpgradeAuthority",
     );
 }
@@ -535,7 +554,7 @@ fn init_config_rejects_fake_program_data() {
     let mut account = svm.get_account(&program_data()).unwrap();
     account.data[13..45].copy_from_slice(attacker.pubkey().as_ref());
     svm.set_account(fake, account).unwrap();
-    let mut ix = init_config_ix(attacker.pubkey(), CAP);
+    let mut ix = init_config_ix(attacker.pubkey());
     ix.accounts[4].pubkey = fake;
     fails(send(&mut svm, &attacker, ix), "NotUpgradeAuthority");
 }
@@ -544,8 +563,8 @@ fn init_config_rejects_fake_program_data() {
 fn init_config_runs_only_once() {
     let mut t = T::new();
     let admin = t.admin.insecure_clone();
-    assert!(send(&mut t.svm, &admin, init_config_ix(admin.pubkey(), 1)).is_err());
-    assert_eq!(t.config().cap_total, CAP);
+    assert!(send(&mut t.svm, &admin, init_config_ix(admin.pubkey())).is_err());
+    assert_eq!(t.config().admin, admin.pubkey());
 }
 
 #[test]
@@ -557,7 +576,6 @@ fn admin_setters_work_and_reject_others() {
 
     for ix in [
         t.admin_ix(stranger.pubkey(), ix::SetPaused { paused: true }),
-        t.admin_ix(stranger.pubkey(), ix::SetCap { cap_total: 1 }),
         t.admin_ix(
             stranger.pubkey(),
             ix::SetAdmin {
@@ -569,7 +587,6 @@ fn admin_setters_work_and_reject_others() {
     }
 
     for ix in [
-        t.admin_ix(admin.pubkey(), ix::SetCap { cap_total: 7 }),
         t.admin_ix(admin.pubkey(), ix::SetPaused { paused: true }),
         t.admin_ix(
             admin.pubkey(),
@@ -581,7 +598,6 @@ fn admin_setters_work_and_reject_others() {
         t.run(&admin, ix).unwrap();
     }
     let config = t.config();
-    assert_eq!(config.cap_total, 7);
     assert!(config.paused);
     assert_eq!(config.admin, new_admin.pubkey());
 
@@ -602,20 +618,6 @@ fn admin_setters_keep_working_after_program_is_made_immutable() {
     t.svm.set_account(key, account).unwrap();
     t.set_paused(true);
     assert!(t.config().paused);
-}
-
-#[test]
-fn lowering_cap_below_held_only_blocks_new_bids() {
-    let mut t = T::new();
-    let (wallet, requester, request) = t.made_request(2 * SOL);
-    let admin = t.admin.insecure_clone();
-    let ix = t.admin_ix(admin.pubkey(), ix::SetCap { cap_total: 0 });
-    t.run(&admin, ix).unwrap();
-    fails_bid(
-        t.try_bid(&requester, &wallet.pubkey(), SOL, None, &[]),
-        "OverCap",
-    );
-    t.confirm(&requester, wallet.pubkey(), request).unwrap();
 }
 
 // ---------- introer + directory ----------
@@ -659,29 +661,6 @@ fn directory_wraps_around() {
         };
         assert_eq!(*wallet, expected, "slot {slot}");
     }
-}
-
-/// On chain a wallet registers only once (the introer PDA can't be
-/// re-created), so the duplicate skip is checked on the ring itself.
-#[test]
-fn directory_skips_listed_wallets() {
-    let mut directory = Directory {
-        head: 0,
-        wallets: [Pubkey::default(); DIRECTORY_LEN],
-    };
-    let a = Pubkey::new_unique();
-    directory.add(a);
-    directory.add(a);
-    assert_eq!(directory.head, 1);
-    assert_eq!(directory.wallets.iter().filter(|w| **w == a).count(), 1);
-    for _ in 0..DIRECTORY_LEN - 1 {
-        directory.add(Pubkey::new_unique());
-    }
-    assert_eq!(directory.head, 0);
-    // Still listed at slot 0: no duplicate, head does not move.
-    directory.add(a);
-    assert_eq!(directory.head, 0);
-    assert_eq!(directory.wallets[0], a);
 }
 
 #[test]
@@ -813,15 +792,12 @@ fn bid_enforces_min_max_and_text() {
     let wallet = t.introer_with(SOL);
     let requester = t.user(200);
     let w = wallet.pubkey();
-    fails_bid(t.try_bid(&requester, &w, SOL - 1, None, &[]), "BidTooLow");
-    fails_bid(
-        t.try_bid(&requester, &w, MAX_BID + 1, None, &[]),
-        "BidTooHigh",
-    );
-    t.try_bid(&requester, &w, MAX_BID, None, &[]).unwrap();
+    fails_bid(t.try_bid(&requester, &w, SOL - 1, None), "BidTooLow");
+    fails_bid(t.try_bid(&requester, &w, MAX_BID + 1, None), "BidTooHigh");
+    t.try_bid(&requester, &w, MAX_BID, None).unwrap();
 
     let text_bid = |t: &T, target: [u8; MAX_TARGET], telegram: [u8; MAX_TELEGRAM]| {
-        let mut ix = t.bid_ix(&requester.pubkey(), &w, SOL, None, &[]);
+        let mut ix = t.bid_ix(&requester.pubkey(), &w, SOL, None);
         ix.data = ix::Bid {
             target,
             telegram,
@@ -850,27 +826,11 @@ fn bid_enforces_min_max_and_text() {
 }
 
 #[test]
-fn bid_respects_cap_total() {
-    let mut t = T::with_cap(3 * SOL);
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let requester = t.user(20);
-    let w = wallet.pubkey();
-    t.bid(&requester, &w, 2 * SOL);
-    fails_bid(t.try_bid(&requester, &w, SOL + 1, None, &[]), "OverCap");
-    t.bid(&requester, &w, SOL);
-    assert_eq!(t.config().total_held, 3 * SOL);
-    fails_bid(
-        t.try_bid(&requester, &w, MIN_BID_FLOOR, None, &[]),
-        "OverCap",
-    );
-}
-
-#[test]
 fn bid_to_unknown_introer_fails() {
     let mut t = T::new();
     let requester = t.user(5);
     let nobody = Pubkey::new_unique();
-    let ix = t.bid_ix(&requester.pubkey(), &nobody, SOL, None, &[]);
+    let ix = t.bid_ix(&requester.pubkey(), &nobody, SOL, None);
     assert!(t.run(&requester, ix).is_err());
 }
 
@@ -879,7 +839,7 @@ fn bid_with_wrong_request_id_fails() {
     let mut t = T::new();
     let wallet = t.introer_with(MIN_BID_FLOOR);
     let requester = t.user(5);
-    let mut ix = t.bid_ix(&requester.pubkey(), &wallet.pubkey(), SOL, None, &[]);
+    let mut ix = t.bid_ix(&requester.pubkey(), &wallet.pubkey(), SOL, None);
     ix.accounts[3].pubkey = request_key(&introer_key(&wallet.pubkey()), 7);
     assert!(t.run(&requester, ix).is_err());
 }
@@ -902,7 +862,7 @@ fn paused_blocks_bids_but_not_payouts_or_refunds() {
     t.made(&wallet, unconfirmed).unwrap();
     t.set_paused(true);
 
-    fails_bid(t.try_bid(&requester, &w, SOL, None, &[]), "Paused");
+    fails_bid(t.try_bid(&requester, &w, SOL, None), "Paused");
     t.confirm(&requester, w, to_confirm).unwrap();
     t.withdraw(&requester, &w, to_withdraw).unwrap();
     t.decline(&wallet, to_decline, r).unwrap();
@@ -932,53 +892,31 @@ fn full_queue(t: &mut T) -> (Keypair, Vec<(Keypair, Pubkey)>) {
     (wallet, open)
 }
 
-fn all_but(open: &[(Keypair, Pubkey)], skip: Pubkey) -> Vec<Pubkey> {
-    open.iter().map(|o| o.1).filter(|k| *k != skip).collect()
-}
-
 #[test]
 fn full_queue_needs_the_lowest_request() {
     let mut t = T::new();
     let (wallet, open) = full_queue(&mut t);
     let w = wallet.pubkey();
     let newcomer = t.user(10);
-    fails_bid(t.try_bid(&newcomer, &w, 9 * SOL, None, &[]), "QueueFull");
-    let others = all_but(&open, open[1].1);
+    fails_bid(t.try_bid(&newcomer, &w, 9 * SOL, None), "QueueFull");
     let lowest = Some((open[1].1, open[1].0.pubkey()));
-
-    // Not beating the lowest bid fails, ties included.
-    fails_bid(t.try_bid(&newcomer, &w, SOL, lowest, &others), "BidTooLow");
+    // Must beat the lowest by 10%.
+    fails_bid(t.try_bid(&newcomer, &w, SOL, lowest), "BidTooLow");
+    fails_bid(
+        t.try_bid(&newcomer, &w, SOL + SOL / 10 - 1, lowest),
+        "BidTooLow",
+    );
     // Passing a request that is not the lowest fails.
     let not_lowest = Some((open[0].1, open[0].0.pubkey()));
-    let rest = all_but(&open, open[0].1);
-    fails_bid(
-        t.try_bid(&newcomer, &w, 9 * SOL, not_lowest, &rest),
-        "NotLowest",
-    );
-    // Missing, duplicated or self-including others fail.
-    fails_bid(
-        t.try_bid(&newcomer, &w, 9 * SOL, lowest, &others[..3]),
-        "WrongRequest",
-    );
-    let dup = [others[0], others[0], others[1], others[2]];
-    fails_bid(
-        t.try_bid(&newcomer, &w, 9 * SOL, lowest, &dup),
-        "WrongRequest",
-    );
-    let with_lowest = [open[1].1, others[0], others[1], others[2]];
-    fails_bid(
-        t.try_bid(&newcomer, &w, 9 * SOL, lowest, &with_lowest),
-        "WrongRequest",
-    );
+    fails_bid(t.try_bid(&newcomer, &w, 9 * SOL, not_lowest), "NotLowest");
     // The refund must go to the stored requester.
     let swapped = Some((open[1].1, newcomer.pubkey()));
-    fails_bid(
-        t.try_bid(&newcomer, &w, 9 * SOL, swapped, &others),
-        "WrongRequester",
-    );
+    fails_bid(t.try_bid(&newcomer, &w, 9 * SOL, swapped), "WrongRequester");
     // Nothing moved.
     assert_eq!(t.introer(&w).open_count, MAX_OPEN);
     assert_eq!(t.config().total_held, 15 * SOL);
+    // Exactly +10% is enough.
+    t.try_bid(&newcomer, &w, SOL + SOL / 10, lowest).unwrap();
 }
 
 #[test]
@@ -989,24 +927,21 @@ fn outbid_refunds_and_closes_the_lowest() {
     let (loser, lowest) = (&open[1].0, open[1].1);
     let loser_before = t.lamports(&loser.pubkey());
     let lowest_lamports = t.lamports(&lowest);
-    let others = all_but(&open, lowest);
     let newcomer = t.user(10);
     let request = t
-        .try_bid(
-            &newcomer,
-            &w,
-            SOL + 1,
-            Some((lowest, loser.pubkey())),
-            &others,
-        )
+        .try_bid(&newcomer, &w, 2 * SOL, Some((lowest, loser.pubkey())))
         .unwrap();
     assert!(t.gone(&lowest));
     assert_eq!(t.lamports(&loser.pubkey()), loser_before + lowest_lamports);
-    assert_eq!(t.request(&request).bid, SOL + 1);
+    assert_eq!(t.request(&request).bid, 2 * SOL);
     assert_eq!(t.introer(&w).open_count, MAX_OPEN);
-    assert_eq!(t.config().total_held, 14 * SOL + SOL + 1);
+    assert_eq!(t.config().total_held, 16 * SOL);
+    // The next lowest is now the oldest 2 SOL bid (a tie goes to the oldest).
+    let next = t.introer(&w).lowest_open().unwrap();
+    assert_eq!(next.id, t.request(&open[0].1).id);
     // The refunded request cannot be settled again.
-    fails(t.withdraw(loser, &w, lowest), "AccountNotInitialized");
+    let ix = t.withdraw_ix(loser.pubkey(), &w, lowest);
+    fails(t.run(loser, ix), "AccountNotInitialized");
 }
 
 #[test]
@@ -1019,40 +954,22 @@ fn outbid_cannot_take_accepted_or_foreign_requests() {
     let foreign = t.bid(&other_requester, &other_wallet.pubkey(), MIN_BID_FLOOR);
     let newcomer = t.user(30);
     // Another introer's request as the lowest.
-    let others = all_but(&open, open[1].1);
     fails_bid(
         t.try_bid(
             &newcomer,
             &w,
             9 * SOL,
             Some((foreign, other_requester.pubkey())),
-            &others,
         ),
         "WrongRequest",
     );
-    // Another introer's request smuggled in as an "other".
-    let lowest = Some((open[1].1, open[1].0.pubkey()));
-    let smuggled = [open[0].1, open[2].1, open[3].1, foreign];
-    fails_bid(
-        t.try_bid(&newcomer, &w, 9 * SOL, lowest, &smuggled),
-        "WrongRequest",
-    );
-    // Accept the lowest, then fill the slot again: the accepted request can
-    // no longer be passed as the lowest, nor as an "other".
+    // Accept the lowest, then fill the slot again: the accepted request is no
+    // longer listed, so it can't be passed as the lowest.
     t.accept(&wallet, open[1].1).unwrap();
-    let filler = t.try_bid(&newcomer, &w, 2 * SOL, None, &[]).unwrap();
-    let mut queue = all_but(&open, open[1].1);
-    queue.push(filler);
-    fails_bid(
-        t.try_bid(&newcomer, &w, 9 * SOL, lowest, &queue[1..]),
-        "BadStatus",
-    );
-    let first = Some((open[0].1, open[0].0.pubkey()));
-    let with_accepted = [open[1].1, open[2].1, open[3].1, open[4].1];
-    fails_bid(
-        t.try_bid(&newcomer, &w, 9 * SOL, first, &with_accepted),
-        "WrongRequest",
-    );
+    t.try_bid(&newcomer, &w, 2 * SOL, None).unwrap();
+    let accepted = Some((open[1].1, open[1].0.pubkey()));
+    fails_bid(t.try_bid(&newcomer, &w, 9 * SOL, accepted), "NotLowest");
+    assert_eq!(t.request(&open[1].1).status, STATUS_ACCEPTED);
 }
 
 #[test]
@@ -1068,13 +985,7 @@ fn requester_can_outbid_their_own_lowest_request() {
     let before = t.lamports(&requester.pubkey());
     let refund = t.lamports(&open[0]);
     let request = t
-        .try_bid(
-            &requester,
-            &w,
-            6 * SOL,
-            Some((open[0], requester.pubkey())),
-            &open[1..],
-        )
+        .try_bid(&requester, &w, 6 * SOL, Some((open[0], requester.pubkey())))
         .unwrap();
     assert!(t.gone(&open[0]));
     let rent = t.lamports(&request) - 6 * SOL;
@@ -1082,6 +993,13 @@ fn requester_can_outbid_their_own_lowest_request() {
         t.lamports(&requester.pubkey()),
         before + refund - 6 * SOL - rent - FEE
     );
+}
+
+#[test]
+fn introer_cannot_bid_on_themselves() {
+    let mut t = T::new();
+    let wallet = t.introer_with(MIN_BID_FLOOR);
+    fails_bid(t.try_bid(&wallet, &wallet.pubkey(), SOL, None), "SelfBid");
 }
 
 #[test]
@@ -1096,7 +1014,6 @@ fn lowest_is_ignored_when_queue_has_room() {
         &wallet.pubkey(),
         2 * SOL,
         Some((request, first.pubkey())),
-        &[],
     )
     .unwrap();
     assert_eq!(t.request(&request).status, STATUS_OPEN);
@@ -1125,6 +1042,40 @@ fn withdraw_only_open_and_only_requester() {
     fails(t.withdraw(&requester, &w, request), "BadStatus");
     t.made(&wallet, request).unwrap();
     fails(t.withdraw(&requester, &w, request), "BadStatus");
+}
+
+#[test]
+fn withdraw_waits_a_day() {
+    let mut t = T::new();
+    let wallet = t.introer_with(MIN_BID_FLOOR);
+    let w = wallet.pubkey();
+    let requester = t.user(10);
+    let request = t.bid(&requester, &w, SOL);
+    t.warp(WITHDRAW_DELAY - 1);
+    let ix = t.withdraw_ix(requester.pubkey(), &w, request);
+    fails(t.run(&requester, ix), "TooEarly");
+    t.warp(1);
+    let ix = t.withdraw_ix(requester.pubkey(), &w, request);
+    t.run(&requester, ix).unwrap();
+    // Decline stays instant.
+    let request = t.bid(&requester, &w, SOL);
+    t.decline(&wallet, request, requester.pubkey()).unwrap();
+}
+
+#[test]
+fn mark_made_only_within_the_work_window() {
+    let mut t = T::new();
+    let wallet = t.introer_with(MIN_BID_FLOOR);
+    let requester = t.user(10);
+    let request = t.bid(&requester, &wallet.pubkey(), SOL);
+    t.accept(&wallet, request).unwrap();
+    t.warp(WORK_WINDOW + 1);
+    fails(t.made(&wallet, request), "WorkExpired");
+    // Exactly at the deadline still works.
+    let request = t.bid(&requester, &wallet.pubkey(), SOL);
+    t.accept(&wallet, request).unwrap();
+    t.warp(WORK_WINDOW);
+    t.made(&wallet, request).unwrap();
 }
 
 #[test]
@@ -1414,14 +1365,14 @@ fn account_layouts_have_fixed_offsets() {
     t.accept(&wallet, request).unwrap();
 
     let data = t.svm.get_account(&config_key()).unwrap().data;
-    assert_eq!(data.len(), 58);
+    assert_eq!(data.len(), 50);
     assert_eq!(&data[8..40], t.admin.pubkey().as_ref());
     assert_eq!(data[40], 0);
-    assert_eq!(u64_at(&data, 41), CAP);
-    assert_eq!(u64_at(&data, 49), 2 * SOL);
+    assert_eq!(u64_at(&data, 41), 2 * SOL);
+    assert_eq!(data[49], t.config().bump);
 
     let data = t.svm.get_account(&introer_key(&w)).unwrap().data;
-    assert_eq!(data.len(), 150);
+    assert_eq!(data.len(), 230);
     assert_eq!(&data[8..40], w.as_ref());
     assert_eq!(u64_at(&data, 40), MIN_BID_FLOOR);
     assert_eq!(u64_at(&data, 48), 1); // next_id
@@ -1432,6 +1383,14 @@ fn account_layouts_have_fixed_offsets() {
     assert_eq!(data[77], t.introer(&w).bump);
     assert_eq!(&data[78..86], b"BP26-001");
     assert_eq!(&data[86..150], &pad::<64>("Solana founders in Lisbon"));
+    // open: 5 × (id u64, bid u64) from 150. Request 0 was accepted, 1 is open.
+    let request_1 = t.bid(&requester, &w, 3 * SOL);
+    let data = t.svm.get_account(&introer_key(&w)).unwrap().data;
+    assert_eq!(data[76], 1);
+    assert_eq!(u64_at(&data, 150), 1);
+    assert_eq!(u64_at(&data, 158), 3 * SOL);
+    assert!(data[166..230].iter().all(|b| *b == 0));
+    assert_eq!(t.request(&request_1).id, 1);
 
     let data = t.svm.get_account(&request).unwrap().data;
     assert_eq!(data.len(), 210);
@@ -1448,9 +1407,10 @@ fn account_layouts_have_fixed_offsets() {
     assert_eq!(&data[178..210], &pad::<32>("@alice"));
 
     let data = t.svm.get_account(&directory_key()).unwrap().data;
-    assert_eq!(data.len(), 8 + 1 + 32 * DIRECTORY_LEN);
+    assert_eq!(data.len(), 8 + 2 + 32 * DIRECTORY_LEN);
     assert_eq!(data[8], 1);
-    assert_eq!(&data[9..41], w.as_ref());
+    assert_eq!(data[9], t.directory().bump);
+    assert_eq!(&data[10..42], w.as_ref());
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -1487,7 +1447,7 @@ fn fixture(name: &str, ix: &Instruction) -> String {
 fn write_instruction_fixtures() {
     let key = |n: u8| Keypair::new_from_array([n; 32]);
     let (admin, wallet, requester) = (key(1), key(2), key(3));
-    let mut t = T::with_admin(admin.insecure_clone(), CAP);
+    let mut t = T::with_admin(admin.insecure_clone());
     let mut clock: Clock = t.svm.get_sysvar();
     clock.unix_timestamp = 1_790_000_000;
     t.svm.set_sysvar(&clock);
@@ -1504,7 +1464,7 @@ fn write_instruction_fixtures() {
     };
     let bid_more = |t: &mut T, sol: u64| {
         let id = t.introer(&w).next_id;
-        let ix = t.bid_ix(&r, &w, sol * SOL, None, &[]);
+        let ix = t.bid_ix(&r, &w, sol * SOL, None);
         t.live.push(req(id));
         t.run(&requester, ix).unwrap();
     };
@@ -1519,7 +1479,7 @@ fn write_instruction_fixtures() {
         },
     );
     go(&mut t, "update_introer", &wallet, ix);
-    let ix = t.bid_ix(&r, &w, SOL, None, &[]);
+    let ix = t.bid_ix(&r, &w, SOL, None);
     t.live.push(req(0));
     go(&mut t, "bid", &requester, ix);
     go(&mut t, "accept", &wallet, T::step_ix(true, w, req(0)));
@@ -1528,6 +1488,7 @@ fn write_instruction_fixtures() {
     go(&mut t, "confirm", &requester, ix);
     bid_more(&mut t, 1);
     bid_more(&mut t, 1);
+    t.warp(WITHDRAW_DELAY);
     let ix = t.withdraw_ix(r, &w, req(1));
     go(&mut t, "withdraw", &requester, ix);
     let ix = t.decline_ix(w, req(2), r);
@@ -1546,13 +1507,7 @@ fn write_instruction_fixtures() {
     for sol in 1..=5 {
         bid_more(&mut t, sol);
     }
-    let ix = t.bid_ix(
-        &r,
-        &w,
-        6 * SOL,
-        Some((req(5), r)),
-        &[req(6), req(7), req(8), req(9)],
-    );
+    let ix = t.bid_ix(&r, &w, 6 * SOL, Some((req(5), r)));
     t.live.push(req(10));
     go(&mut t, "bid_outbid", &requester, ix);
     let ix = t.admin_ix(admin.pubkey(), ix::SetPaused { paused: false });

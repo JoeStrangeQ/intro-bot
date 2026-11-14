@@ -1,19 +1,22 @@
 //! Intro Bot escrow: public intro requests with SOL bids held until the intro
 //! is confirmed. See `docs/spec.md` ("Program: intro_escrow").
 #![allow(unexpected_cfgs, reason = "anchor macros emit cfgs")]
-#![allow(clippy::needless_lifetimes, reason = "anchor accounts structs")]
 
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
+pub use solana_native_token::LAMPORTS_PER_SOL;
 
 declare_id!("GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC");
 
-pub const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
 pub const MAX_BID: u64 = 100 * LAMPORTS_PER_SOL;
 pub const MIN_BID_FLOOR: u64 = LAMPORTS_PER_SOL / 100;
 pub const MAX_OPEN: u8 = 5;
 pub const CONFIRM_WINDOW: i64 = 72 * 60 * 60;
 pub const WORK_WINDOW: i64 = 7 * 24 * 60 * 60;
+/// An open bid can be withdrawn only this long after it was placed.
+pub const WITHDRAW_DELAY: i64 = 24 * 60 * 60;
+/// An outbid must beat the lowest open bid by at least this percent.
+pub const OUTBID_PERCENT: u64 = 10;
 pub const MAX_TARGET: usize = 64;
 pub const MAX_TELEGRAM: usize = 32;
 pub const MAX_OFFER: usize = 64;
@@ -35,18 +38,18 @@ pub const DIRECTORY_LEN: usize = 32;
 pub mod intro_escrow {
     use super::*;
 
-    /// Creates the config. Only the program's upgrade authority can call it;
-    /// the signer becomes the admin.
-    pub fn init_config(ctx: Context<InitConfig>, cap_total: u64) -> Result<()> {
+    /// Creates the config and directory. Only the program's upgrade
+    /// authority can call it; the signer becomes the admin.
+    pub fn init_config(ctx: Context<InitConfig>) -> Result<()> {
         ctx.accounts.config.set_inner(Config {
             admin: ctx.accounts.authority.key(),
             paused: false,
-            cap_total,
             total_held: 0,
             bump: ctx.bumps.config,
         });
         ctx.accounts.directory.set_inner(Directory {
             head: 0,
+            bump: ctx.bumps.directory,
             wallets: [Pubkey::default(); DIRECTORY_LEN],
         });
         Ok(())
@@ -59,11 +62,6 @@ pub mod intro_escrow {
 
     pub fn set_paused(ctx: Context<AdminOnly>, paused: bool) -> Result<()> {
         ctx.accounts.config.paused = paused;
-        Ok(())
-    }
-
-    pub fn set_cap(ctx: Context<AdminOnly>, cap_total: u64) -> Result<()> {
-        ctx.accounts.config.cap_total = cap_total;
         Ok(())
     }
 
@@ -87,11 +85,12 @@ pub mod intro_escrow {
             bump: ctx.bumps.introer,
             badge_id,
             offer,
+            open: [OpenSlot::default(); MAX_OPEN as usize],
         });
         ctx.accounts.directory.add(wallet);
         emit!(IntroerRegistered {
             introer: introer.key(),
-            wallet: introer.wallet,
+            wallet,
             badge_id,
             min_bid,
         });
@@ -112,21 +111,22 @@ pub mod intro_escrow {
 
     /// Posts a request with `amount` lamports held in the request account.
     /// With `MAX_OPEN` open requests, `lowest` must be the lowest of them
-    /// (the other open ones go in remaining accounts); it is refunded.
-    pub fn bid<'info>(
-        ctx: Context<'info, Bid<'info>>,
+    /// (as tracked in `introer.open`); it is refunded and closed.
+    pub fn bid(
+        ctx: Context<Bid>,
         target: [u8; MAX_TARGET],
         telegram: [u8; MAX_TELEGRAM],
         amount: u64,
     ) -> Result<()> {
-        let accounts = ctx.accounts;
-        require!(!accounts.config.paused, EscrowError::Paused);
+        let a = ctx.accounts;
+        require!(!a.config.paused, EscrowError::Paused);
+        require_keys_neq!(a.requester.key(), a.introer.wallet, EscrowError::SelfBid);
         require!(target[0] != 0, EscrowError::BadText);
         check_text(&target)?;
         check_text(&telegram)?;
         require!(amount <= MAX_BID, EscrowError::BidTooHigh);
         require!(
-            amount >= accounts.introer.min_bid && amount >= MIN_BID_FLOOR,
+            amount >= a.introer.min_bid && amount >= MIN_BID_FLOOR,
             EscrowError::BidTooLow
         );
 
@@ -134,44 +134,37 @@ pub mod intro_escrow {
         // account the requester also appears as fails the balance check.
         system_program::transfer(
             CpiContext::new(
-                accounts.system_program.key(),
+                a.system_program.key(),
                 system_program::Transfer {
-                    from: accounts.requester.to_account_info(),
-                    to: accounts.request.to_account_info(),
+                    from: a.requester.to_account_info(),
+                    to: a.request.to_account_info(),
                 },
             ),
             amount,
         )?;
 
-        if accounts.introer.open_count >= MAX_OPEN {
+        if a.introer.open_count >= MAX_OPEN {
             evict_lowest(
-                &mut accounts.config,
-                &mut accounts.introer,
-                accounts.lowest.as_ref(),
-                accounts.lowest_requester.as_ref(),
-                ctx.remaining_accounts,
+                &mut a.config,
+                &mut a.introer,
+                a.lowest.as_ref(),
+                a.lowest_requester.as_ref(),
                 amount,
             )?;
         }
 
-        let held = accounts
+        a.config.total_held = a
             .config
             .total_held
             .checked_add(amount)
             .ok_or(EscrowError::Overflow)?;
-        require!(held <= accounts.config.cap_total, EscrowError::OverCap);
-        accounts.config.total_held = held;
-
-        let introer = &mut accounts.introer;
+        let introer = &mut a.introer;
         let id = introer.next_id;
         introer.next_id = id.checked_add(1).ok_or(EscrowError::Overflow)?;
-        introer.open_count = introer
-            .open_count
-            .checked_add(1)
-            .ok_or(EscrowError::Overflow)?;
-        accounts.request.set_inner(Request {
+        introer.push_open(id, amount)?;
+        a.request.set_inner(Request {
             introer: introer.key(),
-            requester: accounts.requester.key(),
+            requester: a.requester.key(),
             id,
             bid: amount,
             status: STATUS_OPEN,
@@ -183,18 +176,24 @@ pub mod intro_escrow {
             telegram,
         });
         emit!(BidPlaced {
-            request: accounts.request.key(),
+            request: a.request.key(),
             introer: introer.key(),
-            requester: accounts.requester.key(),
+            requester: a.requester.key(),
             bid: amount,
         });
         Ok(())
     }
 
-    /// Requester takes back an open request.
+    /// Requester takes back an open request, once `WITHDRAW_DELAY` passed.
     pub fn withdraw(ctx: Context<Withdraw>) -> Result<()> {
         let a = ctx.accounts;
         require!(a.request.status == STATUS_OPEN, EscrowError::BadStatus);
+        let ready = a
+            .request
+            .created_at
+            .checked_add(WITHDRAW_DELAY)
+            .ok_or(EscrowError::Overflow)?;
+        require!(Clock::get()?.unix_timestamp >= ready, EscrowError::TooEarly);
         close_open(&mut a.config, &mut a.introer, &a.request)?;
         emit!(Withdrawn {
             request: a.request.key()
@@ -206,11 +205,7 @@ pub mod intro_escrow {
     pub fn accept(ctx: Context<IntroerStep>) -> Result<()> {
         let a = ctx.accounts;
         require!(a.request.status == STATUS_OPEN, EscrowError::BadStatus);
-        a.introer.open_count = a
-            .introer
-            .open_count
-            .checked_sub(1)
-            .ok_or(EscrowError::Overflow)?;
+        a.introer.remove_open(a.request.id)?;
         a.request.status = STATUS_ACCEPTED;
         a.request.accepted_at = Clock::get()?.unix_timestamp;
         emit!(Accepted {
@@ -231,10 +226,17 @@ pub mod intro_escrow {
         Ok(())
     }
 
+    /// Introer marks the intro made, within `WORK_WINDOW` of accepting.
     pub fn mark_made(ctx: Context<IntroerStep>) -> Result<()> {
         let a = ctx.accounts;
         require!(a.request.status == STATUS_ACCEPTED, EscrowError::BadStatus);
         let now = Clock::get()?.unix_timestamp;
+        let deadline = a
+            .request
+            .accepted_at
+            .checked_add(WORK_WINDOW)
+            .ok_or(EscrowError::Overflow)?;
+        require!(now <= deadline, EscrowError::WorkExpired);
         a.request.status = STATUS_MADE;
         a.request.made_at = now;
         emit!(Made {
@@ -251,13 +253,28 @@ pub mod intro_escrow {
             a.request.status == STATUS_MADE || a.request.status == STATUS_ACCEPTED,
             EscrowError::BadStatus
         );
-        pay_out(
-            &mut a.config,
-            &mut a.introer,
-            &a.request,
-            &a.wallet.to_account_info(),
-            a.requester.key(),
-        )
+        let bid = a.request.bid;
+        release_held(&mut a.config, bid)?;
+        a.request.sub_lamports(bid)?;
+        a.wallet.add_lamports(bid)?;
+        let introer = &mut a.introer;
+        introer.jobs_done = introer
+            .jobs_done
+            .checked_add(1)
+            .ok_or(EscrowError::Overflow)?;
+        introer.earned = introer
+            .earned
+            .checked_add(bid)
+            .ok_or(EscrowError::Overflow)?;
+        emit!(Receipt {
+            request: a.request.key(),
+            introer: introer.key(),
+            requester: a.requester.key(),
+            bid,
+            jobs_done: introer.jobs_done,
+            earned: introer.earned,
+        });
+        Ok(())
     }
 
     /// Anyone: refunds a made request the requester never confirmed. The
@@ -326,56 +343,7 @@ fn release_held(config: &mut Config, bid: u64) -> Result<()> {
 /// by the `close` constraint, returning bid and rent to the requester).
 fn close_open(config: &mut Config, introer: &mut Introer, request: &Request) -> Result<()> {
     release_held(config, request.bid)?;
-    introer.open_count = introer
-        .open_count
-        .checked_sub(1)
-        .ok_or(EscrowError::Overflow)?;
-    Ok(())
-}
-
-/// Moves the bid to the introer wallet and records the receipt. The `close`
-/// constraint then returns the rent to the requester.
-fn pay_out<'info>(
-    config: &mut Config,
-    introer: &mut Account<'info, Introer>,
-    request: &Account<'info, Request>,
-    wallet: &AccountInfo<'info>,
-    requester: Pubkey,
-) -> Result<()> {
-    let bid = request.bid;
-    release_held(config, bid)?;
-    move_lamports(&request.to_account_info(), wallet, bid)?;
-    introer.jobs_done = introer
-        .jobs_done
-        .checked_add(1)
-        .ok_or(EscrowError::Overflow)?;
-    introer.earned = introer
-        .earned
-        .checked_add(bid)
-        .ok_or(EscrowError::Overflow)?;
-    emit!(Receipt {
-        request: request.key(),
-        introer: introer.key(),
-        requester,
-        bid,
-        jobs_done: introer.jobs_done,
-        earned: introer.earned,
-    });
-    Ok(())
-}
-
-fn move_lamports(from: &AccountInfo, to: &AccountInfo, amount: u64) -> Result<()> {
-    let from_left = from
-        .lamports()
-        .checked_sub(amount)
-        .ok_or(EscrowError::Overflow)?;
-    let to_total = to
-        .lamports()
-        .checked_add(amount)
-        .ok_or(EscrowError::Overflow)?;
-    **from.try_borrow_mut_lamports()? = from_left;
-    **to.try_borrow_mut_lamports()? = to_total;
-    Ok(())
+    introer.remove_open(request.id)
 }
 
 fn emit_refund(request: &Account<Request>, reason: u8) {
@@ -386,40 +354,31 @@ fn emit_refund(request: &Account<Request>, reason: u8) {
 }
 
 /// Refunds and closes the lowest open request so a higher bid can take its
-/// slot. `others` must be every other open request of this introer, which
-/// proves `lowest` really is the lowest.
+/// slot. The program picks the lowest from `introer.open`.
 fn evict_lowest<'info>(
     config: &mut Config,
     introer: &mut Account<'info, Introer>,
     lowest: Option<&Account<'info, Request>>,
     lowest_requester: Option<&UncheckedAccount<'info>>,
-    others: &'info [AccountInfo<'info>],
     amount: u64,
 ) -> Result<()> {
     let (Some(lowest), Some(lowest_requester)) = (lowest, lowest_requester) else {
         return err!(EscrowError::QueueFull);
     };
+    let slot = introer.lowest_open().ok_or(EscrowError::QueueFull)?;
     require_keys_eq!(lowest.introer, introer.key(), EscrowError::WrongRequest);
+    require!(lowest.id == slot.id, EscrowError::NotLowest);
     require!(lowest.status == STATUS_OPEN, EscrowError::BadStatus);
     require_keys_eq!(
         lowest_requester.key(),
         lowest.requester,
         EscrowError::WrongRequester
     );
-    require!(amount > lowest.bid, EscrowError::BidTooLow);
-
-    let needed = usize::from(introer.open_count.saturating_sub(1));
-    require!(others.len() == needed, EscrowError::WrongRequest);
-    let mut seen: Vec<Pubkey> = Vec::with_capacity(needed.saturating_add(1));
-    seen.push(lowest.key());
-    for info in others {
-        require!(!seen.contains(info.key), EscrowError::WrongRequest);
-        seen.push(info.key());
-        let other: Account<Request> = Account::try_from(info)?;
-        require_keys_eq!(other.introer, introer.key(), EscrowError::WrongRequest);
-        require!(other.status == STATUS_OPEN, EscrowError::WrongRequest);
-        require!(lowest.bid <= other.bid, EscrowError::NotLowest);
-    }
+    // amount >= bid × (100 + OUTBID_PERCENT) / 100, without rounding down.
+    require!(
+        u128::from(amount) * 100 >= u128::from(lowest.bid) * u128::from(100 + OUTBID_PERCENT),
+        EscrowError::BidTooLow
+    );
 
     close_open(config, introer, lowest)?;
     lowest.close(lowest_requester.to_account_info())?;
@@ -438,11 +397,18 @@ fn evict_lowest<'info>(
 pub struct Config {
     pub admin: Pubkey,
     pub paused: bool,
-    /// Max lamports held across all requests.
-    pub cap_total: u64,
     /// Sum of the bids of all live requests.
     pub total_held: u64,
     pub bump: u8,
+}
+
+/// One open (not yet accepted) request of an introer.
+#[derive(
+    AnchorSerialize, AnchorDeserialize, Clone, Copy, Default, InitSpace, PartialEq, Eq, Debug,
+)]
+pub struct OpenSlot {
+    pub id: u64,
+    pub bid: u64,
 }
 
 #[account]
@@ -454,29 +420,76 @@ pub struct Introer {
     pub jobs_done: u32,
     pub earned: u64,
     pub created_at: i64,
+    /// Number of used entries at the front of `open`.
     pub open_count: u8,
     pub bump: u8,
     pub badge_id: [u8; 8],
     /// UTF-8, zero-padded.
     pub offer: [u8; MAX_OFFER],
+    /// Open requests; entries past `open_count` are zero.
+    pub open: [OpenSlot; MAX_OPEN as usize],
+}
+
+impl Introer {
+    fn push_open(&mut self, id: u64, bid: u64) -> Result<()> {
+        let slot = self
+            .open
+            .get_mut(usize::from(self.open_count))
+            .ok_or(EscrowError::QueueFull)?;
+        *slot = OpenSlot { id, bid };
+        self.open_count = self
+            .open_count
+            .checked_add(1)
+            .ok_or(EscrowError::Overflow)?;
+        Ok(())
+    }
+
+    /// Removes `id`, moving the last entry into its place.
+    fn remove_open(&mut self, id: u64) -> Result<()> {
+        let count = usize::from(self.open_count);
+        let used = self.open.get(..count).ok_or(EscrowError::Overflow)?;
+        let index = used
+            .iter()
+            .position(|slot| slot.id == id)
+            .ok_or(EscrowError::WrongRequest)?;
+        let last = count.checked_sub(1).ok_or(EscrowError::Overflow)?;
+        self.open.swap(index, last);
+        if let Some(slot) = self.open.get_mut(last) {
+            *slot = OpenSlot::default();
+        }
+        self.open_count = self
+            .open_count
+            .checked_sub(1)
+            .ok_or(EscrowError::Overflow)?;
+        Ok(())
+    }
+
+    /// Lowest open bid; the oldest one on a tie.
+    pub fn lowest_open(&self) -> Option<OpenSlot> {
+        self.open
+            .get(..usize::from(self.open_count))?
+            .iter()
+            .min_by_key(|slot| (slot.bid, slot.id))
+            .copied()
+    }
 }
 
 /// Ring of recently registered introer wallets, for clients that can't
-/// list program accounts.
+/// list program accounts. Anyone can push old entries out by registering
+/// new wallets; clients should not rely on it alone.
 #[account]
 #[derive(InitSpace)]
 pub struct Directory {
     /// Next slot to write.
     pub head: u8,
+    pub bump: u8,
     pub wallets: [Pubkey; DIRECTORY_LEN],
 }
 
 impl Directory {
-    /// Writes `wallet` at `head` and advances it, unless already listed.
+    /// Writes `wallet` at `head` and advances it. Each wallet registers
+    /// once (the introer PDA can't be re-created), so no duplicates.
     pub fn add(&mut self, wallet: Pubkey) {
-        if self.wallets.contains(&wallet) {
-            return;
-        }
         let slot = usize::from(self.head) % DIRECTORY_LEN;
         if let Some(entry) = self.wallets.get_mut(slot) {
             *entry = wallet;
@@ -534,7 +547,7 @@ pub struct RegisterIntroer<'info> {
     pub wallet: Signer<'info>,
     #[account(init, payer = wallet, space = 8 + Introer::INIT_SPACE, seeds = [b"introer", wallet.key().as_ref()], bump)]
     pub introer: Account<'info, Introer>,
-    #[account(mut, seeds = [b"directory"], bump)]
+    #[account(mut, seeds = [b"directory"], bump = directory.bump)]
     pub directory: Box<Account<'info, Directory>>,
     pub system_program: Program<'info, System>,
 }
@@ -746,8 +759,8 @@ pub enum EscrowError {
     BidTooHigh,
     #[msg("Bid is below the min")]
     BidTooLow,
-    #[msg("Escrow cap reached")]
-    OverCap,
+    #[msg("Introers can't bid on themselves")]
+    SelfBid,
     #[msg("Queue is full: pass the lowest open request")]
     QueueFull,
     #[msg("Passed request is not the lowest open one")]
@@ -760,6 +773,10 @@ pub enum EscrowError {
     WrongWallet,
     #[msg("Request is in the wrong state")]
     BadStatus,
+    #[msg("Too early to withdraw")]
+    TooEarly,
+    #[msg("Work window has passed")]
+    WorkExpired,
     #[msg("Not expired yet")]
     NotExpired,
     #[msg("Math overflow")]

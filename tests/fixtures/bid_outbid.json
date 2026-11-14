@@ -8,11 +8,7 @@
     { "pubkey": "CXVKcVfwu9NNCymgnzzaZbvTM7mSWcwNrvNT8omzmse3", "signer": false, "writable": true },
     { "pubkey": "11111111111111111111111111111111", "signer": false, "writable": false },
     { "pubkey": "HBR8JQgcboTjqTbHVQtDEjzHRqex4nQdBL1P9h495Epk", "signer": false, "writable": true },
-    { "pubkey": "GyGKxMyg1p9SsHfm15MkNUu1u9TN2JtTspcdmrtGUdse", "signer": false, "writable": true },
-    { "pubkey": "BjLU36j5rDPx7U51MMpJSniiYZt1nweYHYG5jD8oHa2h", "signer": false, "writable": false },
-    { "pubkey": "AjH9DoLp4QCDTQEK8qYiTdQzC2YVdEifVjgGWh2ERhQm", "signer": false, "writable": false },
-    { "pubkey": "2tMn19ohV978TfwiDC7riUEDw3SdKqjPwUTRYteSpx5C", "signer": false, "writable": false },
-    { "pubkey": "CdvrbDcsac9FJyVhHgU8oC9j92iJDw3nmDz88wDAbRmf", "signer": false, "writable": false }
+    { "pubkey": "GyGKxMyg1p9SsHfm15MkNUu1u9TN2JtTspcdmrtGUdse", "signer": false, "writable": true }
   ],
   "data_hex": "c738552692f3259e546f6c7900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040616c696365000000000000000000000000000000000000000000000000000000bca06501000000"
 }
