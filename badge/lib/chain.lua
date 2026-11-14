@@ -51,13 +51,15 @@ function M.accounts(addrs, cb)
   end)
 end
 
--- Many addresses, 5 per call, one call after the other: cb(ok, {[i] = bytes or nil}).
-function M.many(addrs, cb)
+-- Many addresses, `per` (default 5) per call, one call after the other:
+-- cb(ok, {[i] = bytes or nil}). A Job is ~700 bytes: 3 fit one 3.5 KB answer.
+function M.many(addrs, cb, per)
+  per = per or 5
   local out, at = {}, 1
   local function step()
     if at > #addrs then return cb(true, out) end
     local chunk = {}
-    for i = at, math.min(at + 4, #addrs) do chunk[#chunk + 1] = addrs[i] end
+    for i = at, math.min(at + per - 1, #addrs) do chunk[#chunk + 1] = addrs[i] end
     M.accounts(chunk, function(ok, r)
       if not ok then return cb(false, r) end
       for i = 1, #chunk do out[at + i - 1] = r[i] end
@@ -68,19 +70,17 @@ function M.many(addrs, cb)
   step()
 end
 
--- Request addresses are pdas (~10k instructions each): work out 2 per callback, cached.
-local cache = {}
-function M.request_pdas(introer, ids, cb)
+-- Addresses are pdas (~10k instructions each): work out 2 per callback.
+-- make(item) returns the address; cb(addresses).
+function M.pdas(items, make, cb)
   local out, k = {}, 1
   local function step()
-    local n = 0
-    while k <= #ids and n < 2 do
-      local key = introer .. ids[k]
-      if not cache[key] then cache[key] = escrow.request_pda(introer, ids[k]); n = n + 1 end
-      out[k] = cache[key]
+    for _ = 1, 2 do
+      if k > #items then break end
+      out[k] = make(items[k])
       k = k + 1
     end
-    if k > #ids then cb(out) else timer.after(20, step) end
+    if k > #items then cb(out) else timer.after(20, step) end
   end
   step()
 end

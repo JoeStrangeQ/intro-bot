@@ -1,13 +1,19 @@
 {
   "id": "intro-bot",
   "name": "Intro Bot",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "author": "@botbotcap",
-  "summary": "Get paid for intros at Breakpoint, or bid for one. Sign on your phone. By BotBot.",
-  "description": "Introers show their offer and queue; anyone nearby can bid SOL for an intro. The bid waits in an on-chain escrow and the introer is paid only when you confirm. Every step is signed on your phone wallet by QR; the badge holds no keys. Ask me about BotBot: botbotcap.com",
+  "summary": "Request an intro at Breakpoint. Introers offer, you pick one, pay when it is made. By BotBot.",
+  "description": "Post who you want to meet and your bid in SOL. It waits in an on-chain escrow. Introers offer, you pick one after talking on Telegram, and they are paid only when you confirm. Every step is signed on your phone wallet by QR; the badge holds no keys. Ask me about BotBot: botbotcap.com",
   "icon": "heart",
   "accent": "6A50D8",
   "category": "social",
-  "permissions": ["rpc", "http", "mesh", "led"],
-  "hosts": ["relay.botbotcap.com"]
+  "permissions": [
+    "rpc",
+    "http",
+    "led"
+  ],
+  "hosts": [
+    "relay.botbotcap.com"
+  ]
 }
