@@ -161,7 +161,7 @@ function M.ix_accept(introer, request)
 end
 
 function M.ix_made(introer, request)
-  return ix("mark_made", {{W}, {introer}, {request, w = true}})
+  return ix("mark_made", {{W}, {introer, w = true}, {request, w = true}})
 end
 
 function M.ix_decline(introer, request, requester)
