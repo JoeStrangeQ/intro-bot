@@ -259,6 +259,7 @@ local DATA = {v = "1234567890123", j = 2, e = "3000000000", n = "50000000", q = 
   {i = "Req1", t = "Mert @ Helius", g = "mert", b = "250000000", s = "open"},
   {i = "Req2", t = "Anza", g = "@anza", b = "100000000", s = "active"},
   {i = "Req3", t = "Done one", g = "", b = "1", s = "made"},
+  {i = "bad id/../x", t = "Dropped", g = "", b = "1", s = "open"},
 }}
 
 -- First launch: Setup, wallet entry.
@@ -339,6 +340,14 @@ check(#W.led > 0 and W.led_off, "LEDs flash and turn off")
 check(not has("JOB DONE!") and has("2 SOL"), "back to Home after the animation")
 check(not has("JOB DONE!"), "no repeat on same jobs")
 
+-- A job landing while typing waits for the keyboard to close.
+key("left"); list_select(1)
+advance(20000); answer(true, body({v = "2000000000", j = 4, n = "1", q = {}}))
+check(not has("JOB DONE!"), "no animation behind the keyboard")
+type_in(nil)
+check(has("JOB DONE!"), "animation after the keyboard closes")
+advance(3000); key("right")
+
 -- Tabs wrap; CANCEL on a tab exits.
 key("left"); check(W.hint:find("SELECT change"), "left from Home is Setup")
 key("right"); key("select"); check(W.qr ~= nil, "SELECT on Home opens Hire me")
@@ -400,7 +409,7 @@ check(W.hint:find("SELECT change"), "bad stored wallet ignored")
 new_world({store = {wallet = json.encode(WALLET)}})
 local big = {v = string.rep("9", 30), j = 2147483647, e = string.rep("9", 30), n = string.rep("9", 30), q = {}}
 for k = 1, 50 do
-  big.q[k] = {i = string.rep("i", 300), t = string.rep("é", 200), g = string.rep("g", 300), b = string.rep("9", 30), s = "OPEN"}
+  big.q[k] = {i = string.rep("i", 64), t = string.rep("é", 200), g = string.rep("g", 300), b = string.rep("9", 30), s = "OPEN"}
 end
 local b = body(big)
 answer(true, b)

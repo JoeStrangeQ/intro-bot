@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "author": "@botbotcap",
   "summary": "Get paid for intros at Breakpoint. Scan to bid, sign on your phone. By BotBot.",
+  "description": "Shows your Intro Bot queue, machine value and a Hire me QR. Accept, decline or mark intros made by scanning a QR with your phone wallet. The badge holds no keys. Ask me about BotBot: botbotcap.com",
   "icon": "heart",
   "accent": "6A50D8",
   "category": "social",

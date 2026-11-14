@@ -29,8 +29,8 @@ function M.check(t)
     for k = 1, M.MAX_ROWS do
       local r = t.q[k]
       if type(r) ~= "table" then break end
-      local id = text(r.i, 64)
-      if id ~= "" then
+      local id = (type(r.i) == "string" or math.type(r.i) == "integer") and tostring(r.i) or ""
+      if #id <= 64 and id:find("^[%w%-_]+$") then
         local tg = text(r.g, 32)
         if tg ~= "" and tg:sub(1, 1) ~= "@" then tg = "@" .. tg end
         d.q[#d.q + 1] = {

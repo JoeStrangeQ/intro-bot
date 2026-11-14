@@ -253,6 +253,29 @@ local function build_qr(name, url, line1, line2)
   hint("CANCEL back")
 end
 
+-- Modals: a job-done animation waits until they close.
+
+local job_done  -- forward
+
+local function modal(open, ...)
+  local args = table.pack(...)
+  local cb = args[args.n]
+  args[args.n] = function(v)
+    st.modal = nil
+    cb(v)
+    if st.pending and not st.modal then
+      local n = st.pending
+      st.pending = nil
+      job_done(n)
+    end
+  end
+  st.modal = true
+  open(table.unpack(args, 1, args.n))
+end
+
+local function input(prompt, max, cb) modal(ui.input, prompt, max, cb) end
+local function confirm(text, cb) modal(ui.confirm, text, cb) end
+
 -- Setup ------------------------------------------------------------------
 
 local restart_poll  -- forward
@@ -275,9 +298,9 @@ local function setup_items()
 end
 
 local function ask_register()
-  ui.input("What can you intro?", 32, function(offer)
+  input("What can you intro?", 32, function(offer)
     if not offer or offer == "" then return end
-    ui.input("Min bid in SOL", 9, function(min)
+    input("Min bid in SOL", 9, function(min)
       local lam = sol.to_lamports(min)
       if not lam then ui.toast("Use a number like 0.05") return end
       st.reg = "solana:" .. SITE .. "/api/tx/register?badge=" .. sol.urlencode(badge.id() or "")
@@ -292,7 +315,7 @@ local function build_setup()
   local list
   list = ui.list(6, 26, 308, 144, setup_items(), {on_select = function(i)
     if i == 1 then
-      ui.input("Your wallet address", 44, function(text)
+      input("Your wallet address", 44, function(text)
         if not text then return end
         text = text:gsub("%s", "")
         if not sol.is_wallet(text) then ui.toast("Not a Solana address") return end
@@ -311,7 +334,7 @@ local function build_setup()
       list:select(3)
       ui.toast(st.mock and "Demo mode on" or "Demo mode off")
     elseif i == 4 and st.wallet then
-      ui.confirm("Clear the wallet?", function(yes)
+      confirm("Clear the wallet?", function(yes)
         if yes then
           set_wallet(nil)
           list:items(setup_items())
@@ -346,8 +369,9 @@ end
 
 local ANIM_MS = 2600
 
-local function job_done(n)
+function job_done(n)
   if st.anim then return end
+  if st.modal then st.pending = (st.pending or 0) + n return end
   ui.clear()
   st.w = {}
   ui.bg(C.brand)
