@@ -1,0 +1,12 @@
+{
+  "id": "intro-bot",
+  "name": "Intro Bot",
+  "version": "1.0.0",
+  "author": "@botbotcap",
+  "summary": "Get paid for intros at Breakpoint. Scan to bid, sign on your phone. By BotBot.",
+  "icon": "heart",
+  "accent": "6A50D8",
+  "category": "social",
+  "permissions": ["http", "led"],
+  "hosts": ["intro.botbotcap.com"]
+}
