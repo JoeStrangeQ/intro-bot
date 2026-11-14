@@ -47,7 +47,7 @@ function fakeNamespace() {
         const data = new Map<string, unknown>();
         obj = new TxStore({
           storage: {
-            get: async <T,>(k: string) => data.get(k) as T | undefined,
+            get: async <T>(k: string) => data.get(k) as T | undefined,
             put: async (k, v) => void data.set(k, v),
             deleteAll: async () => data.clear(),
             setAlarm: async () => {},
@@ -101,7 +101,9 @@ describe('relay', () => {
     const res = await post(message({ programs: [3, 3] }));
     expect(res.status).toBe(200);
     const { url } = (await res.json()) as { url: string };
-    expect(url).toMatch(/^solana:https:\/\/relay\.botbotcap\.com\/tx\/[0-9a-f]{32}$/);
+    expect(url).toMatch(
+      /^solana:https:\/\/relay\.botbotcap\.com\/tx\/[0-9a-f]{32}$/,
+    );
     const path = url.slice(`solana:${ORIGIN}`.length);
 
     // Readable at once (Durable Object, not eventually consistent KV).
@@ -136,7 +138,9 @@ describe('relay', () => {
 
   it('rejects an extra signer and a wrong fee payer', async () => {
     expect((await post(message({ signers: 2 }))).status).toBe(400);
-    const res = await post(message({ keys: [key(3), key(2), SYSTEM, PROGRAM] }));
+    const res = await post(
+      message({ keys: [key(3), key(2), SYSTEM, PROGRAM] }),
+    );
     expect(await error(res)).toBe('fee payer must be the placeholder');
   });
 
@@ -149,12 +153,19 @@ describe('relay', () => {
   it('rejects oversize before parsing, trailing bytes and non-hex', async () => {
     const big = await call('/tx', 'POST', { message: 'ab'.repeat(5000) });
     expect(big.status).toBe(413);
-    const declared = await call('/tx', 'POST', { message: 'ab' }, {
-      'cf-connecting-ip': '1.2.3.4',
-      'content-length': '999999',
-    });
+    const declared = await call(
+      '/tx',
+      'POST',
+      { message: 'ab' },
+      {
+        'cf-connecting-ip': '1.2.3.4',
+        'content-length': '999999',
+      },
+    );
     expect(declared.status).toBe(413);
-    expect(await error(await post('ab'.repeat(1168)))).toBe('message too large');
+    expect(await error(await post('ab'.repeat(1168)))).toBe(
+      'message too large',
+    );
     expect((await post(message({ extra: [0] }))).status).toBe(400);
     expect((await post('zz')).status).toBe(400);
     expect((await call('/tx', 'POST', {})).status).toBe(400);
@@ -165,13 +176,30 @@ describe('relay', () => {
     expect((await call('/nope')).status).toBe(404);
   });
 
-  it('GET keeps the id; POST consumes it', async () => {
+  it('GET keeps the id; the first wallet POST claims it', async () => {
     const path = await link();
     expect((await call(path)).status).toBe(200);
     expect((await call(path)).status).toBe(200);
     const account = { account: bs58.encode(WALLET) };
     expect((await call(path, 'POST', account)).status).toBe(200);
-    expect((await call(path, 'POST', account)).status).toBe(404);
+    // The same wallet may retry; any other wallet is refused.
+    expect((await call(path, 'POST', account)).status).toBe(200);
+    const other = { account: bs58.encode(key(8)) };
+    expect((await call(path, 'POST', other)).status).toBe(404);
+  });
+
+  it('builds links from the serving origin', async () => {
+    const res = await handle(
+      new Request('http://127.0.0.1:8787/tx', {
+        method: 'POST',
+        headers: { 'cf-connecting-ip': '1.1.1.1' },
+        body: JSON.stringify({ message: message() }),
+      }),
+      env,
+      rpc,
+    );
+    const { url } = (await res.json()) as { url: string };
+    expect(url.startsWith('solana:http://127.0.0.1:8787/tx/')).toBe(true);
   });
 
   it('rejects a wallet that is already in the message', async () => {
@@ -190,7 +218,12 @@ describe('relay', () => {
     expect((await post(message())).status).toBe(429);
     const res = await call(path, 'POST', { account: bs58.encode(WALLET) });
     expect(res.status).toBe(429);
-    expect(keys).toEqual(['203.0.113.9', '203.0.113.9']);
+    expect((await call(path)).status).toBe(429);
+    expect(keys).toEqual([
+      'create:203.0.113.9',
+      'sign:203.0.113.9',
+      'read:203.0.113.9',
+    ]);
   });
 
   it('rejects POSTs without a client IP', async () => {
@@ -220,12 +253,17 @@ describe('blockhash', () => {
     const answer = (body: unknown, status = 200) =>
       (async () => Response.json(body, { status })) as typeof fetch;
     const e = (url: string) => ({ ...env, RPC_URL: url });
-    await expect(blockhash(e('https://a'), answer({}, 500))).rejects.toThrow('http');
-    await expect(blockhash(e('https://b'), answer({ result: {} }))).rejects.toThrow(
-      'no blockhash',
+    await expect(blockhash(e('https://a'), answer({}, 500))).rejects.toThrow(
+      'http',
     );
     await expect(
-      blockhash(e('https://c'), answer({ result: { value: { blockhash: 'abc' } } })),
+      blockhash(e('https://b'), answer({ result: {} })),
+    ).rejects.toThrow('no blockhash');
+    await expect(
+      blockhash(
+        e('https://c'),
+        answer({ result: { value: { blockhash: 'abc' } } }),
+      ),
     ).rejects.toThrow('bad blockhash');
   });
 });
@@ -235,5 +273,7 @@ describe('compactU16', () => {
     expect(compactU16(Uint8Array.of(0xff, 0xff, 0x03), 0)).toEqual([0xffff, 3]);
     expect(() => compactU16(Uint8Array.of(0xff, 0xff, 0x04), 0)).toThrow();
     expect(() => compactU16(Uint8Array.of(0x80, 0x80, 0x80), 0)).toThrow();
+    // Non-minimal (aliased) encodings are refused, like the runtime.
+    expect(() => compactU16(Uint8Array.of(0x80, 0x00), 0)).toThrow();
   });
 });

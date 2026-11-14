@@ -9,7 +9,6 @@ import bs58 from 'bs58';
 export const PROGRAM_ID = 'GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC';
 const PROGRAM = bs58.decode(PROGRAM_ID);
 export const PLACEHOLDER = new Uint8Array(32).fill(1);
-const ORIGIN = 'https://relay.botbotcap.com';
 const TTL_MS = 600_000;
 const MAX_MESSAGE = 1232 - 1 - 64; // packet size minus one signature
 const MAX_BODY = MAX_MESSAGE * 2 + 64;
@@ -23,6 +22,7 @@ export type Env = {
   LIMITER?: { limit(o: { key: string }): Promise<{ success: boolean }> };
 };
 
+type Entry = { m: string; exp: number; by?: string };
 type Storage = {
   get<T>(key: string): Promise<T | undefined>;
   put(key: string, value: unknown): Promise<void>;
@@ -36,18 +36,20 @@ export class TxStore {
   async fetch(req: Request) {
     const s = this.state.storage;
     if (req.method === 'PUT') {
-      await s.put('m', await req.text());
-      await s.put('exp', Date.now() + TTL_MS);
-      await s.setAlarm(Date.now() + TTL_MS);
+      const exp = Date.now() + TTL_MS;
+      await s.put('t', { m: await req.text(), exp });
+      await s.setAlarm(exp);
       return new Response('ok');
     }
-    const exp = await s.get<number>('exp');
-    const hex = await s.get<string>('m');
-    if (!hex || !exp || Date.now() > exp) {
-      return new Response(null, { status: 404 });
+    const t = await s.get<Entry>('t');
+    if (!t || Date.now() > t.exp) return new Response(null, { status: 404 });
+    if (req.method === 'POST') {
+      // Claim for one wallet; that wallet may retry, others get 404.
+      const account = await req.text();
+      if (t.by && t.by !== account) return new Response(null, { status: 404 });
+      if (!t.by) await s.put('t', { ...t, by: account });
     }
-    if (req.method === 'DELETE') await s.deleteAll();
-    return new Response(hex);
+    return new Response(t.m);
   }
   alarm() {
     return this.state.storage.deleteAll();
@@ -86,6 +88,8 @@ export function compactU16(b: Uint8Array, at: number): [number, number] {
     if (byte === undefined) throw new Bad('truncated');
     // The third byte holds only the top 2 bits of a u16.
     if (i === 2 && byte > 0x03) throw new Bad('bad length');
+    // Minimal encoding only, like the runtime: no trailing zero byte.
+    if (i > 0 && byte === 0) throw new Bad('bad length');
     v |= (byte & 0x7f) << (7 * i);
     if (!(byte & 0x80)) return [v, at + i + 1];
   }
@@ -198,33 +202,45 @@ export async function handle(
   fetcher: typeof fetch = fetch,
 ): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS });
-  const path = new URL(req.url).pathname.replace(/\/+$/, '');
-  try {
-    if (req.method === 'POST') {
-      // Cloudflare always sets this; without it there is no fair bucket.
-      const ip = req.headers.get('cf-connecting-ip');
-      if (!ip) throw new Bad('no client ip');
-      if (env.LIMITER && !(await env.LIMITER.limit({ key: ip })).success) {
-        throw new Bad('slow down', 429);
-      }
+  const url = new URL(req.url);
+  const path = url.pathname.replace(/\/+$/, '');
+  // Each kind of call gets its own per-IP bucket, checked only on real routes.
+  const limit = async (kind: string) => {
+    // Cloudflare always sets this; without it there is no fair bucket.
+    const ip = req.headers.get('cf-connecting-ip');
+    if (!ip) throw new Bad('no client ip');
+    if (
+      env.LIMITER &&
+      !(await env.LIMITER.limit({ key: `${kind}:${ip}` })).success
+    ) {
+      throw new Bad('slow down', 429);
     }
+  };
+  try {
     if (path === '/tx' && req.method === 'POST') {
+      await limit('create');
       const { message } = await readJson(req);
       check(fromHex(message));
       const id = crypto.randomUUID().replace(/-/g, '');
       const put = await store(env, id, 'PUT', message as string);
       if (!put.ok) throw new Error('store failed');
-      return json({ url: `solana:${ORIGIN}/tx/${id}` });
+      return json({ url: `solana:${url.origin}/tx/${id}` });
     }
     const id = /^\/tx\/([0-9a-f]{32})$/.exec(path)?.[1];
     if (!id || (req.method !== 'GET' && req.method !== 'POST')) {
       return json({ error: 'not found' }, 404);
     }
-    const found = await store(env, id, 'GET');
-    if (!found.ok) return json({ error: 'expired or unknown' }, 404);
     if (req.method === 'GET') {
-      return json({ label: 'BotBot Intro Bot', icon: `${ORIGIN}/icon.png` });
+      await limit('read');
+      if (!(await store(env, id, 'GET')).ok) {
+        return json({ error: 'expired or unknown' }, 404);
+      }
+      return json({
+        label: 'BotBot Intro Bot',
+        icon: `${url.origin}/icon.png`,
+      });
     }
+    await limit('sign');
     const { account: text } = await readJson(req);
     let account: Uint8Array;
     try {
@@ -233,16 +249,16 @@ export async function handle(
       throw new Bad('bad account');
     }
     if (account.length !== 32) throw new Bad('bad account');
+    const hash = blockhash(env, fetcher);
+    hash.catch(() => {});
+    const found = await store(env, id, 'POST', bs58.encode(account));
+    if (!found.ok) return json({ error: 'expired or unknown' }, 404);
     const msg = fromHex(await found.text());
     const { keys, keysAt, hashAt } = check(msg);
     // The wallet must not already be in the message: keys would merge.
     if (keys.some((k) => same(k, account))) throw new Bad('account in use');
     msg.set(account, keysAt);
-    msg.set(await blockhash(env, fetcher), hashAt);
-    // One transaction per QR: consume the id, and lose any race.
-    if (!(await store(env, id, 'DELETE')).ok) {
-      return json({ error: 'expired or unknown' }, 404);
-    }
+    msg.set(await hash, hashAt);
     const tx = new Uint8Array(1 + 64 + msg.length);
     tx[0] = 1; // one empty signature for the wallet to fill
     tx.set(msg, 65);
