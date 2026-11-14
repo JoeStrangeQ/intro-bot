@@ -32,18 +32,19 @@ M.DISC = {}
 for k, v in pairs(D) do M.DISC[k] = bytes.unhex(v) end
 
 -- Byte offsets (1-based for string.sub/byte), after the 8-byte discriminator.
--- Job: requester 32 | nonce u64 | bid u64 | status u8 | created_at, approved_at, made_at i64 |
---      approved 32 | offer_count u16 | offers [16 x 32] | offers_head u8 |
---      who [32] | company [32] | telegram [32] | bump
-M.JOB = {requester = 9, nonce = 41, bid = 49, status = 57, created_at = 58, approved_at = 66,
-  made_at = 74, approved = 82, offer_count = 114, offers = 116, offers_head = 628, who = 629,
-  company = 661, telegram = 693, size = 725}
+-- (docs/spec-v2.md, "Program details")
+-- Job: requester 32 | nonce u64 | serial u64 | bid u64 | status u8 | created_at, approved_at,
+--      made_at i64 | approved 32 | offer_count u16 | who [32] | company [32] | telegram [32] |
+--      bump | offers_head u8 | offers [16 x 32]. The ring is last: LIST bytes skip it.
+M.JOB = {requester = 9, nonce = 41, serial = 49, bid = 57, status = 65, created_at = 66, approved_at = 74,
+  made_at = 82, approved = 90, offer_count = 122, who = 124, company = 156, telegram = 188,
+  offers_head = 221, offers = 222, size = 733, LIST = 220}
 -- Introer: wallet 32 | badge_id [8] | name [32] | jobs_done u32 | earned u64 | created_at i64 | bump
 M.INTROER = {wallet = 9, badge_id = 41, name = 49, jobs_done = 81, earned = 85, created_at = 93, size = 101}
--- Offer: job 32 | introer 32 | created_at i64 | bump
-M.OFFER = {job = 9, introer = 41, created_at = 73, size = 81}
--- Board: head u8 | jobs [64 x 32], a ring of the newest job addresses
-M.BOARD_L = {head = 9, jobs = 10, size = 9 + 64 * 32}
+-- Offer: job 32 | introer 32 | job_serial u64 | created_at i64 | bump
+M.OFFER = {job = 9, introer = 41, job_serial = 73, created_at = 81, size = 89}
+-- Board (zero-copy): head u8 | bump u8 | 6 padding | posted u64 | jobs [64 x 32], a ring of the newest
+M.BOARD_L = {head = 9, posted = 17, jobs = 25, size = 2072}
 
 local ZERO = ("\0"):rep(32)
 
@@ -60,9 +61,11 @@ local function ring(b, at, n, head, count)
   return out
 end
 
+-- A whole Job, or its first LIST bytes (then `offers` is empty).
 function M.decode_job(b)
   local L = M.JOB
-  if type(b) ~= "string" or #b < L.size or b:sub(1, 8) ~= M.DISC.Job then return nil end
+  if type(b) ~= "string" or #b < L.LIST or b:sub(1, 8) ~= M.DISC.Job then return nil end
+  local full = #b >= L.size
   local s = bytes.u8(b, L.status)
   if not M.STATUS[s] then return nil end
   local count = string.unpack("<I2", b, L.offer_count)
@@ -77,7 +80,8 @@ function M.decode_job(b)
     made_at = bytes.time(b, L.made_at),
     approved = approved ~= ZERO and approved or nil,
     offer_count = count,
-    offers = ring(b, L.offers, M.OFFERS, bytes.u8(b, L.offers_head), count),
+    offers = full and ring(b, L.offers, M.OFFERS, bytes.u8(b, L.offers_head), count) or {},
+    serial = bytes.u64(b, L.serial),
     who = bytes.text(b, L.who, M.WHO),
     company = bytes.text(b, L.company, M.COMPANY),
     telegram = bytes.text(b, L.telegram, M.TELEGRAM),
@@ -100,7 +104,8 @@ end
 function M.decode_offer(b)
   local L = M.OFFER
   if type(b) ~= "string" or #b < L.size or b:sub(1, 8) ~= M.DISC.Offer then return nil end
-  return {job = key(b, L.job), introer = key(b, L.introer), created_at = bytes.time(b, L.created_at)}
+  return {job = key(b, L.job), introer = key(b, L.introer), job_serial = bytes.u64(b, L.job_serial),
+    created_at = bytes.time(b, L.created_at)}
 end
 
 -- The board's job addresses, newest first.
@@ -140,8 +145,8 @@ function M.ix_register(me, badge_id, name)
     bytes.fixed(badge_id, 8) .. bytes.fixed(name, M.NAME))
 end
 
-function M.ix_update(me, name)
-  return ix("update_introer", {{W}, {M.introer_pda(me), w = true}}, bytes.fixed(name, M.NAME))
+function M.ix_update(me, badge_id, name)
+  return ix("update_introer", {{W}, {M.introer_pda(me), w = true}}, bytes.fixed(badge_id, 8) .. bytes.fixed(name, M.NAME))
 end
 
 function M.ix_post_job(job, nonce, who, company, telegram, bid)
@@ -160,13 +165,12 @@ function M.ix_offer(me, job)
 end
 
 function M.ix_withdraw_offer(me, job)
-  return ix("withdraw_offer", {{W, w = true}, {job}, {M.offer_pda(job, me), w = true}})
+  return ix("withdraw_offer", {{W, w = true}, {M.offer_pda(job, me), w = true}, {job}})
 end
 
 -- Anyone, once the job is closed: the rent goes back to the introer.
 function M.ix_close_offer(job, introer_wallet)
-  return ix("close_offer", {{W}, {job}, {M.offer_pda(job, introer_wallet), w = true},
-    {introer_wallet, w = true}})
+  return ix("close_offer", {{W}, {M.offer_pda(job, introer_wallet), w = true}, {introer_wallet, w = true}, {job}})
 end
 
 function M.ix_approve(job, introer_wallet)
@@ -178,8 +182,8 @@ function M.ix_mark_made(job)
 end
 
 function M.ix_confirm(job, introer_wallet)
-  return ix("confirm", {{W, w = true}, {job, w = true}, {introer_wallet, w = true},
-    {M.introer_pda(introer_wallet), w = true}})
+  return ix("confirm", {{W, w = true}, {job, w = true}, {M.introer_pda(introer_wallet), w = true},
+    {introer_wallet, w = true}})
 end
 
 -- The requester refunds their own job: the same placeholder key as caller and requester,

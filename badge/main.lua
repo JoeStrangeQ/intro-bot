@@ -10,7 +10,7 @@ local demo = require("lib.demo")
 local art = require("lib.art")
 
 local POLL_MS, WATCH_MS, WATCH_FOR = 20000, 6000, 600000
-local SPARK_N, MAX_MINE, MAX_OFFERED, BOARD_SHOW = 24, 6, 6, 9
+local SPARK_N, MAX_MINE, MAX_OFFERED, BOARD_SHOW = 24, 6, 6, 10
 local C = {
   desk = 0xC9BFF2, brand = 0x6A50D8, ink = 0x241A52, paper = 0xF6F3FD,
   orange = 0xA8521A, white = 0xFFFFFF, dim = 0x6E6496, line = 0xDCD5F7,
@@ -22,6 +22,10 @@ local TITLE = {
   profile = "Profile", job = "Job", myjob = "My job", offerjob = "My offer", sign = "Sign on phone",
 }
 local TABHINT = "LEFT/RIGHT screens   CANCEL exit"
+local CTA = "Robots that earn \u{2192} botbotcap.com"
+local CTA_EARNED = "This badge just earned. Your robots can too \u{2192} botbotcap.com"
+local CTA_PAID = "Paid \u{2713} \u{00B7} Robots that earn \u{2192} botbotcap.com"
+local SITE = "https://botbotcap.com"
 
 -- State ------------------------------------------------------------------
 
@@ -80,7 +84,8 @@ local function frame(name)
   ui.rect(4, 4, 312, 196, {color = C.ink})
   ui.rect(5, 5, 310, 194, {color = C.paper})
   ui.rect(5, 5, 310, 20, {color = C.brand})
-  ui.label(10, 7, TITLE[name], {size = 14, color = C.white})
+  art.logo(8, 8, 1)
+  ui.label(26, 7, TITLE[name], {size = 14, color = C.white})
   local tag = st.mock and "DEMO" or (st.wallet and sol.short(st.wallet) or "")
   ui.label(160, 9, tag, {size = 12, color = C.white, w = 150, align = "right"})
 end
@@ -174,7 +179,7 @@ local function plan(action, r)
   elseif action == "register_introer" then
     return escrow.ix_register(me, r.badge_id, r.name), escrow.introer_pda(me), "exists"
   end
-  return escrow.ix_update(me, r.name), escrow.introer_pda(me), "name"
+  return escrow.ix_update(me, r.badge_id, r.name), escrow.introer_pda(me), "name"
 end
 
 -- true when it landed, nil to keep waiting.
@@ -220,7 +225,7 @@ local function sign_done(s)
   end
   if a == "withdraw_offer" or a == "close_offer" then forget_offer(r.pda) end
   stop_sign()
-  ui.toast(a == "post_job" and "Posted!" or (escrow.LABEL[a] .. ": done"))
+  ui.toast(a == "post_job" and "Posted!" or a == "confirm" and CTA_PAID or (escrow.LABEL[a] .. ": done"))
   poll(true)
   show_later(s.back)
 end
@@ -374,9 +379,9 @@ end
 
 local function build_request()
   frame("request")
-  art.robot_at(14, 30, 2)
-  ui.label(54, 32, "Who do you want to meet?", {size = 14, color = C.brand})
-  ui.label(54, 50, "Post it. Introers offer. You pick one.", {size = 12, color = C.ink})
+  art.logo(14, 30, 3)
+  ui.label(60, 32, "Who do you want to meet?", {size = 14, color = C.brand})
+  ui.label(60, 50, "Post it. Introers offer. You pick one.", {size = 12, color = C.ink})
   ui.list(6, 68, 308, 72, {
     {title = "Request an intro", sub = "who, company, bid"},
     {title = "My Telegram", right = st.tg or "not set"},
@@ -384,7 +389,7 @@ local function build_request()
   line(144, "Your Telegram is shown to people who offer.", C.ink)
   line(158, "You pay only when you confirm the intro.")
   ui.rect(5, 174, 310, 1, {color = C.line})
-  center(180, "Ask me about BotBot - botbotcap.com", 12, C.orange)
+  center(180, CTA, 14, C.orange)
   ui.hint(TABHINT)
 end
 
@@ -581,7 +586,7 @@ local function draw_spark()
     if p then
       local h = hi > lo and math.floor(3 + (p - lo) * 21 / (hi - lo)) or 12
       bars[k]:size(3, h)
-      bars[k]:pos(206 + (k - 1) * 4, 56 - h)
+      bars[k]:pos(16 + (k - 1) * 4, 90 - h)
       bars[k]:show(true)
     else
       bars[k]:show(false)
@@ -626,15 +631,17 @@ end
 
 local function build_profile()
   frame("profile")
-  art.robot_at(12, 30, 2)
-  ui.label(48, 30, "machine value (demo value)", {size = 12, color = C.dim})
-  st.w.value = ui.label(48, 42, "", {size = 20, color = C.brand})
-  ui.rect(204, 30, 100, 28, {color = C.line})
+  art.logo(12, 30, 2)
+  ui.label(44, 30, "machine value (demo value)", {size = 12, color = C.dim})
+  st.w.value = ui.label(44, 42, "", {size = 20, color = C.brand})
+  ui.rect(14, 64, 100, 28, {color = C.line})
   st.w.spark = {}
-  for k = 1, SPARK_N do st.w.spark[k] = ui.rect(206 + (k - 1) * 4, 40, 3, 2, {color = C.brand}) end
-  st.w.stats = line(64, "", C.ink)
+  for k = 1, SPARK_N do st.w.spark[k] = ui.rect(16 + (k - 1) * 4, 74, 3, 2, {color = C.brand}) end
+  if ui.qr then ui.qr(232, 28, 76, SITE) end
+  ui.label(226, 106, "botbotcap.com", {size = 12, color = C.dim, w = 88, align = "center"})
+  st.w.stats = line(96, "", C.ink)
   local list
-  list = ui.list(6, 80, 308, 108, profile_items(), {on_select = function(i)
+  list = ui.list(6, 112, 308, 64, profile_items(), {on_select = function(i)
     if i == 1 then
       ask_wallet(function() show("profile") end)
     elseif i == 2 then
@@ -649,7 +656,7 @@ local function build_profile()
       ui.toast(st.mock and "Demo mode on" or "Demo mode off")
     end
   end})
-  center(190, "Ask me about BotBot - botbotcap.com", 12, C.orange)
+  center(180, CTA, 14, C.orange)
   ui.hint("SELECT change   LEFT/RIGHT screens")
   refresh_profile()
 end
@@ -690,19 +697,22 @@ function job_done(n)
   st.w = {}
   ui.bg(C.brand)
   local a = {t = 0}
-  a.robot = art.robot_at(136, 40, 3)
-  ui.label(0, 110, "JOB DONE!", {size = 32, color = C.white, w = ui.W, align = "center"})
-  ui.label(0, 150, n > 1 and ("+" .. n .. " intros confirmed") or "+1 intro confirmed",
+  a.logo, a.shift = art.logo(127, 14, 5, 0), 0
+  ui.label(0, 98, "JOB DONE!", {size = 32, color = C.white, w = ui.W, align = "center"})
+  ui.label(0, 138, n > 1 and ("+" .. n .. " intros confirmed") or "+1 intro confirmed",
     {size = 14, color = C.desk, w = ui.W, align = "center"})
+  ui.label(10, 162, CTA_EARNED, {size = 14, color = C.white, w = 300, align = "center"})
   st.anim = a
 end
 
 local function anim_tick(ms)
   local a = st.anim
   a.t = a.t + ms
-  if a.robot then
-    local phase = (a.t // 10) % 60
-    a.robot:pos(136, 40 - (phase < 30 and phase or 60 - phase))
+  -- The bands cycle: redraw the logo with the colours turned, 7 times a second.
+  local shift = (a.t // 150) % 6
+  if a.logo and shift ~= a.shift then
+    a.logo:remove()
+    a.logo, a.shift = art.logo(127, 14, 5, shift), shift
   end
   if led then
     if a.t >= ANIM_MS then led.off()
@@ -750,8 +760,9 @@ local function finish()
   refresh()
 end
 
--- Jobs at `pdas`, 3 per call (a Job is ~700 bytes): cb(rows with pda, missing[i] = true).
-local function read_jobs(gen, pdas, cb)
+-- Jobs at `pdas`, 3 per call (a Job is ~700 bytes), or 5 per call without the offers ring
+-- (`list`): cb(rows with pda, missing[i] = true).
+local function read_jobs(gen, pdas, cb, list)
   chain.many(pdas, function(ok, data)
     if gen ~= st.gen then return end
     if not ok then return fail(data) end
@@ -761,7 +772,7 @@ local function read_jobs(gen, pdas, cb)
       if j then j.pda = pdas[i]; rows[#rows + 1] = j else missing[i] = true end
     end
     cb(rows, missing)
-  end, 3)
+  end, list and 5 or 3, list and escrow.JOB.LIST or nil)
 end
 
 local function read_board(gen)
@@ -774,7 +785,7 @@ local function read_board(gen)
       st.board = rows
       st.read_at.board.t = sys.millis()
       finish()
-    end)
+    end, true)
   end)
 end
 
@@ -878,6 +889,7 @@ end
 
 function on_key(key)
   if st.anim then return true end
+  if st.screen == "splash" and key ~= "back" then show("request") return true end
   if key == "back" then
     if st.screen == "sign" then
       local back = (st.sign or st.retry or {}).back or "request"
@@ -914,5 +926,18 @@ function on_exit()
   if led then led.off() end
 end
 
-show("request")
+-- Splash: the big rainbow B, then Request an intro.
+local function splash()
+  st.screen = "splash"
+  ui.clear()
+  ui.bg(C.desk)
+  art.logo(108, 30, 8)
+  center(142, "Intro Bot", 20, C.ink)
+  center(170, CTA, 14, C.orange)
+  timer.after(1500, function()
+    if st.screen == "splash" and not st.modal then show("request") end
+  end)
+end
+
+splash()
 restart_poll()

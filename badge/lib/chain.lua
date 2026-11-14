@@ -38,11 +38,13 @@ function M.account(addr, cb)
   end)
 end
 
--- Up to 5 addresses: cb(ok, {[i] = bytes or nil}).
-function M.accounts(addrs, cb)
+-- Up to 5 addresses: cb(ok, {[i] = bytes or nil}). `len`: only the first len bytes.
+function M.accounts(addrs, cb, len)
   local list = {}
   for i = 1, math.min(#addrs, 5) do list[i] = solana.encode(addrs[i]) end
-  call("getMultipleAccounts", {list, OPTS}, function(ok, r)
+  local opts = OPTS
+  if len then opts = {encoding = "base64", commitment = "confirmed", dataSlice = {offset = 0, length = len}} end
+  call("getMultipleAccounts", {list, opts}, function(ok, r)
     if not ok then return cb(false, r) end
     if type(r) ~= "table" or type(r.value) ~= "table" then return cb(false, "bad answer") end
     local out = {}
@@ -53,7 +55,7 @@ end
 
 -- Many addresses, `per` (default 5) per call, one call after the other:
 -- cb(ok, {[i] = bytes or nil}). A Job is ~700 bytes: 3 fit one 3.5 KB answer.
-function M.many(addrs, cb, per)
+function M.many(addrs, cb, per, len)
   per = per or 5
   local out, at = {}, 1
   local function step()
@@ -65,7 +67,7 @@ function M.many(addrs, cb, per)
       for i = 1, #chunk do out[at + i - 1] = r[i] end
       at = at + #chunk
       step()
-    end)
+    end, len)
   end
   step()
 end

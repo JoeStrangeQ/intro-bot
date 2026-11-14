@@ -189,10 +189,10 @@ end
 -- t.offers oldest first.
 local function enc_job(t)
   local offers, head = ring(t.offers or {}, 16)
-  return disc("Job") .. t.requester .. u64(t.nonce) .. u64(t.bid) .. string.char(t.status or 0)
+  return disc("Job") .. t.requester .. u64(t.nonce) .. u64(t.serial or 1) .. u64(t.bid) .. string.char(t.status or 0)
     .. string.pack("<i8i8i8", t.created_at or NOW, t.approved_at or 0, t.made_at or 0)
-    .. (t.approved or ZERO) .. string.pack("<I2", t.offer_count or #(t.offers or {})) .. offers
-    .. string.char(head) .. fixed(t.who, 32) .. fixed(t.company, 32) .. fixed(t.telegram, 32) .. string.char(255)
+    .. (t.approved or ZERO) .. string.pack("<I2", t.offer_count or #(t.offers or {}))
+    .. fixed(t.who, 32) .. fixed(t.company, 32) .. fixed(t.telegram, 32) .. string.char(255, head) .. offers
 end
 local function enc_introer(t)
   return disc("Introer") .. t.wallet .. fixed(t.badge_id or "", 8) .. fixed(t.name or "", 32)
@@ -200,12 +200,12 @@ local function enc_introer(t)
     .. string.char(254)
 end
 local function enc_offer(job, introer)
-  return disc("Offer") .. job .. introer .. string.pack("<i8", NOW) .. string.char(253)
+  return disc("Offer") .. job .. introer .. u64(1) .. string.pack("<i8", NOW) .. string.char(253)
 end
 -- jobs oldest first.
 local function enc_board(jobs)
   local slots, head = ring(jobs, 64)
-  return disc("Board") .. string.char(head) .. slots
+  return disc("Board") .. string.char(head, 252) .. string.rep("\0", 6) .. u64(#jobs) .. slots
 end
 
 -- Decode a legacy message the app built.
@@ -486,7 +486,9 @@ local many = {}
 for k = 1, 20 do many[k] = string.char(k):rep(32) end
 local dm = escrow.decode_job(enc_job({requester = RQ, nonce = 1, bid = "1", offers = many, who = "a", company = "b", telegram = "c"}))
 check(#dm.offers == 16 and dm.offers[1] == many[20] and dm.offers[16] == many[5] and dm.offer_count == 20, "offer ring wraps at 16")
-check(escrow.decode_job(jb:sub(1, 700)) == nil and escrow.decode_job("x" .. jb:sub(2)) == nil, "bad job refused")
+check(escrow.decode_job(jb:sub(1, 219)) == nil and escrow.decode_job("x" .. jb:sub(2)) == nil, "bad job refused")
+local listed = escrow.decode_job(jb:sub(1, escrow.JOB.LIST))
+check(listed and listed.who == "Toly" and listed.offer_count == 2 and #listed.offers == 0, "board slice: no offers ring")
 local di = escrow.decode_introer(enc_introer({wallet = ME, badge_id = "7K2Q9M", name = "Joe", jobs = 3, earned = "4000000000"}))
 check(di and di.wallet == ME and di.name == "Joe" and di.jobs == 3 and di.earned == "4000000000" and di.badge_id == "7K2Q9M", "decode introer")
 local do_ = escrow.decode_offer(enc_offer(RQ, ME))
@@ -499,6 +501,68 @@ check(escrow.actions({status = 1, approved_at = NOW - 8 * 86400}, "requester", n
 check(escrow.actions({status = 1, approved = ME, approved_at = NOW}, "introer", ME, NOW)[1] == "mark_made", "picked: mark made")
 check(#escrow.actions({status = 1, approved = ME, approved_at = NOW - 8 * 86400}, "introer", ME, NOW) == 0, "mark made deadline")
 check(escrow.actions({status = 1, approved = OTHER}, "introer", ME, NOW)[1] == "withdraw_offer", "not picked: withdraw offer")
+
+-- The program's own instruction and account bytes (tests/fixtures, or FIXTURES=<dir>).
+local FIX = os.getenv("FIXTURES") or (HERE .. "/../tests/fixtures")
+local function fixture(name)
+  local f = io.open(FIX .. "/" .. name .. ".json")
+  if not f then return nil end
+  local t = json.decode(f:read("a"))
+  f:close()
+  return t
+end
+if not fixture("post_job") then
+  print("SKIP: no v2 program fixtures at " .. FIX .. " (set FIXTURES)")
+else
+  local function same_ix(name, built)
+    local f = fixture(name)
+    local signer = b58d(f.accounts[1].pubkey)
+    local ok = hex(built.data) == f.data_hex and b58e(built.program) == f.program_id and #built.accounts == #f.accounts
+    for k, a in ipairs(f.accounts) do
+      local mine = built.accounts[k]
+      local key = mine and (mine[1] == W8 and signer or mine[1])
+      ok = ok and mine and b58e(key) == a.pubkey
+        and (k ~= 1 or a.signer) and (k == 1 or a.signer or (mine.w == true) == a.writable)
+    end
+    check(ok, "fixture " .. name)
+  end
+  local function acc(name, k) return b58d(fixture(name).accounts[k].pubkey) end
+  local function data(name) return bytes.unhex(fixture(name).data_hex) end
+  local wallet, requester = acc("register_introer", 1), acc("post_job", 1)
+  check(escrow.introer_pda(wallet) == acc("register_introer", 2), "fixture introer pda")
+  check(escrow.config_pda() == acc("post_job", 2) and escrow.board_pda() == acc("post_job", 3), "fixture config, board pdas")
+  local d = data("register_introer")
+  same_ix("register_introer", escrow.ix_register(wallet, bytes.text(d, 9, 8), bytes.text(d, 17, 32)))
+  d = data("update_introer")
+  same_ix("update_introer", escrow.ix_update(wallet, bytes.text(d, 9, 8), bytes.text(d, 17, 32)))
+  d = data("post_job")
+  local job, nonce = acc("post_job", 4), bytes.u64(d, 9)
+  check(escrow.job_pda(requester, nonce) == job, "fixture job pda")
+  same_ix("post_job", escrow.ix_post_job(job, nonce, bytes.text(d, 17, 32), bytes.text(d, 49, 32),
+    bytes.text(d, 81, 32), bytes.u64(d, 113)))
+  same_ix("cancel_job", escrow.ix_cancel_job(acc("cancel_job", 2)))
+  check(escrow.offer_pda(acc("offer", 4), wallet) == acc("offer", 5), "fixture offer pda")
+  same_ix("offer", escrow.ix_offer(wallet, acc("offer", 4)))
+  same_ix("withdraw_offer", escrow.ix_withdraw_offer(wallet, acc("withdraw_offer", 3)))
+  same_ix("close_offer", escrow.ix_close_offer(acc("close_offer", 4), acc("close_offer", 3)))
+  same_ix("approve", escrow.ix_approve(acc("approve", 2), data("approve"):sub(9, 40)))
+  same_ix("mark_made", escrow.ix_mark_made(acc("mark_made", 2)))
+  same_ix("confirm", escrow.ix_confirm(acc("confirm", 2), acc("confirm", 4)))
+  same_ix("refund_expired", escrow.ix_refund("refund_expired", acc("refund_expired", 2)))
+  same_ix("refund_unconfirmed", escrow.ix_refund("refund_unconfirmed", acc("refund_unconfirmed", 2)))
+  local f = io.open(FIX .. "/accounts.json")
+  local dumps = json.decode(f:read("a"))
+  f:close()
+  local x = escrow.decode_introer(bytes.unhex(dumps.introer.data_hex))
+  check(x and x.wallet == wallet and x.name ~= "", "fixture introer decodes")
+  local j = escrow.decode_job(bytes.unhex(dumps.job.data_hex))
+  check(j and j.requester == requester and j.who ~= "" and j.telegram ~= "" and #j.offers == math.min(j.offer_count, 16)
+    and j.offer_count >= 1, "fixture job decodes, with its offers")
+  local o = escrow.decode_offer(bytes.unhex(dumps.offer.data_hex))
+  check(o and o.job == b58d(dumps.job.pubkey) and o.job_serial == j.serial, "fixture offer decodes")
+  local bd = escrow.decode_board(bytes.unhex(dumps.board.data_hex))
+  check(bd and bd[1] == b58d(dumps.job.pubkey), "fixture board decodes: newest job first")
+end
 
 -- App ----------------------------------------------------------------------------
 local CHAIN = {}
@@ -524,7 +588,9 @@ local function same(a, b)
 end
 
 new_world({accounts = CHAIN})
-check(has("Who do you want to meet?") and has("Ask me about BotBot"), "opens on Request an intro")
+check(has("Intro Bot") and has("Robots that earn"), "splash: the B and the CTA")
+advance(1600)
+check(has("Who do you want to meet?") and has("Robots that earn \u{2192} botbotcap.com"), "opens on Request an intro, CTA")
 check(has("Your Telegram is shown to people who offer."), "Telegram warning")
 check(#W.rpcq == 0, "no rpc without a wallet")
 
@@ -544,9 +610,10 @@ check(W.input and W.input.prompt == "Your Telegram @handle", "asks Telegram once
 type_in("")
 check(last_toast() == "Telegram is required", "Telegram required")
 list_select(1); type_in("Toly"); type_in("Solana Labs"); type_in("12.5"); type_in("joe")
-local nonce = tostring(NOW)
 local m = relay_reply(true)
 local ix = m.ixs[1]
+local nonce = tostring(string.unpack("<I8", ix.data, 9))
+check(tonumber(nonce) >= NOW, "nonce is the time")
 local MYJOB = escrow.job_pda(ME, nonce)
 check(m.keys[1] == W8 and #m.ixs == 1 and b58e(ix.program) == escrow.PROGRAM_ID, "one intro_escrow instruction")
 check(same(ix.accounts, {m.keys[1], CONFIG, BOARD, MYJOB, SYS}), "post_job: accounts")
@@ -642,7 +709,7 @@ check(has("Picked: Ana") and W.lists[1].rows[1].title == "Confirm + pay", "appro
 list_select(1)
 m = relay_reply(true)
 ix = m.ixs[1]
-check(same(ix.accounts, {m.keys[1], MYJOB, OTHER, escrow.introer_pda(OTHER)}) and m.w[OTHER]
+check(same(ix.accounts, {m.keys[1], MYJOB, escrow.introer_pda(OTHER), OTHER}) and m.w[OTHER]
   and m.w[escrow.introer_pda(OTHER)] and ix.data == escrow.DISC.confirm, "confirm: pays the picked introer")
 key("back")
 -- Made long ago: refund my own job, the signer twice as one key.
@@ -686,7 +753,7 @@ go("My offers"); advance(20000)
 check(W.lists[1].rows[1].right == "Closed", "closed job: offer rent")
 list_select(1); list_select(1)
 m = relay_reply(true)
-check(same(m.ixs[1].accounts, {m.keys[1], JOB2, MYOFFER, ME}) and m.ixs[1].data == escrow.DISC.close_offer
+check(same(m.ixs[1].accounts, {m.keys[1], MYOFFER, ME, JOB2}) and m.ixs[1].data == escrow.DISC.close_offer
   and m.w[ME] and m.w[MYOFFER], "close_offer: rent to me")
 CHAIN[b58e(MYOFFER)] = nil
 advance(6000)
@@ -713,6 +780,7 @@ check(calls <= 30, "rpc budget")
 
 -- Demo mode: no network, every screen.
 new_world({store = {mock = "true"}})
+advance(1600)
 check(#W.rpcq == 0, "demo: no rpc")
 go("Intro board")
 check(#W.lists[1].rows >= 4, "demo board")
