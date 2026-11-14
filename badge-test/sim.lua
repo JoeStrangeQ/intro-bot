@@ -485,6 +485,10 @@ check(dj and dj.requester == RQ and dj.nonce == "1790000001" and dj.bid == "1250
 local many = {}
 for k = 1, 20 do many[k] = string.char(k):rep(32) end
 local dm = escrow.decode_job(enc_job({requester = RQ, nonce = 1, bid = "1", offers = many, who = "a", company = "b", telegram = "c"}))
+local holes = enc_job({requester = RQ, nonce = 1, bid = "1", offers = {OTHER, THIRD, ME}, offer_count = 2, who = "a", company = "b", telegram = "c"})
+holes = holes:sub(1, 221 + 32) .. string.rep("\0", 32) .. holes:sub(221 + 65)  -- THIRD withdrawn
+local dh = escrow.decode_job(holes)
+check(#dh.offers == 2 and dh.offers[1] == ME and dh.offers[2] == OTHER, "withdrawn offer: hole skipped")
 check(#dm.offers == 16 and dm.offers[1] == many[20] and dm.offers[16] == many[5] and dm.offer_count == 20, "offer ring wraps at 16")
 check(escrow.decode_job(jb:sub(1, 219)) == nil and escrow.decode_job("x" .. jb:sub(2)) == nil, "bad job refused")
 local listed = escrow.decode_job(jb:sub(1, escrow.JOB.LIST))
