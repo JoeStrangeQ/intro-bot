@@ -20,7 +20,7 @@ LEFT / RIGHT moves between screens. CANCEL goes back, or exits from a main scree
 - **My offers**: jobs you offered on. When you're picked: "Intro made". Closed jobs: get
   your offer rent back.
 - **Profile**: your wallet, register as an introer, machine value (a demo value), demo mode,
-  "Ask me about BotBot".
+  the botbotcap.com QR and "Robots that earn → botbotcap.com".
 
 When a job you made is confirmed, the badge plays "JOB DONE!" and flashes its lights.
 
