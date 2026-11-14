@@ -103,4 +103,31 @@ function M.relay(message, cb)
   end)
 end
 
+-- Ask for a "connect" link: the phone wallet that scans it tells the relay its address.
+-- cb(ok, id, "solana:..." link) or cb(false, error).
+function M.connect(cb)
+  http.post(M.RELAY .. "/connect", {}, function(ok, res)
+    if not ok then return cb(false, res) end
+    if res.status ~= 200 then return cb(false, "relay error " .. tostring(res.status)) end
+    local t = json.decode(res.body or "")
+    local id, url = type(t) == "table" and t.id, type(t) == "table" and t.url
+    if type(id) ~= "string" or not id:match("^%x+$") or #id ~= 32
+      or url ~= "solana:" .. M.RELAY .. "/tx/" .. id then
+      return cb(false, "bad relay answer")
+    end
+    cb(true, id, url)
+  end)
+end
+
+-- Who scanned the connect link: cb(wallet) once a wallet has, cb(nil) before, cb(false) if gone.
+function M.who(id, cb)
+  http.get(M.RELAY .. "/tx/" .. id .. "/who", function(ok, res)
+    if not ok then return cb(nil) end
+    if res.status == 404 then return cb(false) end
+    local t = res.status == 200 and json.decode(res.body or "")
+    local w = type(t) == "table" and t.wallet
+    cb(type(w) == "string" and sol.is_wallet(w) and w or nil)
+  end)
+end
+
 return M

@@ -19,12 +19,12 @@ local TABS = {"request", "board", "myjobs", "myoffers", "profile"}
 local IS_TAB = {request = true, board = true, myjobs = true, myoffers = true, profile = true}
 local TITLE = {
   request = "Request an intro", board = "Intro board", myjobs = "My jobs", myoffers = "My offers",
-  profile = "Profile", job = "Job", myjob = "My job", offerjob = "My offer", sign = "Sign on phone",
+  profile = "Profile", job = "Job", myjob = "My job", offerjob = "My offer", sign = "Sign on phone", connect = "Connect",
 }
 local TABHINT = "LEFT/RIGHT screens   CANCEL exit"
-local CTA = "Robots that earn \u{2192} botbotcap.com"
-local CTA_EARNED = "This badge just earned. Your robots can too \u{2192} botbotcap.com"
-local CTA_PAID = "Paid \u{2713} \u{00B7} Robots that earn \u{2192} botbotcap.com"
+local CTA = "Robots that earn: botbotcap.com"
+local CTA_EARNED = "This badge just earned. Your robots can too: botbotcap.com"
+local CTA_PAID = "Paid! Robots that earn: botbotcap.com"
 local SITE = "https://botbotcap.com"
 
 -- State ------------------------------------------------------------------
@@ -329,16 +329,76 @@ end
 
 -- Request an intro (home) ---------------------------------------------------
 
+-- Connect: scan a QR with the phone wallet; the relay tells us its address. No typing.
+local CONNECT_POLL_MS, CONNECT_FOR = 2000, 600000
+
+local function stop_connect()
+  local c = st.connect
+  if c and c.timer then timer.cancel(c.timer) end
+  st.connect = nil
+end
+
+local function connected(c, wallet)
+  stop_connect()
+  st.wallet = wallet
+  storage.set("wallet", wallet)
+  st.me, st.my_jobs, st.my_offers = nil, nil, nil
+  ui.toast("Connected " .. sol.short(wallet))
+  poll(true)
+  show(c.back)
+  if c.then_do then c.then_do() end
+end
+
+local function build_connect()
+  frame("connect")
+  local c = st.connect
+  if c and c.url and ui.qr then ui.qr(14, 32, 160, c.url) end
+  ui.label(186, 36, "Connect wallet", {size = 14, color = C.brand, w = 124})
+  if c and c.why then
+    ui.label(186, 60, c.why, {size = 12, color = C.ink, w = 124})
+    ui.label(186, 76, "SELECT to retry", {size = 12, color = C.dim, w = 124})
+    ui.hint("SELECT retry   CANCEL back")
+    return
+  end
+  ui.label(186, 60, c and c.url and "Scan with your" or "Preparing...", {size = 12, color = C.ink, w = 124})
+  ui.label(186, 76, c and c.url and "phone wallet." or "", {size = 12, color = C.ink, w = 124})
+  if c and c.url then
+    ui.label(186, 104, "Approve the note", {size = 12, color = C.dim})
+    ui.label(186, 118, "to connect.", {size = 12, color = C.dim})
+  end
+  ui.hint("CANCEL back")
+end
+
 local function ask_wallet(then_do)
-  input("Your wallet address", 44, function(text)
-    if not text then return end
-    text = text:gsub("%s", "")
-    if not sol.is_wallet(text) then ui.toast("Not a Solana address") return end
-    st.wallet = text
-    storage.set("wallet", text)
-    st.me, st.my_jobs, st.my_offers = nil, nil, nil
-    poll(true)
-    if then_do then then_do() end
+  stop_connect()
+  local c = {then_do = then_do, back = st.screen == "connect" and "profile" or st.screen, started = sys.millis()}
+  st.connect = c
+  show("connect")
+  chain.connect(function(ok, id, url)
+    if st.connect ~= c then return end
+    if not ok then
+      c.why = "Couldn't reach the relay."
+      return show("connect")
+    end
+    c.url = url
+    c.timer = timer.every(CONNECT_POLL_MS, function()
+      if st.connect ~= c then return end
+      if sys.millis() - c.started > CONNECT_FOR then
+        timer.cancel(c.timer)
+        c.why, c.url = "QR expired.", nil
+        return show("connect")
+      end
+      chain.who(id, function(wallet)
+        if st.connect ~= c then return end
+        if wallet then return connected(c, wallet) end
+        if wallet == false then
+          timer.cancel(c.timer)
+          c.why, c.url = "QR expired.", nil
+          show("connect")
+        end
+      end)
+    end)
+    show("connect")
   end)
 end
 
@@ -605,7 +665,7 @@ local reset_data, restart_poll  -- forward
 
 local function profile_items()
   return {
-    {title = "My wallet", right = st.wallet and sol.short(st.wallet) or "not set"},
+    {title = st.wallet and "My wallet" or "Connect wallet", sub = "scan with your phone", right = st.wallet and sol.short(st.wallet) or ""},
     {title = st.me and "Update my name" or "Register as an introer", sub = "sign on your phone"},
     {title = "Demo mode", sub = "pretend chain, no network", right = st.mock and "ON" or "OFF"},
   }
@@ -648,7 +708,7 @@ local function build_profile()
   local list
   list = ui.list(6, 112, 308, 64, profile_items(), {on_select = function(i)
     if i == 1 then
-      ask_wallet(function() show("profile") end)
+      ask_wallet()
     elseif i == 2 then
       ask_name()
     else
@@ -671,7 +731,7 @@ end
 local BUILD = {
   request = build_request, board = build_board, myjobs = build_myjobs, myoffers = build_myoffers,
   profile = build_profile, job = build_job, myjob = build_myjob, offerjob = build_offerjob,
-  sign = build_sign,
+  sign = build_sign, connect = build_connect,
 }
 local BACK = {job = "board", myjob = "myjobs", offerjob = "myoffers"}
 
@@ -896,6 +956,12 @@ function on_key(key)
   if st.anim then return true end
   if st.screen == "splash" and key ~= "back" then show("request") return true end
   if key == "back" then
+    if st.screen == "connect" then
+      local back = st.connect and st.connect.back or "request"
+      stop_connect()
+      show(back == "connect" and "request" or back)
+      return true
+    end
     if st.screen == "sign" then
       local back = (st.sign or st.retry or {}).back or "request"
       stop_sign()
@@ -905,6 +971,10 @@ function on_key(key)
     end
     if BACK[st.screen] then show(BACK[st.screen]) return true end
     return false
+  end
+  if key == "select" and st.screen == "connect" and st.connect and st.connect.why then
+    ask_wallet(st.connect.then_do)
+    return true
   end
   if key == "select" and st.screen == "sign" and st.retry then
     local s = st.retry
@@ -931,7 +1001,7 @@ function on_exit()
   if led then led.off() end
 end
 
--- Splash: the big rainbow B, then Request an intro.
+-- Splash: the big rainbow bot, then Request an intro.
 local function splash()
   st.screen = "splash"
   ui.clear()

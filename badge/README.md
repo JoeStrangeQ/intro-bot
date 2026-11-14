@@ -6,6 +6,7 @@ only when you confirm. We trust you to keep your word.
 
 The bid waits in an on-chain escrow. The badge never holds keys: it builds each
 transaction, the relay turns it into a QR, and you sign on your phone wallet.
+To connect, scan one QR with your phone wallet: the badge learns your address. No typing.
 
 ## Screens
 
@@ -20,7 +21,7 @@ LEFT / RIGHT moves between screens. CANCEL goes back, or exits from a main scree
 - **My offers**: jobs you offered on. When you're picked: "Intro made". Closed jobs: get
   your offer rent back.
 - **Profile**: your wallet, register as an introer, machine value (a demo value), demo mode,
-  the botbotcap.com QR and "Robots that earn → botbotcap.com".
+  the botbotcap.com QR and "Robots that earn: botbotcap.com".
 
 When a job you made is confirmed, the badge plays "JOB DONE!" and flashes its lights.
 
@@ -39,7 +40,7 @@ When a job you made is confirmed, the badge plays "JOB DONE!" and flashes its li
 1. Open https://solana.com/breakpoint/badge/apps/submit and sign in.
 2. Drop this `badge/` folder on the editor.
 3. Press **Try in emulator**. Turn on **Demo mode** in Setup to try every screen with no
-   network, or enter your wallet to use devnet.
+   network, or connect your phone wallet to use the chain.
 
 Testing `rpc` and `http` needs your account to have X linked. Needs Solana OS 2.1.0 or
 later (the `solana` module).
