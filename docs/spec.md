@@ -69,23 +69,96 @@ On every payout: `jobs_done += 1`, `earned += bid`, `total_held -= bid`.
 `Refunded{request, reason}`.
 
 ### Program details (filled in by the program branch)
-- `init_config(arbiter, cap_total)`: the signer must be the upgrade authority and becomes `admin`.
-  Accounts: `config, authority, program, program_data, system_program`.
-- `bid` accounts: `config, introer, request, requester, lowest?, lowest_requester?, system_program`.
-  `request` is the PDA for `introer.next_id`. When the queue is not full, pass the program id for
-  `lowest` / `lowest_requester` (Anchor "none"); they are ignored.
-- **Full queue (addition):** besides `lowest` + `lowest_requester`, pass the other 4 open
-  requests of the introer as remaining accounts (read-only). This proves `lowest` really is the
-  lowest. The new bid must be strictly higher than `lowest.bid`.
-- `target` must not be empty. `min_bid` must also be ≤ `MAX_BID`.
-- Payout and refund ixs take `wallet` (= `introer.wallet`) and `requester` (= `request.requester`)
-  accounts; wrong keys fail.
+
+All accounts are fixed size. Text is UTF-8, zero-padded (nothing but zeros after the first
+zero byte). Integers are little-endian. Offsets include the 8-byte Anchor discriminator.
+
+`Config` PDA `["config"]`, 58 bytes:
+
+| Offset | Field | Type |
+| --- | --- | --- |
+| 8 | admin | Pubkey |
+| 40 | paused | u8 (0/1) |
+| 41 | cap_total | u64 |
+| 49 | total_held | u64 |
+| 57 | bump | u8 |
+
+`Directory` PDA `["directory"]`, 1033 bytes. Created by `init_config`. A ring of the last 32
+registered introer wallets; `register_introer` writes at `head` and advances it (skipped if the
+wallet is already listed). Empty slots are all zeros.
+
+| Offset | Field | Type |
+| --- | --- | --- |
+| 8 | head | u8 (next slot to write) |
+| 9 + 32·i | wallets[i], i = 0..31 | Pubkey |
+
+`Introer` PDA `["introer", wallet]`, 150 bytes:
+
+| Offset | Field | Type |
+| --- | --- | --- |
+| 8 | wallet | Pubkey |
+| 40 | min_bid | u64 |
+| 48 | next_id | u64 |
+| 56 | jobs_done | u32 |
+| 60 | earned | u64 |
+| 68 | created_at | i64 |
+| 76 | open_count | u8 |
+| 77 | bump | u8 |
+| 78 | badge_id | [u8; 8] |
+| 86 | offer | [u8; 64] |
+
+`Request` PDA `["request", introer_pda, id u64 LE]`, 210 bytes. Live ids are below `next_id`
+(settled ones are closed):
+
+| Offset | Field | Type |
+| --- | --- | --- |
+| 8 | introer (PDA) | Pubkey |
+| 40 | requester | Pubkey |
+| 72 | id | u64 |
+| 80 | bid | u64 |
+| 88 | status | u8 (0 Open, 1 Accepted, 2 Made) |
+| 89 | created_at | i64 |
+| 97 | accepted_at | i64 |
+| 105 | made_at | i64 |
+| 113 | bump | u8 |
+| 114 | target | [u8; 64] (not empty) |
+| 178 | telegram | [u8; 32] |
+
+Instruction args (Borsh, after the 8-byte discriminator; text args are fixed arrays):
+`init_config(cap_total u64)`, `register_introer(badge_id [u8;8], offer [u8;64], min_bid u64)`,
+`update_introer(offer [u8;64], min_bid u64)`, `bid(target [u8;64], telegram [u8;32], amount u64)`,
+`set_admin(Pubkey)`, `set_paused(bool)`, `set_cap(u64)`. Others take no args.
+
+Account order (s = signer, w = writable):
+
+| Ix | Accounts |
+| --- | --- |
+| `init_config` | authority (s,w), config (w), directory (w), program, program_data, system_program |
+| `set_admin` / `set_paused` / `set_cap` | admin (s), config (w) |
+| `register_introer` | wallet (s,w), introer (w), directory (w), system_program |
+| `update_introer` | wallet (s), introer (w) |
+| `bid` | requester (s,w), config (w), introer (w), request (w), system_program, lowest (w, optional), lowest_requester (w, optional), then remaining |
+| `withdraw` | requester (s,w), config (w), introer (w), request (w) |
+| `accept` / `mark_made` | wallet (s), introer (w), request (w) |
+| `decline` | wallet (s), config (w), introer (w), request (w), requester (w) |
+| `confirm` | requester (s,w), config (w), introer (w), request (w), wallet (w, = introer.wallet) |
+| `refund_unconfirmed` / `refund_expired` | caller (s), config (w), introer, request (w), requester (w) |
+
+- `init_config`: the signer must be the upgrade authority and becomes `admin`.
+- `bid`: `request` is the PDA for `introer.next_id`. Optional accounts not used: pass the program
+  id. They are ignored unless the queue is full.
+- **Full queue (addition to the table above):** pass `lowest` + `lowest_requester` and the other
+  4 open requests of the introer as read-only remaining accounts. This proves `lowest` really is
+  the lowest. The new bid must be strictly higher than `lowest.bid`.
+- `min_bid` must also be ≤ `MAX_BID`.
 - Event fields: `IntroerRegistered{introer, wallet, badge_id, min_bid}`,
   `Outbid{request, requester, bid, new_bid}` (request = the refunded one), `Withdrawn{request}`,
-  `Accepted{request}`, `Declined{request}`, `Made{request, made_at}`, `Disputed{request}`.
+  `Accepted{request}`, `Declined{request}`, `Made{request, made_at}`.
   `Refunded{request, reason}` is emitted on every refund: `0` withdrawn, `1` declined,
-  `2` outbid, `3` expired, `4` arbiter.
+  `2` outbid, `3` expired (no work), `4` unconfirmed.
 - Errors: see `EscrowError` in the IDL.
+- Test vectors: `tests/fixtures/*.json` (one instruction each: accounts in order + data hex) and
+  `tests/fixtures/accounts.json` (raw account bytes). Rewritten by `cargo test`.
 
 ## Machine value (display only, labelled "demo value")
 `value = earned × 0.8 × wear`, `wear = max(0.5, 1 − 0.01 × days since created_at)`.

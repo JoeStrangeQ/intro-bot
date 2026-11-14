@@ -20,6 +20,13 @@
       ],
       "accounts": [
         {
+          "name": "wallet",
+          "signer": true,
+          "relations": [
+            "introer"
+          ]
+        },
+        {
           "name": "introer",
           "writable": true,
           "pda": {
@@ -74,13 +81,6 @@
               }
             ]
           }
-        },
-        {
-          "name": "wallet",
-          "signer": true,
-          "relations": [
-            "introer"
-          ]
         }
       ],
       "args": []
@@ -103,6 +103,11 @@
         158
       ],
       "accounts": [
+        {
+          "name": "requester",
+          "writable": true,
+          "signer": true
+        },
         {
           "name": "config",
           "writable": true,
@@ -177,9 +182,8 @@
           }
         },
         {
-          "name": "requester",
-          "writable": true,
-          "signer": true
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
         },
         {
           "name": "lowest",
@@ -193,20 +197,26 @@
           "name": "lowest_requester",
           "writable": true,
           "optional": true
-        },
-        {
-          "name": "system_program",
-          "address": "11111111111111111111111111111111"
         }
       ],
       "args": [
         {
           "name": "target",
-          "type": "string"
+          "type": {
+            "array": [
+              "u8",
+              64
+            ]
+          }
         },
         {
           "name": "telegram",
-          "type": "string"
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
         },
         {
           "name": "amount",
@@ -230,6 +240,14 @@
         0
       ],
       "accounts": [
+        {
+          "name": "requester",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "request"
+          ]
+        },
         {
           "name": "config",
           "writable": true,
@@ -309,14 +327,6 @@
         {
           "name": "wallet",
           "writable": true
-        },
-        {
-          "name": "requester",
-          "writable": true,
-          "signer": true,
-          "relations": [
-            "request"
-          ]
         }
       ],
       "args": []
@@ -337,6 +347,13 @@
         177
       ],
       "accounts": [
+        {
+          "name": "wallet",
+          "signer": true,
+          "relations": [
+            "introer"
+          ]
+        },
         {
           "name": "config",
           "writable": true,
@@ -413,68 +430,8 @@
           }
         },
         {
-          "name": "wallet",
-          "signer": true,
-          "relations": [
-            "introer"
-          ]
-        },
-        {
           "name": "requester",
           "writable": true,
-          "relations": [
-            "request"
-          ]
-        }
-      ],
-      "args": []
-    },
-    {
-      "name": "dispute",
-      "discriminator": [
-        216,
-        92,
-        128,
-        146,
-        202,
-        85,
-        135,
-        73
-      ],
-      "accounts": [
-        {
-          "name": "request",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  114,
-                  101,
-                  113,
-                  117,
-                  101,
-                  115,
-                  116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "request.introer",
-                "account": "Request"
-              },
-              {
-                "kind": "account",
-                "path": "request.id",
-                "account": "Request"
-              }
-            ]
-          }
-        },
-        {
-          "name": "requester",
-          "signer": true,
           "relations": [
             "request"
           ]
@@ -500,6 +457,11 @@
       ],
       "accounts": [
         {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
           "name": "config",
           "writable": true,
           "pda": {
@@ -519,9 +481,26 @@
           }
         },
         {
-          "name": "authority",
+          "name": "directory",
           "writable": true,
-          "signer": true
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  105,
+                  114,
+                  101,
+                  99,
+                  116,
+                  111,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
         },
         {
           "name": "program",
@@ -536,10 +515,6 @@
         }
       ],
       "args": [
-        {
-          "name": "arbiter",
-          "type": "pubkey"
-        },
         {
           "name": "cap_total",
           "type": "u64"
@@ -559,6 +534,13 @@
         89
       ],
       "accounts": [
+        {
+          "name": "wallet",
+          "signer": true,
+          "relations": [
+            "introer"
+          ]
+        },
         {
           "name": "introer",
           "writable": true,
@@ -614,13 +596,6 @@
               }
             ]
           }
-        },
-        {
-          "name": "wallet",
-          "signer": true,
-          "relations": [
-            "introer"
-          ]
         }
       ],
       "args": []
@@ -641,6 +616,116 @@
         250
       ],
       "accounts": [
+        {
+          "name": "caller",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "introer",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  114,
+                  111,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "introer.wallet",
+                "account": "Introer"
+              }
+            ]
+          },
+          "relations": [
+            "request"
+          ]
+        },
+        {
+          "name": "request",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "introer"
+              },
+              {
+                "kind": "account",
+                "path": "request.id",
+                "account": "Request"
+              }
+            ]
+          }
+        },
+        {
+          "name": "requester",
+          "writable": true,
+          "relations": [
+            "request"
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "refund_unconfirmed",
+      "docs": [
+        "Anyone: refunds a made request the requester never confirmed. The",
+        "introer is paid only by `confirm`."
+      ],
+      "discriminator": [
+        243,
+        233,
+        83,
+        39,
+        176,
+        245,
+        136,
+        216
+      ],
+      "accounts": [
+        {
+          "name": "caller",
+          "signer": true
+        },
         {
           "name": "config",
           "writable": true,
@@ -740,6 +825,11 @@
       ],
       "accounts": [
         {
+          "name": "wallet",
+          "writable": true,
+          "signer": true
+        },
+        {
           "name": "introer",
           "writable": true,
           "pda": {
@@ -764,9 +854,26 @@
           }
         },
         {
-          "name": "wallet",
+          "name": "directory",
           "writable": true,
-          "signer": true
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  105,
+                  114,
+                  101,
+                  99,
+                  116,
+                  111,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
         },
         {
           "name": "system_program",
@@ -785,235 +892,16 @@
         },
         {
           "name": "offer",
-          "type": "string"
+          "type": {
+            "array": [
+              "u8",
+              64
+            ]
+          }
         },
         {
           "name": "min_bid",
           "type": "u64"
-        }
-      ]
-    },
-    {
-      "name": "release_expired",
-      "docs": [
-        "Anyone: pays the introer once the confirm window has passed."
-      ],
-      "discriminator": [
-        150,
-        199,
-        225,
-        10,
-        15,
-        244,
-        46,
-        47
-      ],
-      "accounts": [
-        {
-          "name": "config",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  99,
-                  111,
-                  110,
-                  102,
-                  105,
-                  103
-                ]
-              }
-            ]
-          }
-        },
-        {
-          "name": "introer",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  105,
-                  110,
-                  116,
-                  114,
-                  111,
-                  101,
-                  114
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "introer.wallet",
-                "account": "Introer"
-              }
-            ]
-          },
-          "relations": [
-            "request"
-          ]
-        },
-        {
-          "name": "request",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  114,
-                  101,
-                  113,
-                  117,
-                  101,
-                  115,
-                  116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "introer"
-              },
-              {
-                "kind": "account",
-                "path": "request.id",
-                "account": "Request"
-              }
-            ]
-          }
-        },
-        {
-          "name": "wallet",
-          "writable": true
-        },
-        {
-          "name": "requester",
-          "writable": true,
-          "relations": [
-            "request"
-          ]
-        }
-      ],
-      "args": []
-    },
-    {
-      "name": "resolve",
-      "docs": [
-        "Arbiter settles a dispute either way."
-      ],
-      "discriminator": [
-        246,
-        150,
-        236,
-        206,
-        108,
-        63,
-        58,
-        10
-      ],
-      "accounts": [
-        {
-          "name": "config",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  99,
-                  111,
-                  110,
-                  102,
-                  105,
-                  103
-                ]
-              }
-            ]
-          }
-        },
-        {
-          "name": "arbiter",
-          "signer": true,
-          "relations": [
-            "config"
-          ]
-        },
-        {
-          "name": "introer",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  105,
-                  110,
-                  116,
-                  114,
-                  111,
-                  101,
-                  114
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "introer.wallet",
-                "account": "Introer"
-              }
-            ]
-          },
-          "relations": [
-            "request"
-          ]
-        },
-        {
-          "name": "request",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  114,
-                  101,
-                  113,
-                  117,
-                  101,
-                  115,
-                  116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "introer"
-              },
-              {
-                "kind": "account",
-                "path": "request.id",
-                "account": "Request"
-              }
-            ]
-          }
-        },
-        {
-          "name": "wallet",
-          "writable": true
-        },
-        {
-          "name": "requester",
-          "writable": true,
-          "relations": [
-            "request"
-          ]
-        }
-      ],
-      "args": [
-        {
-          "name": "to_introer",
-          "type": "bool"
         }
       ]
     },
@@ -1031,52 +919,12 @@
       ],
       "accounts": [
         {
-          "name": "config",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  99,
-                  111,
-                  110,
-                  102,
-                  105,
-                  103
-                ]
-              }
-            ]
-          }
-        },
-        {
           "name": "admin",
           "signer": true,
           "relations": [
             "config"
           ]
-        }
-      ],
-      "args": [
-        {
-          "name": "admin",
-          "type": "pubkey"
-        }
-      ]
-    },
-    {
-      "name": "set_arbiter",
-      "discriminator": [
-        15,
-        205,
-        194,
-        180,
-        172,
-        213,
-        113,
-        211
-      ],
-      "accounts": [
+        },
         {
           "name": "config",
           "writable": true,
@@ -1095,18 +943,11 @@
               }
             ]
           }
-        },
-        {
-          "name": "admin",
-          "signer": true,
-          "relations": [
-            "config"
-          ]
         }
       ],
       "args": [
         {
-          "name": "arbiter",
+          "name": "admin",
           "type": "pubkey"
         }
       ]
@@ -1125,6 +966,13 @@
       ],
       "accounts": [
         {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
           "name": "config",
           "writable": true,
           "pda": {
@@ -1142,13 +990,6 @@
               }
             ]
           }
-        },
-        {
-          "name": "admin",
-          "signer": true,
-          "relations": [
-            "config"
-          ]
         }
       ],
       "args": [
@@ -1172,6 +1013,13 @@
       ],
       "accounts": [
         {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
           "name": "config",
           "writable": true,
           "pda": {
@@ -1189,13 +1037,6 @@
               }
             ]
           }
-        },
-        {
-          "name": "admin",
-          "signer": true,
-          "relations": [
-            "config"
-          ]
         }
       ],
       "args": [
@@ -1219,6 +1060,13 @@
       ],
       "accounts": [
         {
+          "name": "wallet",
+          "signer": true,
+          "relations": [
+            "introer"
+          ]
+        },
+        {
           "name": "introer",
           "writable": true,
           "pda": {
@@ -1241,19 +1089,17 @@
               }
             ]
           }
-        },
-        {
-          "name": "wallet",
-          "signer": true,
-          "relations": [
-            "introer"
-          ]
         }
       ],
       "args": [
         {
           "name": "offer",
-          "type": "string"
+          "type": {
+            "array": [
+              "u8",
+              64
+            ]
+          }
         },
         {
           "name": "min_bid",
@@ -1278,6 +1124,14 @@
       ],
       "accounts": [
         {
+          "name": "requester",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "request"
+          ]
+        },
+        {
           "name": "config",
           "writable": true,
           "pda": {
@@ -1352,14 +1206,6 @@
               }
             ]
           }
-        },
-        {
-          "name": "requester",
-          "writable": true,
-          "signer": true,
-          "relations": [
-            "request"
-          ]
         }
       ],
       "args": []
@@ -1377,6 +1223,19 @@
         250,
         204,
         130
+      ]
+    },
+    {
+      "name": "Directory",
+      "discriminator": [
+        145,
+        83,
+        165,
+        144,
+        183,
+        209,
+        7,
+        175
       ]
     },
     {
@@ -1444,19 +1303,6 @@
         218,
         236,
         20
-      ]
-    },
-    {
-      "name": "Disputed",
-      "discriminator": [
-        186,
-        235,
-        91,
-        209,
-        148,
-        93,
-        152,
-        217
       ]
     },
     {
@@ -1556,8 +1402,8 @@
     },
     {
       "code": 6003,
-      "name": "TextTooLong",
-      "msg": "Text is empty or too long"
+      "name": "BadText",
+      "msg": "Text is empty, not UTF-8 or not zero-padded"
     },
     {
       "code": 6004,
@@ -1606,16 +1452,11 @@
     },
     {
       "code": 6013,
-      "name": "WindowClosed",
-      "msg": "Confirm window has closed"
-    },
-    {
-      "code": 6014,
       "name": "NotExpired",
       "msg": "Not expired yet"
     },
     {
-      "code": 6015,
+      "code": 6014,
       "name": "Overflow",
       "msg": "Math overflow"
     }
@@ -1667,10 +1508,6 @@
             "type": "pubkey"
           },
           {
-            "name": "arbiter",
-            "type": "pubkey"
-          },
-          {
             "name": "paused",
             "type": "bool"
           },
@@ -1708,13 +1545,29 @@
       }
     },
     {
-      "name": "Disputed",
+      "name": "Directory",
+      "docs": [
+        "Ring of recently registered introer wallets, for clients that can't",
+        "list program accounts."
+      ],
       "type": {
         "kind": "struct",
         "fields": [
           {
-            "name": "request",
-            "type": "pubkey"
+            "name": "head",
+            "docs": [
+              "Next slot to write."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "wallets",
+            "type": {
+              "array": [
+                "pubkey",
+                32
+              ]
+            }
           }
         ]
       }
@@ -1729,29 +1582,12 @@
             "type": "pubkey"
           },
           {
-            "name": "badge_id",
-            "type": {
-              "array": [
-                "u8",
-                8
-              ]
-            }
-          },
-          {
-            "name": "offer",
-            "type": "string"
-          },
-          {
             "name": "min_bid",
             "type": "u64"
           },
           {
             "name": "next_id",
             "type": "u64"
-          },
-          {
-            "name": "open_count",
-            "type": "u8"
           },
           {
             "name": "jobs_done",
@@ -1766,8 +1602,33 @@
             "type": "i64"
           },
           {
+            "name": "open_count",
+            "type": "u8"
+          },
+          {
             "name": "bump",
             "type": "u8"
+          },
+          {
+            "name": "badge_id",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "offer",
+            "docs": [
+              "UTF-8, zero-padded."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
           }
         ]
       }
@@ -1916,14 +1777,6 @@
             "type": "u64"
           },
           {
-            "name": "target",
-            "type": "string"
-          },
-          {
-            "name": "telegram",
-            "type": "string"
-          },
-          {
             "name": "bid",
             "type": "u64"
           },
@@ -1946,6 +1799,30 @@
           {
             "name": "bump",
             "type": "u8"
+          },
+          {
+            "name": "target",
+            "docs": [
+              "UTF-8, zero-padded."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
+          },
+          {
+            "name": "telegram",
+            "docs": [
+              "UTF-8, zero-padded."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
           }
         ]
       }
