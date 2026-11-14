@@ -11,10 +11,10 @@ Everything points to https://botbotcap.com ("Ask me about BotBot").
 | Part | Path | Branch |
 | --- | --- | --- |
 | Escrow program (Anchor 1.2) | `programs/intro-escrow` + LiteSVM tests in `tests/` | `intro-bot/program` |
-| Web app + Worker API | `apps/intro-bot` (Vite + React) and `services/intro-bot` (Cloudflare Worker) | `intro-bot/web` |
+| Solana Pay relay | `services/relay` (Cloudflare Worker, no UI) | `intro-bot/web` |
 | Badge app (Lua) | `badge/` (`main.lua`, `app.json`, `lib/`) | `intro-bot/badge` |
 
-Web: `https://intro.botbotcap.com`. API: `https://intro.botbotcap.com/api/...`.
+Relay: `https://relay.botbotcap.com` (Solana Pay transaction requests only).
 
 ## Program: `intro_escrow`
 
@@ -72,28 +72,25 @@ On every payout: `jobs_done += 1`, `earned += bid`, `total_held -= bid`.
 The 20% shown as "owner fee" and 80% as "machine value" is display only; all SOL goes to
 the introer. The UI says "demo value".
 
-## Worker API (`services/intro-bot`), JSON, CORS open
-Reads the chain with `confirmed` commitment (repo rule). Small answers: the badge gets
-≤ 3.5 KB.
+## No web app: everything on the badge
+Both sides use the badge. The introer runs Intro Bot to show their offer and queue; the
+requester runs it to browse introers (on-chain list, or nearby badges over the mesh), bid,
+confirm, withdraw or refund. The badge reads the chain itself with `rpc`
+(`getProgramAccounts` with `memcmp` filters and `dataSlice`, `getAccountInfo`).
 
-- `GET /api/introer/:wallet` → `{wallet, badge, offer, minBid, jobs, earned, value, open:[...], active:[...]}`
-  where each request is `{id, pda, target, tg, bid, status, at}`; lamports as strings.
-- `GET /api/board?limit=50` → public list of open/active requests across introers.
-- `GET /api/badge/:wallet` → compact badge view: `{v, j, e, q:[{i, t, g, b, s}], n}`
-  (value, jobs, earned in lamports as strings, up to 5 queue rows, next min bid). ≤ 1.5 KB.
-- Solana Pay transaction requests (`GET` → `{label, icon}`, `POST {account}` → `{transaction, message}`):
-  `/api/tx/accept?request=`, `/api/tx/made?request=`, `/api/tx/decline?request=`,
-  `/api/tx/register?badge=&offer=&min=`. The badge shows these as
-  `solana:https://intro.botbotcap.com/api/tx/...` QR codes so the introer signs on their phone.
-- Bids, confirm, withdraw and refunds are done on the web page with a connected wallet.
+The badge can't sign. Every action is built on the badge as a transaction message and signed
+on the person's phone wallet through a Solana Pay transaction request QR, as the badge docs
+describe ("Build on the badge, sign on a phone"). Solana Pay needs an https endpoint the
+wallet can fetch, so there is one tiny stateless **relay** (`services/relay`, Cloudflare
+Worker, no UI): the badge POSTs the message, gets back a `solana:https://relay.botbotcap.com/tx/<id>`
+link, the wallet GETs/POSTs it, and the relay fills the wallet's address and a fresh
+blockhash. It holds a message for at most 10 minutes (KV TTL), never holds keys or funds,
+and can't change accounts or amounts beyond the signer placeholder.
 
-## Web app (`apps/intro-bot`)
-Routes: `/` board + "become an introer"; `/b/:wallet` introer page (offer, machine value
-ticker, queue, bid form: target, Telegram, amount); `/r/:request` request page
-(confirm / withdraw / refund buttons by state).
-BotBot look: reuse `apps/botbot` theme (Platinum Mac windows, lavender `--desktop #c9bff2`,
-`--brand #6a50d8`, Chicago / Inter / IBM Plex Mono fonts, `BotGlyph` logo). Footer and
-empty states link to https://botbotcap.com. Plain short copy.
+Account layout must keep fixed-size fields first so `memcmp` and `dataSlice` work:
+`introer`/`requester` pubkeys, ids, amounts, status and timestamps before any text.
+Text fields are fixed-size byte arrays (`target: [u8;64]`, `telegram: [u8;32]`,
+`offer: [u8;64]`), zero-padded, so offsets never move.
 
 ## Badge app (`badge/`)
 Permissions: `http` (host `intro.botbotcap.com`), `storage`. Optionally `led`.
