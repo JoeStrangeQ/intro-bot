@@ -52,9 +52,9 @@ local ZERO = ("\0"):rep(32)
 local function key(b, at) return b:sub(at, at + 31) end
 
 -- A ring of `n` keys at `at`, newest first; `head` is the next slot to write.
-local function ring(b, at, n, head, count)
+local function ring(b, at, n, head)
   local out = {}
-  for k = 0, math.min(n, count or n) - 1 do
+  for k = 0, n - 1 do
     local slot = (head - 1 - k) % n
     local w = key(b, at + slot * 32)
     if w ~= ZERO then out[#out + 1] = w end
@@ -81,7 +81,8 @@ function M.decode_job(b)
     made_at = bytes.time(b, L.made_at),
     approved = approved ~= ZERO and approved or nil,
     offer_count = count,
-    offers = full and ring(b, L.offers, M.OFFERS, bytes.u8(b, L.offers_head), count) or {},
+    -- Every slot, newest first: a withdrawn offer leaves a zero hole in the ring.
+    offers = full and ring(b, L.offers, M.OFFERS, bytes.u8(b, L.offers_head)) or {},
     serial = bytes.u64(b, L.serial),
     who = bytes.text(b, L.who, M.WHO),
     company = bytes.text(b, L.company, M.COMPANY),
