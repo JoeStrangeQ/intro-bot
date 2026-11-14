@@ -336,7 +336,7 @@ local function new_world(opts)
     pda = pda,
   }
   _G.rpc = {call = function(method, params, opts, cb)
-    check(type(opts) == "table" and opts.cluster == "devnet", "rpc on devnet")
+    check(type(opts) == "table" and opts.cluster == "mainnet", "rpc on mainnet")
     local t = W.ms
     local n = 0
     W.rpc_times[#W.rpc_times + 1] = t

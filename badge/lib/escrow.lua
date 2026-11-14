@@ -6,7 +6,7 @@ local tx = require("lib.tx")
 local M = {}
 
 M.PROGRAM_ID = "GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC"
-M.CLUSTER = "devnet"
+M.CLUSTER = "mainnet"
 
 M.WORK_WINDOW = 7 * 24 * 3600     -- approved -> mark made
 M.CONFIRM_WINDOW = 72 * 3600      -- made -> confirm
