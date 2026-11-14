@@ -272,7 +272,7 @@ end
 
 -- Signing: build the message, get a QR from the relay, watch the chain -----
 
-local start_sign  -- forward
+local start_sign, fresh_bid  -- forward
 
 local function build_action()
   frame("action")
@@ -337,7 +337,7 @@ local function landed(want, b, r)
     local q = b and escrow.decode_request(b)
     if not q then return nil end
     if q.target == r.target and q.telegram == r.telegram and q.bid == r.bid then return true end
-    return false, "Someone bid first."
+    return false, "Someone bid first"
   end
   if want == "offer" then
     local i = b and escrow.decode_introer(b)
@@ -387,7 +387,9 @@ local function watch()
     if done then sign_done(s)
     elseif why then
       stop_sign()
-      sign_text(why, "Nothing was paid.", "Try again.")
+      st.retry = s.action == "bid" and s
+      sign_text(why, "Nothing was paid.", st.retry and "SELECT to retry" or "Try again.")
+      if st.retry then ui.hint("SELECT retry   CANCEL back") end
     end
   end)
 end
@@ -414,8 +416,39 @@ local function build_sign()
   ui.hint("CANCEL back")
 end
 
+-- Right before a bid: read the introer again for its next id and lowest open bid.
+function fresh_bid(s, r, build)
+  local wb = solana.decode(r.w)
+  local intro = escrow.introer_pda(wb)
+  local function fail_bid(why)
+    if st.sign ~= s then return end
+    s.err = why
+    if st.screen == "sign" then show_later("sign") end
+  end
+  chain.account(intro, function(ok, b)
+    if st.sign ~= s then return end
+    local x = ok and b and escrow.decode_introer(b)
+    if not x then return fail_bid(ok and "Not an introer." or tostring(b)) end
+    if r.id ~= x.next_id then r.id, r.pda = x.next_id, nil end
+    r.lowest = nil
+    local lo, need = escrow.lowest(x)
+    if x.open < escrow.MAX_OPEN then return timer.after(20, build) end
+    if sol.cmp(r.bid, need) < 0 then return fail_bid("Bid at least " .. sol.format(need, 4) .. " SOL") end
+    chain.request_pdas(intro, {lo.id}, function(pdas)
+      chain.account(pdas[1], function(ok2, b2)
+        if st.sign ~= s then return end
+        local q = ok2 and b2 and escrow.decode_request(b2)
+        if not (q and q.status == escrow.OPEN) then return fail_bid("Queue changed: try again") end
+        r.lowest = {pda = pdas[1], requester = q.requester, bid = q.bid}
+        timer.after(20, build)
+      end)
+    end)
+  end)
+end
+
 function start_sign(action, r, back)
   stop_sign()
+  st.retry = nil
   local s = {action = action, row = r, started = sys.millis(),
     back = back or (st.role == "introer" and "queue" or "mine")}
   st.sign = s
@@ -456,7 +489,9 @@ function start_sign(action, r, back)
   local function step()
     if st.sign ~= s then return end
     k = k + 1
-    if warm[k] then warm[k]() timer.after(20, step) else build() end
+    if warm[k] then warm[k]() timer.after(20, step)
+    elseif action == "bid" then fresh_bid(s, r, build)
+    else build() end
   end
   timer.after(20, step)
 end
@@ -598,7 +633,8 @@ local function ask_bid(p)
     input("Your Telegram @handle", escrow.TELEGRAM - 1, function(tg)
       if not tg then return end
       tg = tg:gsub("%s", "")
-      if tg ~= "" and tg:sub(1, 1) ~= "@" then tg = "@" .. tg end
+      if tg == "" or tg == "@" then ui.toast("Telegram is required") return end
+      if tg:sub(1, 1) ~= "@" then tg = "@" .. tg end
       input("Bid in SOL (min " .. sol.format(x.min_bid, 3) .. ")", 12, function(amount)
         if not amount then return end
         local lam = sol.to_lamports(amount)
@@ -1022,6 +1058,13 @@ function on_key(key)
       b = b()
     end
     show(b)
+    return true
+  end
+  if key == "select" and st.screen == "sign" and st.retry then
+    local s = st.retry
+    st.retry = nil
+    s.row.pda, s.row.lowest = nil, nil
+    start_sign("bid", s.row, s.back)
     return true
   end
   local k = tab_index()

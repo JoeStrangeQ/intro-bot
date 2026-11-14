@@ -557,6 +557,7 @@ check(escrow.actions(acc_r, "requester", NOW)[2] == "refund_expired", "refund af
 local lo, need = escrow.lowest({slots = {{id = "4", bid = "100"}, {id = "2", bid = "100"}, {id = "1", bid = "900"}}})
 check(lo.id == "2" and need == "110", "lowest: oldest on a tie, +10%")
 check(escrow.lowest({slots = {}}) == nil, "no lowest when empty")
+check(select(2, escrow.lowest({slots = {{id = "1", bid = "95000000000"}}})) == "100000000000", "outbid capped at 100 SOL")
 
 -- App: introer --------------------------------------------------------------------
 local ME = b58d(WALLET)
@@ -784,8 +785,14 @@ CHAIN[b58e(escrow.request_pda(OI, "9"))] = enc_request({introer = OI, requester 
   status = 0, target = "Someone else", telegram = ""})
 CHAIN[b58e(NEWR)] = CHAIN[b58e(escrow.request_pda(OI, "9"))]
 advance(6000)
-check(has("Someone bid first."), "someone bid first: not ours")
+check(has("Someone bid first") and has("SELECT to retry"), "someone bid first: not ours, retry offered")
 check(#json.decode(W.store.mine) == 0, "their request not saved as mine")
+CHAIN[b58e(OI)] = enc_introer({wallet = OB, min_bid = "100000000", next_id = 10, jobs = 1, earned = "0",
+  created_at = NOW, open = 2, offer = "Asia VCs"})
+key("select")
+m = relay_reply(true)
+check(m.ixs[1].accounts[4] == escrow.request_pda(OI, "10") and m.ixs[1].data:find("Vitalik", 1, true),
+  "retry re-reads next_id and rebuilds")
 key("back")
 CHAIN[b58e(NEWR)] = nil
 
@@ -824,15 +831,17 @@ go("Find an introer")
 list_select(1); type_in(FULL)
 flush(); advance(100)
 check(has("Full: bid at least 0.0611 SOL"), "full queue: lowest + 10%, rounded up")
-list_select(1); type_in("Toly"); type_in(""); type_in("0.06111111")
+list_select(1); type_in("Toly"); type_in("")
+check(last_toast() == "Telegram is required" and not W.input, "telegram required")
+list_select(1); type_in("Toly"); type_in("@t"); type_in("0.06111111")
 check(last_toast() == "Bid at least 0.0611 SOL", "must beat lowest by 10%")
-list_select(1); type_in("Toly"); type_in(""); type_in("0.061111111")
+list_select(1); type_in("Toly"); type_in("t"); type_in("0.061111111")
 m = relay_reply(true)
 ix = m.ixs[1]
 check(ix.accounts[6] == REQ[3] and ix.accounts[7] == string.rep("\3", 32) and #ix.accounts == 7, "bid: lowest (oldest on tie) and its requester")
 check(m.w[REQ[3]] and m.w[string.rep("\3", 32)], "bid: lowest writable")
 check(#m.ixs == 1 and #m.keys == 8, "one intro_escrow instruction only")
-check(ix.data:sub(-8) == u64(61111111) and ix.data:sub(9 + 64, 9 + 64) == "\0", "bid: empty telegram")
+check(ix.data:sub(-8) == u64(61111111) and ix.data:sub(9 + 64, 9 + 66) == "@t\0", "bid: telegram gets its @")
 key("back")
 check(has("My requests") or has("Find an introer"), "back from signing")
 

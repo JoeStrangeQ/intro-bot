@@ -210,7 +210,7 @@ function M.note(r, role, now)
   end
 end
 
--- Lowest open bid (oldest id on a tie) and the least a new bid must be (+10%, rounded up).
+-- Lowest open bid (oldest id on a tie) and the least a new bid must be: +10% rounded up, at most MAX_BID.
 function M.lowest(introer)
   local lo
   for _, s in ipairs(introer.slots or {}) do
@@ -219,6 +219,7 @@ function M.lowest(introer)
   end
   if not lo then return nil end
   local need = sol_mul_div(sol_add(sol_mul_div(lo.bid, 100 + M.OUTBID_PERCENT, 1), "99"), 1, 100)
+  if sol_cmp(need, M.MAX_BID) > 0 then need = M.MAX_BID end
   return lo, need
 end
 
