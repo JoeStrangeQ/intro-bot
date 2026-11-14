@@ -9,7 +9,7 @@ import {
   ALLOWED_IX,
   TxStore,
   type Env,
-} from '../src/index';
+} from '../src/relay';
 
 const key = (n: number) => new Uint8Array(32).fill(n);
 const PROGRAM = bs58.decode(PROGRAM_ID);

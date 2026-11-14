@@ -315,7 +315,9 @@ local function plan(action, r)
     local intro = escrow.introer_pda(iw)
     local ix = action == "withdraw" and escrow.ix_withdraw(intro, r.pda)
       or action == "confirm" and escrow.ix_confirm(intro, r.pda, iw)
-      or escrow.ix_refund(action, intro, r.pda, r.requester)
+      -- The requester signs their own refund: the same placeholder key in both places,
+      -- since the relay can't add the wallet a second time.
+      or escrow.ix_refund(action, intro, r.pda, tx.WALLET)
     return {ix}, r.pda, "gone"
   end
   if action == "bid" then

@@ -28,8 +28,12 @@ def on_curve(b):
     x = x * pow(2, (P - 1) // 4, P) % P
     return (x * x - x2) % P == 0
 
-prog = b58d(sys.argv[1]); seeds = [bytes.fromhex(h) for h in sys.argv[2:]]
-for bump in range(255, -1, -1):
-    h = hashlib.sha256(b"".join(seeds) + bytes([bump]) + prog + b"ProgramDerivedAddress").digest()
-    if not on_curve(h):
-        print(b58e(h), bump); break
+def find_pda(seeds, prog):
+    for bump in range(255, -1, -1):
+        h = hashlib.sha256(b"".join(seeds) + bytes([bump]) + prog + b"ProgramDerivedAddress").digest()
+        if not on_curve(h):
+            return h, bump
+
+if __name__ == "__main__":
+    addr, bump = find_pda([bytes.fromhex(h) for h in sys.argv[2:]], b58d(sys.argv[1]))
+    print(b58e(addr), bump)
