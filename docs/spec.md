@@ -28,10 +28,10 @@ Native SOL only. All amounts in lamports (u64).
 - Text: `target` ≤ 64 bytes, `telegram` ≤ 32 bytes (`@handle`), `offer` ≤ 64 bytes, `badge_id` 8 bytes.
 
 ### Accounts
-- `Config` PDA `["config"]`: `admin: Pubkey`, `arbiter: Pubkey`, `paused: bool`,
+- `Config` PDA `["config"]`: `admin: Pubkey`, `paused: bool`,
   `cap_total: u64` (max lamports held across all requests), `total_held: u64`, `bump`.
   Created once by `init_config`, which only the program's upgrade authority can call
-  (check the ProgramData account). Admin can later `set_admin`, `set_arbiter`,
+  (check the ProgramData account). Admin can later `set_admin`,
   `set_paused`, `set_cap`. These keep working after the program is made immutable.
 - `Introer` PDA `["introer", wallet]`: `wallet`, `badge_id: [u8;8]`, `offer: String`,
   `min_bid: u64`, `next_id: u64`, `open_count: u8`, `jobs_done: u32`, `earned: u64`,
@@ -41,7 +41,7 @@ Native SOL only. All amounts in lamports (u64).
   `created_at`, `accepted_at`, `made_at: i64`, `bump`. The bid lamports sit in this account
   on top of rent. On settlement the account closes: rent goes back to the requester.
 
-Status: `0 Open`, `1 Accepted`, `2 Made`, `3 Disputed`. Settled requests are closed (no
+Status: `0 Open`, `1 Accepted`, `2 Made`. Settled requests are closed (no
 status); events record the outcome.
 
 ### Instructions
@@ -54,10 +54,8 @@ status); events record the outcome.
 | `decline` | introer | Open → refund + close. |
 | `mark_made` | introer | Accepted → Made, `made_at = now`. |
 | `confirm` | requester | Made or Accepted → pay the introer, close. Receipt. |
-| `dispute` | requester | Made and within `CONFIRM_WINDOW` → Disputed. |
-| `release_expired` | anyone | Made and `now > made_at + CONFIRM_WINDOW` → pay the introer, close. Receipt. |
+| `refund_unconfirmed` | anyone | Made and `now > made_at + CONFIRM_WINDOW` → refund the requester, close. The introer is paid only if the requester confirms. |
 | `refund_expired` | anyone | Accepted and `now > accepted_at + WORK_WINDOW` → refund, close. |
-| `resolve(to_introer: bool)` | arbiter | Disputed → pay the introer (Receipt) or refund, close. |
 | admin setters | admin | as above. |
 
 Payouts never depend on `paused`. Refunds go to the stored `requester`, payouts to
@@ -66,7 +64,7 @@ On every payout: `jobs_done += 1`, `earned += bid`, `total_held -= bid`.
 
 ### Events
 `IntroerRegistered`, `BidPlaced{request, introer, requester, bid}`, `Outbid`, `Withdrawn`,
-`Accepted`, `Declined`, `Made`, `Disputed`, `Receipt{request, introer, requester, bid, jobs_done, earned}`,
+`Accepted`, `Declined`, `Made`, `Receipt{request, introer, requester, bid, jobs_done, earned}`,
 `Refunded{request, reason}`.
 
 ## Machine value (display only, labelled "demo value")
@@ -87,7 +85,7 @@ Reads the chain with `confirmed` commitment (repo rule). Small answers: the badg
   `/api/tx/accept?request=`, `/api/tx/made?request=`, `/api/tx/decline?request=`,
   `/api/tx/register?badge=&offer=&min=`. The badge shows these as
   `solana:https://intro.botbotcap.com/api/tx/...` QR codes so the introer signs on their phone.
-- Bids, confirm, dispute, withdraw are done on the web page with a connected wallet.
+- Bids, confirm, withdraw and refunds are done on the web page with a connected wallet.
 
 ## Web app (`apps/intro-bot`)
 Routes: `/` board + "become an introer"; `/b/:wallet` introer page (offer, machine value
@@ -104,3 +102,8 @@ Screens (320×218): Home (machine value ticker + sparkline, jobs, queue count, n
 Queue (list: target, @tg, bid, status; SELECT → action QR for accept / made / decline),
 Job done animation when `jobs` increases, Setup (enter wallet once with `ui.input`, or
 scan-to-register QR). Poll `/api/badge/:wallet` every 20 s. Never store or make keys.
+
+## Trust model
+No disputes and no arbiter. The introer is paid only when the requester confirms. If the
+requester doesn't confirm within 72 hours of "intro made", anyone can refund them. The app
+says so plainly: "We trust you to keep your word."
