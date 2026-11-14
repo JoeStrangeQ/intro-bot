@@ -1,47 +1,64 @@
 # Intro Bot badge app
 
-Shows your intro queue on your Breakpoint badge. People scan your badge to bid for an
-intro. You accept, decline or mark intros made by scanning a QR with your phone wallet.
-The badge never holds keys.
+Get paid for intros at Breakpoint, or bid for one. Both sides run on the badge.
+
+- **Introers** show their offer, machine value and queue. They accept, decline or mark
+  intros made.
+- **Requesters** find introers nearby or by wallet, bid SOL, then confirm, withdraw or
+  refund.
+
+The bid waits in an on-chain escrow. The introer is paid only when the requester
+confirms. With no confirm within 72 hours of "intro made", the requester can get a
+refund. We trust you to keep your word.
+
+The badge never holds keys. It builds each transaction, the relay turns it into a QR,
+and you sign on your phone wallet.
 
 ## Screens
 
-Use LEFT / RIGHT to move between screens. CANCEL goes back, or exits from a main screen.
+LEFT / RIGHT moves between screens. CANCEL goes back, or exits from a main screen.
 
-- **Home**: machine value (a demo value) with a small chart, jobs done, queue size,
-  next min bid, and "Ask me about BotBot".
-- **Hire me**: a QR to your page, `https://intro.botbotcap.com/b/<wallet>`.
-- **Queue**: up to 5 requests. SELECT one, pick Accept / Intro made / Decline, and scan
-  the QR with your phone wallet to sign.
-- **Setup**: enter your wallet, show a QR to register as an introer, turn demo mode on
-  or off, clear the wallet.
+- **Home**: machine value (a demo value) with a small chart, jobs, open requests, min
+  bid, "Ask me about BotBot".
+- **My queue**: requests to you. SELECT one to accept, decline or mark made.
+- **Hire me**: your offer, and "Paid only when you confirm." Badges nearby can find you.
+- **Find**: introers nearby (over the mesh), seen before, or by wallet. SELECT one to bid.
+- **My requests**: your bids. Confirm, withdraw, or refund when the time is up.
+- **Setup**: your wallet (public address only), register or update your offer, demo mode.
 
-When your job count goes up, the badge plays a short "JOB DONE!" animation and flashes
-its lights. It checks the server every 20 seconds and keeps the last data when offline.
+When your job count goes up, the badge plays "JOB DONE!" and flashes its lights.
+
+## How it talks to the chain
+
+- Reads with `rpc` on devnet (`getAccountInfo`, `getMultipleAccounts`), every 20 s,
+  within 30 calls a minute.
+- Posts each transaction message to `https://relay.botbotcap.com/tx` and shows the
+  `solana:` link it returns as a QR.
+- Watches the changed account until the step lands.
+- Program id and cluster are at the top of `lib/escrow.lua`.
 
 ## Try it
 
 1. Open https://solana.com/breakpoint/badge/apps/submit and sign in.
-2. Drop this folder on the editor, without `test/` (it is only for local checks).
-3. Press **Try in emulator**. In Setup, turn on **Demo mode** to see it work with fake
-   data, or enter your wallet to use the live server.
+2. Drop this `badge/` folder on the editor.
+3. Press **Try in emulator**. Turn on **Demo mode** in Setup to try every screen with no
+   network, or enter your wallet to use devnet.
 
-Calls to `intro.botbotcap.com` need your account to have X linked while testing.
+Testing `rpc` and `http` needs your account to have X linked. Needs Solana OS 2.1.0 or
+later (the `solana` module).
 
 ## Publish
 
-Link X at `/profile`, then press **Publish** on the submit page. The store compiles
-every `.lua` file and checks the code first.
-
-Permissions: `http` (host `intro.botbotcap.com`) and `led`. Storage is always allowed,
-so it is not listed.
+Link X at `/profile`, then press **Publish**. Permissions: `rpc`, `http` (host
+`relay.botbotcap.com`), `mesh`, `led`. Storage is always allowed.
 
 ## Local checks
 
+From the repo root:
+
 ```sh
-for f in main.lua lib/*.lua; do luac -p "$f"; done
-lua test/sim.lua
+for f in badge/main.lua badge/lib/*.lua; do luac -p "$f"; done
+lua badge-test/sim.lua
 ```
 
-`test/sim.lua` stubs the badge API, walks every screen and key, tries bad answers, and
-checks the limits (UI objects, label and QR sizes, storage, instructions per callback).
+The test lives outside `badge/` so it isn't uploaded. It needs `python3` (`pda.py`).

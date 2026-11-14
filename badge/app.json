@@ -1,13 +1,13 @@
 {
   "id": "intro-bot",
   "name": "Intro Bot",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "author": "@botbotcap",
-  "summary": "Get paid for intros at Breakpoint. Scan to bid, sign on your phone. By BotBot.",
-  "description": "Shows your Intro Bot queue, machine value and a Hire me QR. Accept, decline or mark intros made by scanning a QR with your phone wallet. The badge holds no keys. Ask me about BotBot: botbotcap.com",
+  "summary": "Get paid for intros at Breakpoint, or bid for one. Sign on your phone. By BotBot.",
+  "description": "Introers show their offer and queue; anyone nearby can bid SOL for an intro. The bid waits in an on-chain escrow and the introer is paid only when you confirm. Every step is signed on your phone wallet by QR; the badge holds no keys. Ask me about BotBot: botbotcap.com",
   "icon": "heart",
   "accent": "6A50D8",
   "category": "social",
-  "permissions": ["http", "led"],
-  "hosts": ["intro.botbotcap.com"]
+  "permissions": ["rpc", "http", "mesh", "led"],
+  "hosts": ["relay.botbotcap.com"]
 }

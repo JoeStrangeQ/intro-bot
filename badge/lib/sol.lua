@@ -52,6 +52,41 @@ function M.add(a, b)
   return M.digits(table.concat(out):reverse())
 end
 
+-- floor(a * mul / div) for a digit string and small mul, div (fits 31 bits).
+function M.mul_div(a, mul, div)
+  a = M.digits(a)
+  if not a then return nil end
+  local prod, carry = {}, 0
+  for k = #a, 1, -1 do
+    local v = (a:byte(k) - 48) * mul + carry
+    prod[#prod + 1] = v % 10
+    carry = v // 10
+  end
+  while carry > 0 do prod[#prod + 1] = carry % 10; carry = carry // 10 end
+  local out, rem = {}, 0
+  for k = #prod, 1, -1 do
+    local v = rem * 10 + prod[k]
+    out[#out + 1] = tostring(v // div)
+    rem = v % div
+  end
+  return M.digits(table.concat(out))
+end
+
+-- -1, 0 or 1.
+function M.cmp(a, b)
+  a, b = M.digits(a) or "0", M.digits(b) or "0"
+  if #a ~= #b then return #a < #b and -1 or 1 end
+  if a == b then return 0 end
+  return a < b and -1 or 1
+end
+
+-- Machine value (display only): earned x 0.8 x wear, wear = max(0.5, 1 - 0.01 x days).
+function M.machine_value(earned, created_at, now)
+  local days = (now and created_at and now > created_at) and (now - created_at) // 86400 or 0
+  local wear = math.max(50, 100 - days)
+  return M.mul_div(earned, 8 * wear, 1000)
+end
+
 -- Rough milli-SOL as a number, for drawing only.
 function M.milli(lamports)
   local d = M.digits(lamports)
