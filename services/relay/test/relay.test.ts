@@ -6,6 +6,7 @@ import {
   handle,
   PLACEHOLDER,
   PROGRAM_ID,
+  ALLOWED_IX,
   TxStore,
   type Env,
 } from '../src/index';
@@ -24,8 +25,18 @@ function message({
   keys = [PLACEHOLDER, key(2), SYSTEM, PROGRAM],
   programs = [3],
   extra = [] as number[],
+  disc = [...Buffer.from('c738552692f3259e', 'hex')], // bid
+  data = [1, 2, 3],
 } = {}) {
-  const ixs = programs.flatMap((p) => [p, 2, 0, 1, 3, 1, 2, 3]);
+  const ixs = programs.flatMap((p) => [
+    p,
+    2,
+    0,
+    1,
+    disc.length + data.length,
+    ...disc,
+    ...data,
+  ]);
   const bytes = [
     ...[signers, 0, 2, keys.length],
     ...keys.flatMap((k) => [...k]),
@@ -134,6 +145,29 @@ describe('relay', () => {
     expect(await error(await post(budget))).toBe('program not allowed');
     const other = message({ keys: [PLACEHOLDER, key(2), SYSTEM, key(5)] });
     expect(await error(await post(other))).toBe('program not allowed');
+  });
+
+  it('allows every user-facing escrow instruction', async () => {
+    for (const hex of Object.keys(ALLOWED_IX)) {
+      const res = await post(message({ disc: [...Buffer.from(hex, 'hex')] }));
+      expect(res.status, ALLOWED_IX[hex]).toBe(200);
+    }
+  });
+
+  it('refuses admin and unknown escrow instructions', async () => {
+    const admin = {
+      init_config: '17eb73e8a86001e7',
+      set_admin: 'fba300345bc2bb5c',
+      set_paused: '5b3c7dc0b0e1a6da',
+      set_cap: 'd1cf79817327dc04',
+    };
+    for (const [name, hex] of Object.entries(admin)) {
+      const res = await post(message({ disc: [...Buffer.from(hex, 'hex')] }));
+      expect(await error(res), name).toBe('instruction not allowed');
+    }
+    // Shorter than a discriminator.
+    const short = await post(message({ disc: [0xc7, 0x38], data: [] }));
+    expect(await error(short)).toBe('instruction not allowed');
   });
 
   it('rejects an extra signer and a wrong fee payer', async () => {

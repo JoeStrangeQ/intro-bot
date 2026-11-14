@@ -8,6 +8,22 @@ import bs58 from 'bs58';
 // System stays allowed as an account but never as a program.
 export const PROGRAM_ID = 'GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC';
 const PROGRAM = bs58.decode(PROGRAM_ID);
+// User-facing escrow instructions by Anchor discriminator, from
+// idl/intro_escrow.json. Admin ones (init_config, set_*) are refused.
+export const ALLOWED_IX: Record<string, string> = {
+  '7bdef1c58acb8cf2': 'register_introer',
+  '69fe06de8958fa50': 'update_introer',
+  c738552692f3259e: 'bid',
+  b712469c946da122: 'withdraw',
+  '419646d885066b04': 'accept',
+  '18395aa25b5ef5b1': 'decline',
+  '8aacbff25a16c159': 'mark_made',
+  ae010fd503be8300: 'confirm',
+  '7699a4f42880f2fa': 'refund_expired',
+  f3e95327b0f588d8: 'refund_unconfirmed',
+};
+const toHex = (b: Uint8Array) =>
+  Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 export const PLACEHOLDER = new Uint8Array(32).fill(1);
 const TTL_MS = 600_000;
 const MAX_MESSAGE = 1232 - 1 - 64; // packet size minus one signature
@@ -136,6 +152,10 @@ export function check(msg: Uint8Array) {
       if ((msg[at++] ?? n) >= n) throw new Bad('bad account index');
     }
     [len, at] = compactU16(msg, at);
+    if (at + len > msg.length) throw new Bad('truncated');
+    if (!ALLOWED_IX[toHex(msg.subarray(at, at + Math.min(len, 8)))]) {
+      throw new Bad('instruction not allowed');
+    }
     at += len;
   }
   if (at !== msg.length) throw new Bad('trailing or truncated bytes');
