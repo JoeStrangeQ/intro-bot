@@ -4,6 +4,10 @@
   "packageManager": "pnpm@11.0.0",
   "scripts": {
     "test": "pnpm -r --if-present test",
-    "build": "pnpm -r --if-present build"
+    "build": "pnpm -r --if-present build",
+    "e2e": "bash badge-test/e2e.sh"
+  },
+  "devDependencies": {
+    "@solana/web3.js": "1.98.4"
   }
 }

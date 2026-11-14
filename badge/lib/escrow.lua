@@ -1,233 +1,238 @@
--- lib/escrow.lua: the intro_escrow program: account layouts, addresses, instructions.
--- Layouts keep fixed-size fields first and text as zero-padded byte arrays (docs/spec.md).
+-- lib/escrow.lua: the intro_escrow program (v2, docs/spec-v2.md): account layouts,
+-- addresses, instructions. Fixed-size fields first, text as zero-padded byte arrays.
 local bytes = require("lib.bytes")
 local tx = require("lib.tx")
-local sol = require("lib.sol")
-local sol_cmp, sol_add, sol_mul_div = sol.cmp, sol.add, sol.mul_div
 
 local M = {}
 
 M.PROGRAM_ID = "GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC"
-M.CLUSTER = "devnet"
+M.CLUSTER = "mainnet"
 
-M.MAX_OPEN = 5
-M.CONFIRM_WINDOW = 72 * 3600
-M.WORK_WINDOW = 7 * 24 * 3600     -- also the deadline to mark made
-M.WITHDRAW_DELAY = 24 * 3600
-M.OUTBID_PERCENT = 10
-M.TARGET, M.TELEGRAM, M.OFFER = 64, 32, 64
-M.MIN_BID_FLOOR = "10000000"
+M.WORK_WINDOW = 7 * 24 * 3600     -- approved -> mark made
+M.CONFIRM_WINDOW = 72 * 3600      -- made -> confirm
+M.CANCEL_DELAY = 3600             -- posted -> cancel
+M.WHO, M.COMPANY, M.TELEGRAM, M.NAME = 32, 32, 32, 32
+M.OFFERS, M.BOARD = 16, 64
+M.MIN_BID = "10000000"
 M.MAX_BID = "100000000000"
 
-M.OPEN, M.ACCEPTED, M.MADE = 0, 1, 2
-M.STATUS = {[0] = "Open", [1] = "Accepted", [2] = "Waiting for confirm"}
+M.OPEN, M.APPROVED, M.MADE = 0, 1, 2
+M.STATUS = {[0] = "Open", [1] = "Approved", [2] = "Waiting for confirm"}
 
 -- Anchor discriminators: sha256("account:<Name>") / sha256("global:<ix>"), first 8 bytes.
 local D = {
-  Introer = "3e179abd0466ce44", Request = "7dac96a1a2732747", Directory = "9153a590b7d107af",
+  Introer = "3e179abd0466ce44", Job = "4b7c50cba1b4ca50", Offer = "d7583c47aaa249e5",
+  Board = "4f30a03f9984f038",
   register_introer = "7bdef1c58acb8cf2", update_introer = "69fe06de8958fa50",
-  bid = "c738552692f3259e", withdraw = "b712469c946da122", accept = "419646d885066b04",
-  decline = "18395aa25b5ef5b1", mark_made = "8aacbff25a16c159", confirm = "ae010fd503be8300",
-  refund_unconfirmed = "f3e95327b0f588d8", refund_expired = "7699a4f42880f2fa",
+  post_job = "22d03af881eab3d3", cancel_job = "7ef19bf132ec5376", offer = "35cc245a970636e7",
+  withdraw_offer = "cb2683eacc7a3596", close_offer = "bf484323efd16184", approve = "454ad9247375614c",
+  mark_made = "8aacbff25a16c159", confirm = "ae010fd503be8300",
+  refund_expired = "7699a4f42880f2fa", refund_unconfirmed = "f3e95327b0f588d8",
 }
 M.DISC = {}
 for k, v in pairs(D) do M.DISC[k] = bytes.unhex(v) end
 
 -- Byte offsets (1-based for string.sub/byte), after the 8-byte discriminator.
--- Introer: wallet 32 | min_bid u64 | next_id u64 | jobs_done u32 | earned u64 |
---          created_at i64 | open_count u8 | bump u8 | badge_id [8] | offer [64] |
---          open [5 x {id u64, bid u64}] (the first open_count used)
-M.INTROER = {wallet = 9, min_bid = 41, next_id = 49, jobs_done = 57, earned = 61,
-  created_at = 69, open_count = 77, bump = 78, badge_id = 79, offer = 87, open = 151, size = 230}
--- Request: introer 32 | requester 32 | id u64 | bid u64 | status u8 | created_at i64 |
---          accepted_at i64 | made_at i64 | bump u8 | target [64] | telegram [32]
-M.REQUEST = {introer = 9, requester = 41, id = 73, bid = 81, status = 89, created_at = 90,
-  accepted_at = 98, made_at = 106, bump = 114, target = 115, telegram = 179, size = 210}
+-- (docs/spec-v2.md, "Program details")
+-- Job: requester 32 | nonce u64 | serial u64 | bid u64 | status u8 | created_at, approved_at,
+--      made_at i64 | approved 32 | offer_count u16 | who [32] | company [32] | telegram [32] |
+--      bump | offers_head u8 | offers [16 x 32]. The ring is last: LIST bytes skip it.
+M.JOB = {requester = 9, nonce = 41, serial = 49, bid = 57, status = 65, created_at = 66, approved_at = 74,
+  made_at = 82, approved = 90, offer_count = 122, who = 124, company = 156, telegram = 188,
+  offers_head = 221, offers = 222, size = 733, LIST = 220}
+-- Introer: wallet 32 | badge_id [8] | name [32] | jobs_done u32 | earned u64 | created_at i64 | bump
+M.INTROER = {wallet = 9, badge_id = 41, name = 49, jobs_done = 81, earned = 85, created_at = 93, size = 101}
+-- Offer: job 32 | introer 32 | job_serial u64 | created_at i64 | bump
+M.OFFER = {job = 9, introer = 41, job_serial = 73, created_at = 81, size = 89}
+-- Board (zero-copy): head u8 | bump u8 | 6 padding | posted u64 | jobs [64 x 32], a ring of the newest
+M.BOARD_L = {head = 9, posted = 17, jobs = 25, size = 2072}
 
-local PROGRAM
-local function program()
-  PROGRAM = PROGRAM or solana.decode(M.PROGRAM_ID)
-  return PROGRAM
+local ZERO = ("\0"):rep(32)
+
+local function key(b, at) return b:sub(at, at + 31) end
+
+-- A ring of `n` keys at `at`, newest first; `head` is the next slot to write.
+local function ring(b, at, n, head)
+  local out = {}
+  for k = 0, n - 1 do
+    local slot = (head - 1 - k) % n
+    local w = key(b, at + slot * 32)
+    if w ~= ZERO then out[#out + 1] = w end
+  end
+  return out
+end
+
+-- A whole Job, or its first LIST bytes (then `offers` is empty).
+function M.decode_job(b)
+  local L = M.JOB
+  if type(b) ~= "string" or #b < L.LIST or b:sub(1, 8) ~= M.DISC.Job then return nil end
+  local full = #b >= L.size
+  local s = bytes.u8(b, L.status)
+  if not M.STATUS[s] then return nil end
+  local count = string.unpack("<I2", b, L.offer_count)
+  local approved = key(b, L.approved)
+  return {
+    requester = key(b, L.requester),
+    nonce = bytes.u64(b, L.nonce),
+    bid = bytes.u64(b, L.bid),
+    status = s,
+    created_at = bytes.time(b, L.created_at),
+    approved_at = bytes.time(b, L.approved_at),
+    made_at = bytes.time(b, L.made_at),
+    approved = approved ~= ZERO and approved or nil,
+    offer_count = count,
+    -- Every slot, newest first: a withdrawn offer leaves a zero hole in the ring.
+    offers = full and ring(b, L.offers, M.OFFERS, bytes.u8(b, L.offers_head)) or {},
+    serial = bytes.u64(b, L.serial),
+    who = bytes.text(b, L.who, M.WHO),
+    company = bytes.text(b, L.company, M.COMPANY),
+    telegram = bytes.text(b, L.telegram, M.TELEGRAM),
+  }
 end
 
 function M.decode_introer(b)
   local L = M.INTROER
   if type(b) ~= "string" or #b < L.size or b:sub(1, 8) ~= M.DISC.Introer then return nil end
-  local open = bytes.u8(b, L.open_count)
-  if open > M.MAX_OPEN then return nil end
-  local slots = {}
-  for k = 0, open - 1 do
-    slots[k + 1] = {id = bytes.u64(b, L.open + 16 * k), bid = bytes.u64(b, L.open + 8 + 16 * k)}
-  end
   return {
-    wallet = b:sub(L.wallet, L.wallet + 31),
-    min_bid = bytes.u64(b, L.min_bid),
-    next_id = bytes.u64(b, L.next_id),
+    wallet = key(b, L.wallet),
+    badge_id = bytes.text(b, L.badge_id, 8),
+    name = bytes.text(b, L.name, M.NAME),
     jobs = bytes.i32(b, L.jobs_done),
     earned = bytes.u64(b, L.earned),
     created_at = bytes.time(b, L.created_at),
-    open = bytes.u8(b, L.open_count),
-    badge_id = bytes.text(b, L.badge_id, 8),
-    offer = bytes.text(b, L.offer, M.OFFER),
-    slots = slots,
   }
 end
 
-function M.decode_request(b)
-  local L = M.REQUEST
-  if type(b) ~= "string" or #b < L.size or b:sub(1, 8) ~= M.DISC.Request then return nil end
-  local s = bytes.u8(b, L.status)
-  if not M.STATUS[s] then return nil end
-  return {
-    introer = b:sub(L.introer, L.introer + 31),
-    requester = b:sub(L.requester, L.requester + 31),
-    id = bytes.u64(b, L.id),
-    bid = bytes.u64(b, L.bid),
-    status = s,
-    created_at = bytes.time(b, L.created_at),
-    accepted_at = bytes.time(b, L.accepted_at),
-    made_at = bytes.time(b, L.made_at),
-    target = bytes.text(b, L.target, M.TARGET),
-    telegram = bytes.text(b, L.telegram, M.TELEGRAM),
-  }
+function M.decode_offer(b)
+  local L = M.OFFER
+  if type(b) ~= "string" or #b < L.size or b:sub(1, 8) ~= M.DISC.Offer then return nil end
+  return {job = key(b, L.job), introer = key(b, L.introer), job_serial = bytes.u64(b, L.job_serial),
+    created_at = bytes.time(b, L.created_at)}
 end
 
--- Directory: head u8 | bump u8 | wallets [32 x 32], a ring of the latest introers. Newest first.
-function M.decode_directory(b)
-  if type(b) ~= "string" or #b < 10 + 32 * 32 or b:sub(1, 8) ~= M.DISC.Directory then return nil end
-  local head, out, zero = b:byte(9), {}, ("\0"):rep(32)
-  for k = 0, 31 do
-    local slot = (head - 1 - k) % 32
-    local w = b:sub(11 + slot * 32, 42 + slot * 32)
-    if w ~= zero then out[#out + 1] = w end
-  end
-  return out
+-- The board's job addresses, newest first.
+function M.decode_board(b)
+  local L = M.BOARD_L
+  if type(b) ~= "string" or #b < L.size or b:sub(1, 8) ~= M.DISC.Board then return nil end
+  return ring(b, L.jobs, M.BOARD, bytes.u8(b, L.head))
 end
 
--- Addresses (32 bytes). Each pda costs ~10k instructions: callers cache them.
-local CONFIG, DIRECTORY, INTROERS = nil, nil, {}
-function M.directory_pda()
-  DIRECTORY = DIRECTORY or (solana.pda({"directory"}, program()))
-  return DIRECTORY
+-- Addresses (32 bytes). Each pda costs ~10k instructions: they are cached.
+local PROGRAM
+local function program()
+  PROGRAM = PROGRAM or solana.decode(M.PROGRAM_ID)
+  return PROGRAM
 end
-function M.config_pda()
-  CONFIG = CONFIG or (solana.pda({"config"}, program()))
-  return CONFIG
+local cache = {}
+local function pda(...)
+  local seeds = {...}
+  local k = table.concat(seeds, "|")
+  cache[k] = cache[k] or (solana.pda(seeds, program()))
+  return cache[k]
 end
-function M.introer_pda(wallet)
-  INTROERS[wallet] = INTROERS[wallet] or (solana.pda({"introer", wallet}, program()))
-  return INTROERS[wallet]
-end
-function M.request_pda(introer, id)
-  return (solana.pda({"request", introer, bytes.pack_u64(id)}, program()))
-end
+function M.config_pda() return pda("config") end
+function M.board_pda() return pda("board") end
+function M.introer_pda(wallet) return pda("introer", wallet) end
+function M.job_pda(requester, nonce) return pda("job", requester, bytes.pack_u64(nonce)) end
+-- Offers are per job serial, so offers on a closed job never count for a re-post.
+function M.offer_pda(job, serial, introer_wallet) return pda("offer", job, bytes.pack_u64(serial), introer_wallet) end
 
--- Instructions, accounts in the program's order (idl/intro_escrow.json).
--- W is tx.WALLET, the signer the relay fills in.
+-- Instructions, signer first. W is tx.WALLET, the signer the relay fills in.
 local function ix(name, accounts, args)
   return {program = program(), accounts = accounts, data = M.DISC[name] .. (args or "")}
 end
 local W = tx.WALLET
 
-function M.ix_register(my_wallet, badge_id, offer, min_bid)
-  return ix("register_introer", {
-    {W, w = true}, {M.introer_pda(my_wallet), w = true}, {M.directory_pda(), w = true}, {tx.SYSTEM},
-  }, bytes.fixed(badge_id, 8) .. bytes.fixed(offer, M.OFFER) .. bytes.pack_u64(min_bid))
+function M.ix_register(me, badge_id, name)
+  return ix("register_introer", {{W, w = true}, {M.introer_pda(me), w = true}, {tx.SYSTEM}},
+    bytes.fixed(badge_id, 8) .. bytes.fixed(name, M.NAME))
 end
 
-function M.ix_update(my_wallet, offer, min_bid)
-  return ix("update_introer", {{W}, {M.introer_pda(my_wallet), w = true}},
-    bytes.fixed(offer, M.OFFER) .. bytes.pack_u64(min_bid))
+function M.ix_update(me, badge_id, name)
+  return ix("update_introer", {{W}, {M.introer_pda(me), w = true}}, bytes.fixed(badge_id, 8) .. bytes.fixed(name, M.NAME))
 end
 
--- lowest = {pda, requester} when the queue is full: it is refunded.
--- A missing optional account is the program id.
-function M.ix_bid(introer, request, target, telegram, amount, lowest)
-  local p = program()
-  local acc = {
-    {W, w = true}, {M.config_pda()}, {introer, w = true}, {request, w = true}, {tx.SYSTEM},
-    lowest and {lowest.pda, w = true} or {p}, lowest and {lowest.requester, w = true} or {p},
-  }
-  return ix("bid", acc, bytes.fixed(target, M.TARGET) .. bytes.fixed(telegram, M.TELEGRAM)
-    .. bytes.pack_u64(amount))
+function M.ix_post_job(job, nonce, who, company, telegram, bid)
+  return ix("post_job", {{W, w = true}, {M.config_pda()}, {M.board_pda(), w = true}, {job, w = true},
+    {tx.SYSTEM}}, bytes.pack_u64(nonce) .. bytes.fixed(who, M.WHO) .. bytes.fixed(company, M.COMPANY)
+    .. bytes.fixed(telegram, M.TELEGRAM) .. bytes.pack_u64(bid))
 end
 
-function M.ix_withdraw(introer, request)
-  return ix("withdraw", {{W, w = true}, {introer, w = true}, {request, w = true}})
+function M.ix_cancel_job(job)
+  return ix("cancel_job", {{W, w = true}, {job, w = true}})
 end
 
-function M.ix_accept(introer, request)
-  return ix("accept", {{W}, {introer, w = true}, {request, w = true}})
+function M.ix_offer(me, job, serial)
+  return ix("offer", {{W, w = true}, {M.config_pda()}, {M.introer_pda(me)}, {job, w = true},
+    {M.offer_pda(job, serial, me), w = true}, {tx.SYSTEM}})
 end
 
-function M.ix_made(introer, request)
-  return ix("mark_made", {{W}, {introer, w = true}, {request, w = true}})
+function M.ix_withdraw_offer(me, job, serial)
+  return ix("withdraw_offer", {{W, w = true}, {M.offer_pda(job, serial, me), w = true}, {job, w = true}})
 end
 
-function M.ix_decline(introer, request, requester)
-  return ix("decline", {{W}, {introer, w = true}, {request, w = true}, {requester, w = true}})
+-- Anyone, once the job is closed: the rent goes back to the introer.
+function M.ix_close_offer(job, serial, introer_wallet)
+  return ix("close_offer", {{W}, {M.offer_pda(job, serial, introer_wallet), w = true}, {introer_wallet, w = true},
+    {job}})
 end
 
-function M.ix_confirm(introer, request, introer_wallet)
-  return ix("confirm", {{W, w = true}, {introer, w = true}, {request, w = true}, {introer_wallet, w = true}})
+-- Approves the offer's introer.
+function M.ix_approve(job, serial, introer_wallet)
+  return ix("approve", {{W}, {job, w = true}, {M.offer_pda(job, serial, introer_wallet)}})
 end
 
--- Anyone may send these (refund_expired: the requester at 7 days, others 72h later).
-function M.ix_refund(name, introer, request, requester)
-  return ix(name, {{W}, {introer}, {request, w = true}, {requester, w = true}})
+function M.ix_mark_made(job)
+  return ix("mark_made", {{W}, {job, w = true}})
 end
 
--- Which signed steps fit a request, for its introer or its requester, at unix time `now`.
-function M.actions(r, role, now)
-  if role == "introer" then
-    if r.status == M.OPEN then return {"accept", "decline"} end
-    if r.status == M.ACCEPTED and not (now and now > r.accepted_at + M.WORK_WINDOW) then return {"mark_made"} end
-    return {}
-  end
-  local out = {}
-  if r.status == M.OPEN and now and now >= r.created_at + M.WITHDRAW_DELAY then out[1] = "withdraw" end
-  if r.status == M.ACCEPTED or r.status == M.MADE then out[#out + 1] = "confirm" end
-  if now and r.status == M.MADE and now > r.made_at + M.CONFIRM_WINDOW then
-    out[#out + 1] = "refund_unconfirmed"
-  end
-  if now and r.status == M.ACCEPTED and now > r.accepted_at + M.WORK_WINDOW then
-    out[#out + 1] = "refund_expired"
-  end
-  return out
+function M.ix_confirm(job, introer_wallet)
+  return ix("confirm", {{W, w = true}, {job, w = true}, {M.introer_pda(introer_wallet), w = true},
+    {introer_wallet, w = true}})
+end
+
+-- The requester refunds their own job: the same placeholder key as caller and requester,
+-- since the relay can't add the wallet to the message a second time.
+function M.ix_refund(name, job, requester)
+  return ix(name, {{W}, {job, w = true}, {requester or W, w = true}})
 end
 
 -- A line about what can't be done yet, or nil.
-function M.note(r, role, now)
-  if not now then return nil end
-  if role == "requester" and r.status == M.OPEN then
-    local left = r.created_at + M.WITHDRAW_DELAY - now
-    if left > 0 then return "Withdraw available in " .. math.max(1, (left + 3599) // 3600) .. "h" end
-  end
-  if role == "introer" and r.status == M.ACCEPTED and now > r.accepted_at + M.WORK_WINDOW then
-    return "Too late to mark made: the requester can get a refund."
+function M.note(j, role, now)
+  if role == "requester" and j.status == M.OPEN and now then
+    local left = j.created_at + M.CANCEL_DELAY - now
+    if left > 0 then return "Cancel available in " .. math.max(1, (left + 59) // 60) .. " min" end
   end
 end
 
--- Lowest open bid (oldest id on a tie) and the least a new bid must be: +10% rounded up, at most MAX_BID.
-function M.lowest(introer)
-  local lo
-  for _, s in ipairs(introer.slots or {}) do
-    local c = lo and sol_cmp(s.bid, lo.bid)
-    if not lo or c < 0 or (c == 0 and sol_cmp(s.id, lo.id) < 0) then lo = s end
+-- Signed steps a job allows, for its requester or for an introer `me` (32 bytes), at `now`.
+function M.actions(j, role, me, now)
+  local out = {}
+  if role == "requester" then
+    if j.status == M.OPEN and now and now >= j.created_at + M.CANCEL_DELAY then out[1] = "cancel_job" end
+    if j.status == M.APPROVED or j.status == M.MADE then out[#out + 1] = "confirm" end
+    if now and j.status == M.APPROVED and now > j.approved_at + M.WORK_WINDOW then
+      out[#out + 1] = "refund_expired"
+    end
+    if now and j.status == M.MADE and now > j.made_at + M.CONFIRM_WINDOW then
+      out[#out + 1] = "refund_unconfirmed"
+    end
+    return out
   end
-  if not lo then return nil end
-  local need = sol_mul_div(sol_add(sol_mul_div(lo.bid, 100 + M.OUTBID_PERCENT, 1), "99"), 1, 100)
-  if sol_cmp(need, M.MAX_BID) > 0 then need = M.MAX_BID end
-  if sol_cmp(need, lo.bid) <= 0 then need = sol_add(lo.bid, "1") end  -- must be above the lowest
-  if sol_cmp(need, M.MAX_BID) > 0 then need = nil end              -- every slot is at the max
-  return lo, need
+  local mine = me and j.approved == me
+  if mine and j.status == M.APPROVED and not (now and now > j.approved_at + M.WORK_WINDOW) then
+    out[1] = "mark_made"
+  end
+  if not mine then out[#out + 1] = "withdraw_offer" end
+  return out
 end
 
 M.LABEL = {
-  accept = "Accept", decline = "Decline", mark_made = "Intro made", withdraw = "Withdraw",
-  confirm = "Confirm + pay", refund_unconfirmed = "Refund (72h passed)",
-  refund_expired = "Refund (7 days passed)", bid = "Bid", register_introer = "Register",
-  update_introer = "Update offer",
+  register_introer = "Register", update_introer = "Update name", post_job = "Post job",
+  cancel_job = "Cancel job", offer = "Offer", withdraw_offer = "Withdraw offer",
+  close_offer = "Get offer rent back", approve = "Approve", mark_made = "Intro made",
+  confirm = "Confirm + pay", refund_expired = "Refund (7 days passed)",
+  refund_unconfirmed = "Refund (72h passed)",
 }
 
 return M

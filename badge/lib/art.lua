@@ -1,34 +1,51 @@
--- lib/art.lua: the BotBot robot glyph (16x16, from BotGlyph.tsx) as pixel art.
+-- lib/art.lua: BotBot's rainbow bot face (botbot-brand glyphs.py): 12x12 cells in 6 bands of
+-- 2 rows, green to blue, with a 1px black drop shadow at +1,+1. Drawn as pixel art.
 local M = {}
 
-M.robot = {
-  "",
-  "",
-  ".......AA",
-  "......AAAA",
-  "..BBBBBBBBBBBB",
-  "..BBBBBBBBBBBBK",
-  "..CCCKKCCKKCCCK",
-  "..CCCK.CCK.CCCK",
-  "..DDDDDDDDDDDDK",
-  "..DDDDDDDDDDDDK",
-  "..EEEKKKKKKEEEK",
-  "..EEEE....EEEEK",
-  "..FFFFFFFFFFFFK",
-  "..FFFFFFFFFFFFK",
-  "...KKKKKKKKKKKK",
+local B = {
+  ".....##.....",
+  "....####....",
+  "############",
+  "############",
+  "###..##..###",
+  "###..##..###",
+  "############",
+  "############",
+  "###......###",
+  "####....####",
+  "############",
+  "############",
 }
+M.RAINBOW = {0x61BB46, 0xFDB827, 0xF5821F, 0xE03A3E, 0x963D97, 0x009DDC}
+local BAND = {"A", "C", "D", "E", "F", "G"}  -- palette letters, top to bottom
 
--- Lavender bands, light to dark, with an ink shadow.
-M.palette = {
-  A = 0xE4DEFA, B = 0xC9BFF2, C = 0xA897EA, D = 0x8A73E0, E = 0x6A50D8, F = 0x4B37A6,
-  K = 0x241A52,
-}
+-- 13x13 rows: band letters where filled, K for the shadow, "." see-through.
+local function rows()
+  local out = {}
+  for y = 1, 13 do
+    local r = {}
+    for x = 1, 13 do
+      local filled = B[y] and B[y]:sub(x, x) == "#"
+      local shade = B[y - 1] and B[y - 1]:sub(x - 1, x - 1) == "#"
+      r[x] = filled and BAND[(y - 1) // 2 + 1] or (shade and "K" or ".")
+    end
+    out[y] = table.concat(r)
+  end
+  return out
+end
+M.ROWS = rows()
 
--- Draw the robot (or nothing on badges without images).
-function M.robot_at(x, y, scale)
+-- The colours, with the bands turned by `shift` (for the receipt animation).
+function M.palette(shift)
+  local p = {K = 0x000000}
+  for k = 1, 6 do p[BAND[k]] = M.RAINBOW[(k - 1 + (shift or 0)) % 6 + 1] end
+  return p
+end
+
+-- The logo at x, y (13 x scale px a side), or nothing on badges without images.
+function M.logo(x, y, scale, shift)
   if not ui.image then return nil end
-  return ui.image(x, y, M.robot, {scale = scale, palette = M.palette})
+  return ui.image(x, y, M.ROWS, {scale = scale, palette = M.palette(shift)})
 end
 
 return M

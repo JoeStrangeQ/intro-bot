@@ -77,3 +77,95 @@ Remove from v1: `bid`, `withdraw`, `accept`, `decline`, the open-request queue, 
 
 Allowlist: register_introer, update_introer, post_job, cancel_job, offer, withdraw_offer,
 close_offer, approve, mark_made, confirm, refund_expired, refund_unconfirmed. Refuse admin ones.
+
+## Program details (filled in by the program branch)
+
+Program id `GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC`. IDL: `idl/intro_escrow.json`.
+Test vectors: `tests/fixtures/*.json` (one per instruction: accounts in order + data hex) and
+`tests/fixtures/accounts.json` (raw account bytes). Both are rewritten by `cargo test`.
+
+All accounts are fixed size. Text is UTF-8, zero-padded to 32 bytes, and must not be empty.
+Integers are little-endian. Offsets include the 8-byte discriminator.
+
+**Additions to the spec above** (for safety):
+- `Board.posted` counts jobs ever posted; each job gets `serial = posted`. The Offer PDA is
+  `["offer", job, serial u64 le, introer_wallet]` and stores `job_serial`. If a requester
+  re-posts with the same nonce after the job closed (same address), old offers have other
+  addresses, so they can't be approved; anyone can `close_offer` them.
+- `cancel_job` only from 1 hour after `created_at` (`TooEarly` before). Without it, post +
+  cancel could cheaply flush the 64-slot board. Remaining risk: someone willing to lock
+  64 small bids for an hour can still push others off the board; admin `set_paused` is the
+  backstop, and clients can also find jobs by other means.
+- The offers ring holds each wallet once. `withdraw_offer` on a live job removes the wallet
+  from the ring and lowers `offer_count`, so `offer_count` is the number of live offers.
+- `approve` takes no args: it approves `offer.introer` of the Offer account passed.
+- `Board` is zero-copy (it's too big for the stack), so it has 6 padding bytes before `posted`.
+- Events: `close_offer` emits `OfferClosed{job, introer}`.
+- `update_introer(badge_id, name)` takes both fields.
+- `offer` needs the introer PDA; that's what "registered" means. `offer_count` saturates.
+- Refund wait for anyone but the requester: `+ CONFIRM_WINDOW` (72 h) on top of the requester's.
+
+`Config` ["config"], 74 bytes: admin @8, pending_admin @40 (zeros when none), paused u8 @72, bump @73.
+
+`Board` ["board"], 2072 bytes: head u8 @8 (next slot), bump @9, padding @10..16, posted u64 @16,
+jobs[i] @24 + 32·i (i = 0..63, zeros when empty; old entries may point at closed jobs).
+
+`Introer` ["introer", wallet], 101 bytes: wallet @8, badge_id [8] @40, name [32] @48,
+jobs_done u32 @80, earned u64 @84, created_at i64 @92, bump @100.
+
+`Job` ["job", requester, nonce u64 le], 733 bytes:
+
+| Offset | Field | Type |
+| --- | --- | --- |
+| 8 | requester | Pubkey |
+| 40 | nonce | u64 |
+| 48 | serial | u64 |
+| 56 | bid | u64 |
+| 64 | status | u8 (0 Open, 1 Approved, 2 Made) |
+| 65 | created_at | i64 |
+| 73 | approved_at | i64 |
+| 81 | made_at | i64 |
+| 89 | approved | Pubkey (introer wallet; zeros until approved) |
+| 121 | offer_count | u16 |
+| 123 | who | [u8; 32] |
+| 155 | company | [u8; 32] |
+| 187 | telegram | [u8; 32] |
+| 219 | bump | u8 |
+| 220 | offers_head | u8 (next ring slot) |
+| 221 + 32·i | offers[i], i = 0..15 | Pubkey (ring, zeros when empty) |
+
+The offers ring is last: a board listing can read bytes 0..220 with a data slice.
+
+`Offer` ["offer", job, job_serial u64 le, introer_wallet], 89 bytes: job @8, introer (wallet) @40,
+job_serial u64 @72, created_at i64 @80, bump @88.
+
+Instruction args (Borsh after the 8-byte discriminator): `register_introer(badge_id [u8;8],
+name [u8;32])`, `update_introer(badge_id [u8;8], name [u8;32])`, `post_job(nonce u64, who [u8;32],
+company [u8;32], telegram [u8;32], bid u64)`, `propose_admin(Pubkey)`, `set_paused(bool)`. Others take no args.
+
+Account order (s = signer, w = writable):
+
+| Ix | Accounts |
+| --- | --- |
+| `init_config` | authority (s,w), config (w), board (w), program, program_data, system_program |
+| `propose_admin` / `cancel_admin_proposal` / `set_paused` | admin (s), config (w) |
+| `accept_admin` | pending_admin (s), config (w) |
+| `register_introer` | wallet (s,w), introer (w), system_program |
+| `update_introer` | wallet (s), introer (w) |
+| `post_job` | requester (s,w), config, board (w), job (w), system_program |
+| `cancel_job` | requester (s,w), job (w) |
+| `offer` | wallet (s,w), config, introer, job (w), offer (w), system_program |
+| `withdraw_offer` | wallet (s,w), offer (w), job (w, = offer.job) |
+| `close_offer` | caller (s), offer (w), wallet (w, = offer.introer), job (= offer.job) |
+| `approve` | requester (s), job (w), offer (the chosen one, on this post) |
+| `mark_made` | wallet (s, = job.approved), job (w) |
+| `confirm` | requester (s,w), job (w), introer (w, PDA of job.approved), wallet (w, = job.approved) |
+| `refund_expired` / `refund_unconfirmed` | caller (s), job (w), requester (w) |
+
+Events: `JobPosted{job, requester, bid}`, `JobCancelled{job}`, `Offered{job, introer}`,
+`OfferWithdrawn{job, introer}`, `OfferClosed{job, introer}`, `Approved{job, introer}`,
+`Made{job, made_at}`, `Receipt{job, introer, requester, bid, jobs_done, earned}`,
+`Refunded{job, reason}` (0 cancelled, 1 expired, 2 unconfirmed), `IntroerRegistered`, and the
+admin events. `introer` in events is the wallet.
+
+Every instruction runs alone in a tx within the default 200k CU; tests fail above 100k.

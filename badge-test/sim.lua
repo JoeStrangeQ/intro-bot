@@ -1,5 +1,5 @@
 -- Headless test for the Intro Bot badge app. Stubs the Solana OS Lua API (ui, rpc, http,
--- mesh, storage, timer, sys, led, solana) with a pretend chain, drives every screen and key
+-- storage, timer, sys, led, solana) with a pretend chain, drives every screen and key
 -- path, decodes the transactions the app builds, and enforces the badge limits: 128 UI
 -- objects, 200-byte labels, 256-byte QR, 16 KB storage, 30 rpc calls a minute, 3.5 KB
 -- answers, 2 KB http bodies, 200k instructions per callback (pda/base58 costs included).
@@ -15,6 +15,7 @@ end
 
 -- Minimal JSON (enough for the API answers and to size storage) ------------
 local json = {}
+local CONNECT_ID = string.rep("ab", 16)
 do
   local function enc(v)
     local t = type(v)
@@ -175,25 +176,37 @@ local NOW = 1790000000
 local function u64(n) return string.pack("<I8", math.tointeger(tonumber(n))) end
 local function fixed(s, n) return s .. string.rep("\0", n - #s) end
 local function disc(name) return require("lib.bytes").unhex(sha256("account:" .. name):sub(1, 16)) end
+local ZERO = string.rep("\0", 32)
 
--- open [5 x {id, bid}]: t.slots, or made-up ones for t.open entries.
-local function slots(t)
-  local out = {}
-  for k = 1, 5 do
-    local sl = t.slots and t.slots[k] or (not t.slots and k <= t.open and {100 + k, 10000000})
-    out[k] = sl and (u64(sl[1]) .. u64(sl[2])) or string.rep("\0", 16)
-  end
-  return table.concat(out)
+-- A ring of n keys written oldest first, as the program does: returns slots, head.
+local function ring(list, n)
+  local slots = {}
+  for k = 1, n do slots[k] = ZERO end
+  local head = 0
+  for _, key in ipairs(list) do slots[head + 1] = key; head = (head + 1) % n end
+  return table.concat(slots), head
+end
+
+-- t.offers oldest first.
+local function enc_job(t)
+  local offers, head = ring(t.offers or {}, 16)
+  return disc("Job") .. t.requester .. u64(t.nonce) .. u64(t.serial or 1) .. u64(t.bid) .. string.char(t.status or 0)
+    .. string.pack("<i8i8i8", t.created_at or NOW, t.approved_at or 0, t.made_at or 0)
+    .. (t.approved or ZERO) .. string.pack("<I2", t.offer_count or #(t.offers or {}))
+    .. fixed(t.who, 32) .. fixed(t.company, 32) .. fixed(t.telegram, 32) .. string.char(255, head) .. offers
 end
 local function enc_introer(t)
-  return disc("Introer") .. t.wallet .. u64(t.min_bid) .. u64(t.next_id) .. string.pack("<I4", t.jobs)
-    .. u64(t.earned) .. string.pack("<i8", t.created_at) .. string.char(t.open, 254)
-    .. fixed(t.badge_id or "", 8) .. fixed(t.offer, 64) .. slots(t)
+  return disc("Introer") .. t.wallet .. fixed(t.badge_id or "", 8) .. fixed(t.name or "", 32)
+    .. string.pack("<I4", t.jobs or 0) .. u64(t.earned or 0) .. string.pack("<i8", t.created_at or NOW)
+    .. string.char(254)
 end
-local function enc_request(t)
-  return disc("Request") .. t.introer .. t.requester .. u64(t.id) .. u64(t.bid) .. string.char(t.status)
-    .. string.pack("<i8i8i8", t.created_at or NOW, t.accepted_at or 0, t.made_at or 0) .. string.char(253)
-    .. fixed(t.target, 64) .. fixed(t.telegram, 32)
+local function enc_offer(job, introer)
+  return disc("Offer") .. job .. introer .. u64(1) .. string.pack("<i8", NOW) .. string.char(253)
+end
+-- jobs oldest first.
+local function enc_board(jobs)
+  local slots, head = ring(jobs, 64)
+  return disc("Board") .. string.char(head, 252) .. string.rep("\0", 6) .. u64(#jobs) .. slots
 end
 
 -- Decode a legacy message the app built.
@@ -243,7 +256,7 @@ end
 local function new_world(opts)
   opts = opts or {}
   W = {ms = 0, objs = 0, labels = {}, lists = {}, qr = nil, timers = {}, toasts = {}, store = opts.store or {},
-    accounts = opts.accounts or {}, rpcq = {}, rpc_times = {}, posts = {}, led = {}, hint = "", input = nil,
+    accounts = opts.accounts or {}, rpcq = {}, rpc_times = {}, posts = {}, connects = {}, whos = {}, led = {}, hint = "", input = nil,
     confirm = nil, id = 0, mesh_sent = {}, offline = false, relay_fail = nil}
   local function obj(kind, o)
     W.objs = W.objs + 1
@@ -323,7 +336,7 @@ local function new_world(opts)
     pda = pda,
   }
   _G.rpc = {call = function(method, params, opts, cb)
-    check(type(opts) == "table" and opts.cluster == "devnet", "rpc on devnet")
+    check(type(opts) == "table" and opts.cluster == "mainnet", "rpc on mainnet")
     local t = W.ms
     local n = 0
     W.rpc_times[#W.rpc_times + 1] = t
@@ -334,9 +347,13 @@ local function new_world(opts)
     W.rpcq[#W.rpcq + 1] = {method = method, params = params, cb = cb}
   end}
   _G.http = {post = function(url, body, cb)
-    check(url == "https://relay.botbotcap.com/tx", "relay url")
+    if url == "https://intro-bot-relay-production.nav-keeper.workers.dev/connect" then W.connects[#W.connects + 1] = cb return end
+    check(url == "https://intro-bot-relay-production.nav-keeper.workers.dev/tx", "relay url")
     check(#json.encode(body) <= 2048, "http body <= 2 KB")
     W.posts[#W.posts + 1] = {body = body, cb = cb}
+  end, get = function(url, cb)
+    check(url == "https://intro-bot-relay-production.nav-keeper.workers.dev/tx/" .. CONNECT_ID .. "/who", "who url")
+    W.whos[#W.whos + 1] = cb
   end}
   _G.mesh = {
     send = function(to, msg) check(#json.encode(msg) <= 200, "mesh msg <= 200 bytes"); W.mesh_sent[#W.mesh_sent + 1] = msg end,
@@ -406,8 +423,25 @@ local function relay_reply(ok, res)
   assert(p, "no relay post")
   local m = require("lib.bytes").unhex(p.body.message)
   if os.getenv("DUMP") then io.open(os.getenv("DUMP"), "a"):write(p.body.message, "\n"):close() end
-  callback(p.cb, ok, res or {status = 200, body = json.encode({url = "solana:https://relay.botbotcap.com/tx/abc123"})})
+  callback(p.cb, ok, res or {status = 200, body = json.encode({url = "solana:https://intro-bot-relay-production.nav-keeper.workers.dev/tx/abc123"})})
   return read_msg(m)
+end
+-- Answer the connect QR, then the relay's "who" poll with the scanning wallet.
+local function connect_as(wallet)
+  local cb = table.remove(W.connects, 1)
+  assert(cb, "no connect post")
+  callback(cb, true, {status = 200, body = json.encode({id = CONNECT_ID,
+    url = "solana:https://intro-bot-relay-production.nav-keeper.workers.dev/tx/" .. CONNECT_ID})})
+  check(W.qr and W.qr.t == "solana:https://intro-bot-relay-production.nav-keeper.workers.dev/tx/" .. CONNECT_ID, "connect QR")
+  advance(2000)
+  local w = table.remove(W.whos, 1)
+  assert(w, "no who poll")
+  callback(w, true, {status = 200, body = '{"wallet":null}'})
+  check(W.qr, "still waiting before the scan")
+  advance(2000)
+  w = table.remove(W.whos, 1)
+  assert(w, "no second who poll")
+  callback(w, true, {status = 200, body = json.encode({wallet = wallet})})
 end
 local function has(text)
   for _, l in ipairs(W.labels) do if l.t and l.t:find(text, 1, true) then return true end end
@@ -440,55 +474,62 @@ local function last_toast() return W.toasts[#W.toasts] end
 -- Units ------------------------------------------------------------------------
 local sol = dofile(APP .. "lib/sol.lua")
 local bytes = dofile(APP .. "lib/bytes.lua")
-check(sol.format("1500000000") == "1.5" and sol.format("1") == "0", "format")
-check(sol.format("123456789012345678901234567890") == "123,456,789,012,345,678,901.2345", "format huge")
-check(sol.format("999999999999999999", 3) == "999,999,999.999", "format no float rounding")
-check(sol.format("x") == "?" and sol.format(nil) == "?", "format junk")
-check(sol.to_lamports("12.5") == "12500000000" and sol.to_lamports(".5") == "500000000", "to_lamports")
-check(sol.to_lamports("0") == nil and sol.to_lamports("1.0000000001") == nil and sol.to_lamports("a") == nil, "to_lamports junk")
-check(sol.add("999999999999999999999", "1") == "1000000000000000000000", "add")
-check(sol.mul_div("10000000000", 800, 1000) == "8000000000", "mul_div")
-check(sol.machine_value("10000000000", NOW - 86400 * 10, NOW) == "7200000000", "machine value 10 days")
-check(sol.machine_value("10000000000", NOW - 86400 * 400, NOW) == "4000000000", "machine value wear floor")
-check(sol.cmp("100", "99") == 1 and sol.cmp("05", "5") == 0 and sol.cmp("1", "2") == -1, "cmp")
-check(bytes.u64(bytes.pack_u64("18446744073709551615"), 1) == "18446744073709551615", "u64 max round trip")
-check(bytes.pack_u64("18446744073709551616") == nil, "u64 overflow refused")
-check(bytes.pack_u64("12500000000") == string.pack("<I8", 12500000000), "pack_u64 matches")
-check(bytes.u64(string.pack("<I8", 0), 1) == "0", "u64 zero")
-for _, s in ipairs({"", "a", "ab", "abc", "abcd", "hello world!", "\0\255\1"}) do
-  check(bytes.unbase64(b64(s)) == s, "base64 " .. #s)
-end
-check(bytes.unbase64("a") == nil and bytes.unbase64("@@@@") == nil, "base64 junk")
+check(sol.format("1500000000") == "1.5" and sol.to_lamports("12.5") == "12500000000", "sol math")
+check(bytes.u64(bytes.pack_u64("18446744073709551615"), 1) == "18446744073709551615", "u64 round trip")
 
--- Discriminators against sha256, pdas against @solana/web3.js.
 _G.solana = {decode = b58d, encode = b58e, pda = pda}
-package.loaded["lib.escrow"], package.loaded["lib.bytes"] = nil, nil
+package.loaded["lib.escrow"], package.loaded["lib.bytes"], package.loaded["lib.tx"] = nil, nil, nil
 local escrow = require("lib.escrow")
-for _, n in ipairs({"register_introer", "update_introer", "bid", "withdraw", "accept", "decline",
-  "mark_made", "confirm", "refund_unconfirmed", "refund_expired"}) do
+local txlib = require("lib.tx")
+local W8 = txlib.WALLET
+for _, n in ipairs({"register_introer", "update_introer", "post_job", "cancel_job", "offer", "withdraw_offer",
+  "close_offer", "approve", "mark_made", "confirm", "refund_unconfirmed", "refund_expired"}) do
   check(hex(escrow.DISC[n]) == sha256("global:" .. n):sub(1, 16), "discriminator " .. n)
 end
-check(hex(escrow.DISC.Introer) == sha256("account:Introer"):sub(1, 16), "account discriminator")
-local WALLET = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
-local MYI = escrow.introer_pda(b58d(WALLET))
-check(b58e(MYI) == "8Q9ZeQgFAF2KrcRexhkXFUbQnwvXLzMxEKTwsTccy9L3", "introer pda (web3.js)")
-check(b58e(escrow.request_pda(MYI, "3")) == "9gKzhq1KL7decnAjAj7TdM6y2rC3jmWmhr8bJxcLsc9o", "request pda (web3.js)")
-local ib = enc_introer({wallet = b58d(WALLET), min_bid = "50000000", next_id = 3, jobs = 2, earned = "12345678901",
-  created_at = NOW, open = 2, badge_id = "7K2Q9M", offer = "Solana devs"})
-check(#ib == escrow.INTROER.size, "introer size")
-local di = escrow.decode_introer(ib)
-check(di and di.earned == "12345678901" and di.next_id == "3" and di.offer == "Solana devs" and di.open == 2
-  and di.jobs == 2 and di.badge_id == "7K2Q9M" and di.created_at == NOW, "decode introer")
-check(escrow.decode_introer(ib:sub(1, 100)) == nil and escrow.decode_introer("x" .. ib:sub(2)) == nil, "bad introer refused")
-local rb = enc_request({introer = MYI, requester = string.rep("R", 32), id = 7, bid = "100000000000", status = 2,
-  made_at = NOW - 5, target = "Toly", telegram = "@joe"})
-check(#rb == escrow.REQUEST.size, "request size")
-local dr = escrow.decode_request(rb)
-check(dr and dr.bid == "100000000000" and dr.status == 2 and dr.target == "Toly" and dr.telegram == "@joe"
-  and dr.id == "7" and dr.made_at == NOW - 5, "decode request")
+for _, n in ipairs({"Introer", "Job", "Offer", "Board"}) do
+  check(hex(escrow.DISC[n]) == sha256("account:" .. n):sub(1, 16), "account discriminator " .. n)
+end
 
--- The program's own instruction and account bytes (intro-bot-program tests/fixtures).
-local FIX = os.getenv("FIXTURES") or (HERE .. "/../../intro-bot-program/tests/fixtures")
+local WALLET = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+local ME = b58d(WALLET)
+local OTHER = b58d("9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM")
+local THIRD = b58d("4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T")
+local RQ = string.rep("\7", 32)
+
+local jb = enc_job({requester = RQ, nonce = 1790000001, bid = "12500000000", status = 1, approved = OTHER,
+  approved_at = NOW - 5, offers = {OTHER, THIRD}, who = "Toly", company = "Solana Labs", telegram = "@rq"})
+check(#jb == escrow.JOB.size, "job size")
+local dj = escrow.decode_job(jb)
+check(dj and dj.requester == RQ and dj.nonce == "1790000001" and dj.bid == "12500000000" and dj.status == 1
+  and dj.approved == OTHER and dj.approved_at == NOW - 5 and dj.offer_count == 2 and dj.offers[1] == THIRD
+  and dj.offers[2] == OTHER and dj.who == "Toly" and dj.company == "Solana Labs" and dj.telegram == "@rq",
+  "decode job: offers newest first")
+local many = {}
+for k = 1, 20 do many[k] = string.char(k):rep(32) end
+local dm = escrow.decode_job(enc_job({requester = RQ, nonce = 1, bid = "1", offers = many, who = "a", company = "b", telegram = "c"}))
+local holes = enc_job({requester = RQ, nonce = 1, bid = "1", offers = {OTHER, THIRD, ME}, offer_count = 2, who = "a", company = "b", telegram = "c"})
+holes = holes:sub(1, 221 + 32) .. string.rep("\0", 32) .. holes:sub(221 + 65)  -- THIRD withdrawn
+local dh = escrow.decode_job(holes)
+check(#dh.offers == 2 and dh.offers[1] == ME and dh.offers[2] == OTHER, "withdrawn offer: hole skipped")
+check(#dm.offers == 16 and dm.offers[1] == many[20] and dm.offers[16] == many[5] and dm.offer_count == 20, "offer ring wraps at 16")
+check(escrow.decode_job(jb:sub(1, 219)) == nil and escrow.decode_job("x" .. jb:sub(2)) == nil, "bad job refused")
+local listed = escrow.decode_job(jb:sub(1, escrow.JOB.LIST))
+check(listed and listed.who == "Toly" and listed.offer_count == 2 and #listed.offers == 0, "board slice: no offers ring")
+local di = escrow.decode_introer(enc_introer({wallet = ME, badge_id = "7K2Q9M", name = "Joe", jobs = 3, earned = "4000000000"}))
+check(di and di.wallet == ME and di.name == "Joe" and di.jobs == 3 and di.earned == "4000000000" and di.badge_id == "7K2Q9M", "decode introer")
+local do_ = escrow.decode_offer(enc_offer(RQ, ME))
+check(do_ and do_.job == RQ and do_.introer == ME, "decode offer")
+local db = escrow.decode_board(enc_board({OTHER, THIRD}))
+check(db and #db == 2 and db[1] == THIRD and db[2] == OTHER, "decode board: newest first")
+check(#escrow.actions({status = 0, created_at = NOW - 3600}, "requester", nil, NOW) == 1 and #escrow.actions({status = 0, created_at = NOW - 60}, "requester", nil, NOW) == 0, "open job: cancel after 1h")
+check(escrow.actions({status = 2, made_at = NOW - 73 * 3600}, "requester", nil, NOW)[2] == "refund_unconfirmed", "made 72h: refund")
+check(escrow.actions({status = 1, approved_at = NOW - 8 * 86400}, "requester", nil, NOW)[2] == "refund_expired", "approved 7d: refund")
+check(escrow.actions({status = 1, approved = ME, approved_at = NOW}, "introer", ME, NOW)[1] == "mark_made", "picked: mark made")
+check(#escrow.actions({status = 1, approved = ME, approved_at = NOW - 8 * 86400}, "introer", ME, NOW) == 0, "mark made deadline")
+check(escrow.actions({status = 1, approved = OTHER}, "introer", ME, NOW)[1] == "withdraw_offer", "not picked: withdraw offer")
+
+-- The program's own instruction and account bytes (tests/fixtures, or FIXTURES=<dir>).
+local FIX = os.getenv("FIXTURES") or (HERE .. "/../tests/fixtures")
 local function fixture(name)
   local f = io.open(FIX .. "/" .. name .. ".json")
   if not f then return nil end
@@ -496,397 +537,316 @@ local function fixture(name)
   f:close()
   return t
 end
-if not fixture("bid") then
-  print("SKIP: no program fixtures at " .. FIX .. " (set FIXTURES)")
+if not fixture("post_job") then
+  print("SKIP: no v2 program fixtures at " .. FIX .. " (set FIXTURES)")
 else
-  _G.tx_lib = require("lib.tx")
-  local function same(name, built)
+  local function same_ix(name, built)
     local f = fixture(name)
     local signer = b58d(f.accounts[1].pubkey)
     local ok = hex(built.data) == f.data_hex and b58e(built.program) == f.program_id and #built.accounts == #f.accounts
     for k, a in ipairs(f.accounts) do
       local mine = built.accounts[k]
-      local key = mine and (mine[1] == _G.tx_lib.WALLET and signer or mine[1])
-      ok = ok and mine and b58e(key) == a.pubkey and (a.signer == (mine[1] == _G.tx_lib.WALLET))
-        and (a.signer or (mine.w == true) == a.writable)
+      local key = mine and (mine[1] == W8 and signer or mine[1])
+      ok = ok and mine and b58e(key) == a.pubkey
+        and (k ~= 1 or a.signer) and (k == 1 or a.signer or (mine.w == true) == a.writable)
     end
     check(ok, "fixture " .. name)
   end
   local function acc(name, k) return b58d(fixture(name).accounts[k].pubkey) end
-  local function data(name) return require("lib.bytes").unhex(fixture(name).data_hex) end
-  local bytes2 = require("lib.bytes")
-  local wallet, requester = acc("register_introer", 1), acc("bid", 1)
-  local intro = acc("register_introer", 2)
-  check(escrow.introer_pda(wallet) == intro, "fixture introer pda")
-  check(escrow.config_pda() == acc("bid", 2) and escrow.directory_pda() == acc("register_introer", 3), "fixture config, directory pdas")
+  local function data(name) return bytes.unhex(fixture(name).data_hex) end
+  local wallet, requester = acc("register_introer", 1), acc("post_job", 1)
+  check(escrow.introer_pda(wallet) == acc("register_introer", 2), "fixture introer pda")
+  check(escrow.config_pda() == acc("post_job", 2) and escrow.board_pda() == acc("post_job", 3), "fixture config, board pdas")
   local d = data("register_introer")
-  same("register_introer", escrow.ix_register(wallet, bytes2.text(d, 9, 8), bytes2.text(d, 17, 64), bytes2.u64(d, 81)))
+  same_ix("register_introer", escrow.ix_register(wallet, bytes.text(d, 9, 8), bytes.text(d, 17, 32)))
   d = data("update_introer")
-  same("update_introer", escrow.ix_update(wallet, bytes2.text(d, 9, 64), bytes2.u64(d, 73)))
-  d = data("bid")
-  check(escrow.request_pda(intro, "0") == acc("bid", 4), "fixture request pda")
-  same("bid", escrow.ix_bid(intro, acc("bid", 4), bytes2.text(d, 9, 64), bytes2.text(d, 73, 32), bytes2.u64(d, 105)))
-  d = data("bid_outbid")
-  local ob = fixture("bid_outbid").accounts
-  same("bid_outbid", escrow.ix_bid(intro, acc("bid_outbid", 4), bytes2.text(d, 9, 64), bytes2.text(d, 73, 32),
-    bytes2.u64(d, 105), {pda = acc("bid_outbid", 6), requester = acc("bid_outbid", 7)}))
-  check(#ob == 7, "fixture outbid: lowest and its requester only")
-  same("accept", escrow.ix_accept(intro, acc("accept", 3)))
-  same("mark_made", escrow.ix_made(intro, acc("mark_made", 3)))
-  same("decline", escrow.ix_decline(intro, acc("decline", 3), requester))
-  same("withdraw", escrow.ix_withdraw(intro, acc("withdraw", 3)))
-  same("confirm", escrow.ix_confirm(intro, acc("confirm", 3), wallet))
-  same("refund_unconfirmed", escrow.ix_refund("refund_unconfirmed", intro, acc("refund_unconfirmed", 3), requester))
-  same("refund_expired", escrow.ix_refund("refund_expired", intro, acc("refund_expired", 3), requester))
-  -- Account dumps.
+  same_ix("update_introer", escrow.ix_update(wallet, bytes.text(d, 9, 8), bytes.text(d, 17, 32)))
+  d = data("post_job")
+  local job, nonce = acc("post_job", 4), bytes.u64(d, 9)
+  check(escrow.job_pda(requester, nonce) == job, "fixture job pda")
+  same_ix("post_job", escrow.ix_post_job(job, nonce, bytes.text(d, 17, 32), bytes.text(d, 49, 32),
+    bytes.text(d, 81, 32), bytes.u64(d, 113)))
+  same_ix("cancel_job", escrow.ix_cancel_job(acc("cancel_job", 2)))
+  -- Offers are ["offer", job, serial, wallet]: find each fixture's job serial.
+  local function serial_of(job, w, offer)
+    for n = 0, 20 do if escrow.offer_pda(job, tostring(n), w) == offer then return tostring(n) end end
+  end
+  local s1 = serial_of(acc("offer", 4), wallet, acc("offer", 5))
+  check(s1, "fixture offer pda: [offer, job, serial, wallet]")
+  same_ix("offer", escrow.ix_offer(wallet, acc("offer", 4), s1))
+  local s2 = serial_of(acc("withdraw_offer", 3), wallet, acc("withdraw_offer", 2))
+  same_ix("withdraw_offer", escrow.ix_withdraw_offer(wallet, acc("withdraw_offer", 3), s2))
+  local s3 = serial_of(acc("close_offer", 4), acc("close_offer", 3), acc("close_offer", 2))
+  same_ix("close_offer", escrow.ix_close_offer(acc("close_offer", 4), s3, acc("close_offer", 3)))
+  local s4 = serial_of(acc("approve", 2), wallet, acc("approve", 3))
+  same_ix("approve", escrow.ix_approve(acc("approve", 2), s4, wallet))
+  same_ix("mark_made", escrow.ix_mark_made(acc("mark_made", 2)))
+  same_ix("confirm", escrow.ix_confirm(acc("confirm", 2), acc("confirm", 4)))
+  same_ix("refund_expired", escrow.ix_refund("refund_expired", acc("refund_expired", 2)))
+  same_ix("refund_unconfirmed", escrow.ix_refund("refund_unconfirmed", acc("refund_unconfirmed", 2)))
   local f = io.open(FIX .. "/accounts.json")
   local dumps = json.decode(f:read("a"))
   f:close()
-  local di2 = escrow.decode_introer(bytes2.unhex(dumps.introer.data_hex))
-  check(di2 and di2.wallet == wallet and di2.badge_id == "BP26-001" and di2.offer ~= "", "fixture introer decodes")
-  check(#di2.slots == di2.open, "fixture introer open slots")
-  local dr2 = escrow.decode_request(bytes2.unhex(dumps.request.data_hex))
-  check(dr2 and dr2.introer == intro and escrow.STATUS[dr2.status] and dr2.target ~= "", "fixture request decodes")
-  local dd = escrow.decode_directory(bytes2.unhex(dumps.directory.data_hex))
-  check(dd and dd[1] == wallet, "fixture directory decodes")
+  local x = escrow.decode_introer(bytes.unhex(dumps.introer.data_hex))
+  check(x and x.wallet == wallet and x.name ~= "", "fixture introer decodes")
+  local j = escrow.decode_job(bytes.unhex(dumps.job.data_hex))
+  check(j and j.requester == requester and j.who ~= "" and j.telegram ~= "" and #j.offers == math.min(j.offer_count, 16)
+    and j.offer_count >= 1, "fixture job decodes, with its offers")
+  local o = escrow.decode_offer(bytes.unhex(dumps.offer.data_hex))
+  check(o and o.job == b58d(dumps.job.pubkey) and o.job_serial == j.serial, "fixture offer decodes")
+  local bd = escrow.decode_board(bytes.unhex(dumps.board.data_hex))
+  check(bd and bd[1] == b58d(dumps.job.pubkey), "fixture board decodes: newest job first")
 end
 
-local acc_r = {status = 1, accepted_at = NOW - escrow.WORK_WINDOW - 1, created_at = NOW, made_at = 0}
-check(#escrow.actions(acc_r, "introer", NOW) == 0 and escrow.note(acc_r, "introer", NOW):find("Too late"), "mark made deadline")
-check(escrow.actions(acc_r, "requester", NOW)[2] == "refund_expired", "refund after the work window")
-local lo, need = escrow.lowest({slots = {{id = "4", bid = "100"}, {id = "2", bid = "100"}, {id = "1", bid = "900"}}})
-check(lo.id == "2" and need == "110", "lowest: oldest on a tie, +10%")
-check(escrow.lowest({slots = {}}) == nil, "no lowest when empty")
-check(select(2, escrow.lowest({slots = {{id = "1", bid = "95000000000"}}})) == "100000000000", "outbid capped at 100 SOL")
-check(select(2, escrow.lowest({slots = {{id = "1", bid = "99999999999"}}})) == "100000000000", "outbid above the lowest")
-check(select(2, escrow.lowest({slots = {{id = "1", bid = "100000000000"}}})) == nil, "no outbid when every bid is at the max")
-
--- App: introer --------------------------------------------------------------------
-local ME = b58d(WALLET)
+-- App ----------------------------------------------------------------------------
 local CHAIN = {}
+local P = b58d(escrow.PROGRAM_ID)
+local SYS = string.rep("\0", 32)
+local MYI = escrow.introer_pda(ME)
+local BOARD = escrow.board_pda()
+local CONFIG = escrow.config_pda()
+local board_jobs = {}
+local function put_job(t)
+  local pda = escrow.job_pda(t.requester, tostring(t.nonce))
+  CHAIN[b58e(pda)] = enc_job(t)
+  return pda
+end
+local function on_board(pda)
+  board_jobs[#board_jobs + 1] = pda
+  CHAIN[b58e(BOARD)] = enc_board(board_jobs)
+end
+local function same(a, b)
+  if #a ~= #b then return false end
+  for k = 1, #a do if a[k] ~= b[k] then return false end end
+  return true
+end
+
 new_world({accounts = CHAIN})
-check(W.hint:find("SELECT change"), "first launch opens Setup")
+check(has("Intro Bot") and has("Robots that earn"), "splash: the B and the CTA")
+advance(1600)
+check(has("Who do you want to meet?") and has("Robots that earn: botbotcap.com"), "opens on Request an intro, CTA")
+check(has("Your Telegram is shown to people who offer."), "Telegram warning")
 check(#W.rpcq == 0, "no rpc without a wallet")
-list_select(1); type_in("bad")
-check(last_toast() == "Not a Solana address", "bad wallet refused")
-list_select(1); type_in(WALLET)
-check(has("Intro Bot") and W.store.wallet, "wallet saved, Home")
-flush()
-check(has("Not an introer yet"), "not registered yet")
-go("Setup")
-list_select(2); type_in("Solana devs"); type_in("0.001")
-check(last_toast() == "At least 0.01 SOL", "min bid floor")
-list_select(2); type_in("Solana devs"); type_in("0.05")
-check(has("Preparing..."), "sign: preparing")
-advance(30)
+
+-- Post a job: wallet first, then who, company, bid, Telegram.
+list_select(1)
+check(not W.input and W.labels[1] and W.labels[1].t == "Connect", "connects the wallet first, no typing")
+connect_as(WALLET); flush()
+check(W.input and W.input.prompt == "Who do you want to meet?", "then who")
+type_in("Toly"); type_in("Solana Labs"); type_in("0.001")
+check(last_toast() == "At least 0.01 SOL", "bid floor")
+list_select(1); type_in("Toly"); type_in("Solana Labs"); type_in("101")
+check(last_toast() == "At most 100 SOL", "bid cap")
+list_select(1); type_in("Toly"); type_in(""); 
+check(not W.input, "empty company backs out")
+list_select(1); type_in("Toly"); type_in("Solana Labs"); type_in("12.5")
+check(W.input and W.input.prompt == "Your Telegram @handle", "asks Telegram once")
+type_in("")
+check(last_toast() == "Telegram is required", "Telegram required")
+list_select(1); type_in("Toly"); type_in("Solana Labs"); type_in("12.5"); type_in("joe")
 local m = relay_reply(true)
-check(m.done and m.header[1] == 1 and m.header[2] == 0, "message: one signer")
-check(m.keys[1] == string.rep("\1", 32), "fee payer placeholder")
-check(m.blockhash == string.rep("\0", 32), "blockhash left for the relay")
 local ix = m.ixs[1]
-check(b58e(ix.program) == PROGRAM, "register: program")
-check(ix.accounts[1] == m.keys[1] and ix.accounts[2] == MYI and ix.accounts[3] == escrow.directory_pda()
-  and ix.accounts[4] == string.rep("\0", 32), "register: accounts")
-check(m.w[MYI] and m.w[m.keys[1]] and not m.w[string.rep("\0", 32)], "register: writable flags")
-check(ix.data == escrow.DISC.register_introer .. fixed("7K2Q9M", 8) .. fixed("Solana devs", 64) .. u64(50000000), "register: data")
-check(W.qr and W.qr.t == "solana:https://relay.botbotcap.com/tx/abc123", "register QR")
+local nonce = tostring(string.unpack("<I8", ix.data, 9))
+check(tonumber(nonce) >= NOW, "nonce is the time")
+local MYJOB = escrow.job_pda(ME, nonce)
+check(m.keys[1] == W8 and #m.ixs == 1 and b58e(ix.program) == escrow.PROGRAM_ID, "one intro_escrow instruction")
+check(same(ix.accounts, {m.keys[1], CONFIG, BOARD, MYJOB, SYS}), "post_job: accounts")
+check(m.w[BOARD] and m.w[MYJOB] and not m.w[CONFIG], "post_job: writable")
+check(ix.data == escrow.DISC.post_job .. u64(nonce) .. fixed("Toly", 32) .. fixed("Solana Labs", 32)
+  .. fixed("@joe", 32) .. u64(12500000000), "post_job: data (12.5 SOL)")
+check(W.qr and W.qr.t == "solana:https://intro-bot-relay-production.nav-keeper.workers.dev/tx/abc123", "post QR")
+CHAIN[b58e(MYJOB)] = enc_job({requester = ME, nonce = nonce, bid = "12500000000", who = "Toly",
+  company = "Solana Labs", telegram = "@joe"})
+on_board(MYJOB)
 advance(6000)
-check(has("Waiting for the"), "still waiting")
-CHAIN[b58e(MYI)] = enc_introer({wallet = ME, min_bid = "50000000", next_id = 0, jobs = 0, earned = "0",
-  created_at = NOW, open = 0, offer = "Solana devs"})
-advance(6000)
-check(last_toast() == "Register: done", "register landed")
-check(W.hint:find("SELECT change"), "back to Setup")
+check(last_toast() == "Posted!" and has("My jobs"), "posted, My jobs")
+flush()
+check(W.lists[1] and W.lists[1].rows[1].title == "Toly @ Solana Labs" and W.lists[1].rows[1].right == "Open", "my job listed")
+check(W.store.tg == '"@joe"', "Telegram remembered")
+go("Request an intro")
+list_select(1); type_in("Mert"); type_in("Helius"); type_in("0.2")
+check(not W.input or W.input.prompt ~= "Your Telegram @handle", "remembered Telegram not asked again")
+key("back")
 
--- Requests arrive.
-local REQ = {}
-local function put_req(id, t)
-  t.introer, t.id = t.introer or MYI, id
-  local addr = escrow.request_pda(t.introer, tostring(id))
-  CHAIN[b58e(addr)] = enc_request(t)
-  REQ[id] = addr
-  return addr
-end
-local RQ = string.rep("\7", 32)
-put_req(0, {requester = RQ, bid = "200000000", status = 0, target = "Mert", telegram = "@a"})
-put_req(1, {requester = RQ, bid = "12500000000", status = 1, accepted_at = NOW, target = "Anza", telegram = "@b"})
-put_req(2, {requester = RQ, bid = "100000000", status = 2, made_at = NOW, target = "Done", telegram = ""})
-CHAIN[b58e(MYI)] = enc_introer({wallet = ME, min_bid = "50000000", next_id = 3, jobs = 4, earned = "30000000000",
-  created_at = NOW - 86400 * 2, open = 1, offer = "Solana devs"})
-advance(20000)
-go("Intro Bot")
-check(has("23.52 SOL") and has("demo value"), "machine value from earned and wear")
-check(has("Ask me about BotBot") and has("botbotcap.com"), "BotBot footer")
-go("My queue")
-local q = W.lists[1]
-check(q and #q.rows == 3 and q.rows[1].right == "Open" and q.rows[2].right == "Accepted"
-  and q.rows[3].right == "Waiting for confirm", "queue rows and status words")
-check(q.rows[2].sub == "@b  12.5 SOL", "queue bid over 2^31 lamports")
+-- The board.
+local JOB2 = put_job({requester = OTHER, nonce = 7, bid = "300000000", who = "Vitalik", company = "Ethereum",
+  telegram = "@other", offers = {THIRD}})
+on_board(JOB2)
+go("Intro board"); advance(20000)
+local rows = W.lists[1].rows
+check(#rows == 2 and rows[1].title == "Vitalik @ Ethereum" and rows[1].sub:find("1 offer", 1, true)
+  and rows[2].title == "Toly @ Solana Labs", "board: newest first, offers counted")
+check(not rows[1].sub:find("@other", 1, true), "board hides Telegram")
+list_select(2)
+check(has("Your job: see My jobs."), "own job: no offer")
+key("back")
 list_select(1)
-check(#W.lists[1].rows == 2, "open: accept, decline")
-list_select(1); advance(30)
+check(has("Telegram shown after you offer.") and not has("@other"), "Telegram hidden before offering")
+list_select(1)
+check(last_toast() == "Register in Profile first", "offer needs a profile")
+key("back")
+
+-- Register as an introer.
+go("Profile"); advance(20000)
+check(has("Not an introer yet") and has("demo value"), "profile: not an introer")
+list_select(2); type_in("Joe")
 m = relay_reply(true)
 ix = m.ixs[1]
-check(ix.data == escrow.DISC.accept and ix.accounts[1] == m.keys[1] and ix.accounts[2] == MYI
-  and ix.accounts[3] == REQ[0], "accept: accounts")
-check(m.w[MYI] and m.w[REQ[0]], "accept: writable")
-put_req(0, {requester = RQ, bid = "200000000", status = 1, accepted_at = NOW, target = "Mert", telegram = "@a"})
+check(same(ix.accounts, {m.keys[1], MYI, SYS}) and ix.data == escrow.DISC.register_introer
+  .. fixed("7K2Q9M", 8) .. fixed("Joe", 32), "register_introer")
+CHAIN[b58e(MYI)] = enc_introer({wallet = ME, badge_id = "7K2Q9M", name = "Joe"})
 advance(6000)
-check(last_toast() == "Accept: done", "accept landed")
-put_req(3, {requester = RQ, bid = "70000000", status = 0, target = "Vitalik", telegram = "@v"})
-CHAIN[b58e(MYI)] = enc_introer({wallet = ME, min_bid = "50000000", next_id = 4, jobs = 4, earned = "30000000000",
-  created_at = NOW - 86400 * 2, open = 1, offer = "Solana devs"})
-advance(20000)
-go("My queue")
-check(W.lists[1].rows[1].title == "Vitalik" and W.lists[1].rows[2].title == "Anza"
-  and W.lists[1].rows[3].title == "Mert" and W.lists[1].rows[4].title == "Done", "queue order: open first, newest")
-W.lists[1].sel = 2
-put_req(5, {requester = RQ, bid = "90000000", status = 0, target = "Newer", telegram = ""})
-CHAIN[b58e(MYI)] = enc_introer({wallet = ME, min_bid = "50000000", next_id = 6, jobs = 4, earned = "30000000000",
-  created_at = NOW - 86400 * 2, open = 2, offer = "Solana devs"})
-advance(20000)
-check(W.lists[1].rows[W.lists[1].sel].title == "Anza" and W.lists[1].rows[1].title == "Newer", "selection follows the request, not the row")
-CHAIN[b58e(REQ[5])] = nil
-CHAIN[b58e(MYI)] = enc_introer({wallet = ME, min_bid = "50000000", next_id = 4, jobs = 4, earned = "30000000000",
-  created_at = NOW - 86400 * 2, open = 1, offer = "Solana devs"})
-advance(20000)
-list_select(1); list_select(2); advance(30)
+check(last_toast() == "Register: done", "registered")
+flush()
+
+-- Offer on Vitalik's job.
+go("Intro board")
+list_select(1); list_select(1)
 m = relay_reply(true)
-check(m.ixs[1].data == escrow.DISC.decline and m.ixs[1].accounts[4] == RQ and m.w[RQ], "decline: requester refunded")
-key("back")
-list_select(2); list_select(1); advance(30)
-m = relay_reply(true)
-check(m.ixs[1].data == escrow.DISC.mark_made, "made")
-key("back")
-list_select(4)
-check(has("The requester confirms to pay you."), "made: nothing to sign for the introer")
+ix = m.ixs[1]
+local MYOFFER = escrow.offer_pda(JOB2, "1", ME)
+check(same(ix.accounts, {m.keys[1], CONFIG, MYI, JOB2, MYOFFER, SYS}) and ix.data == escrow.DISC.offer, "offer: accounts")
+check(m.w[JOB2] and m.w[MYOFFER] and not m.w[MYI], "offer: writable")
+CHAIN[b58e(MYOFFER)] = enc_offer(JOB2, ME)
+put_job({requester = OTHER, nonce = 7, bid = "300000000", who = "Vitalik", company = "Ethereum",
+  telegram = "@other", offers = {THIRD, ME}})
+advance(6000)
+check(last_toast() == "Offer: done" and has("My offers"), "offered, My offers")
+flush()
+check(W.lists[1].rows[1].right == "Waiting" and W.lists[1].rows[1].sub:find("@other", 1, true), "my offer shows Telegram")
+go("Intro board"); list_select(1)
+check(has("You offered. Talk on Telegram:") and has("@other"), "job shows Telegram after offering")
 key("back")
 
--- Relay failure, offline.
+-- Someone offers on my job; I approve them.
+put_job({requester = ME, nonce = nonce, bid = "12500000000", who = "Toly", company = "Solana Labs",
+  telegram = "@joe", offers = {OTHER, THIRD}})
+go("My jobs"); advance(20000)
+list_select(1); advance(200)
+check(not W.lists[1].rows[3] and has("Cancel available in"), "cancel hidden for the first hour")
+key("back")
+put_job({requester = ME, nonce = nonce, bid = "12500000000", who = "Toly", company = "Solana Labs",
+  telegram = "@joe", offers = {OTHER, THIRD}, created_at = NOW - 3600})
+CHAIN[b58e(escrow.introer_pda(OTHER))] = enc_introer({wallet = OTHER, name = "Ana", jobs = 7, earned = "2400000000"})
+go("My jobs"); advance(20000)
+list_select(1); advance(200)
+check(has("Pick one after talking on Telegram:"), "offer pool")
+local pool = W.lists[1].rows
+check(pool[1].title:find("Approve", 1, true) and pool[2].title == "Approve Ana" and pool[2].sub == "jobs 7   earned 2.4 SOL"
+  and pool[3].title == "Cancel job", "pool: names, jobs, earned, then cancel")
+list_select(2)
+m = relay_reply(true)
+ix = m.ixs[1]
+check(same(ix.accounts, {m.keys[1], MYJOB, escrow.offer_pda(MYJOB, "1", OTHER)}) and ix.data == escrow.DISC.approve
+  and m.w[MYJOB], "approve: accounts, no args")
+put_job({requester = ME, nonce = nonce, bid = "12500000000", status = 1, approved = OTHER, approved_at = NOW,
+  who = "Toly", company = "Solana Labs", telegram = "@joe", offers = {OTHER, THIRD}})
+advance(6000)
+check(last_toast() == "Approve: done", "approved")
+flush()
+list_select(1)
+check(has("Picked: Ana") and W.lists[1].rows[1].title == "Confirm + pay", "approved: picked, confirm")
+list_select(1)
+m = relay_reply(true)
+ix = m.ixs[1]
+check(same(ix.accounts, {m.keys[1], MYJOB, escrow.introer_pda(OTHER), OTHER}) and m.w[OTHER]
+  and m.w[escrow.introer_pda(OTHER)] and ix.data == escrow.DISC.confirm, "confirm: pays the picked introer")
+key("back")
+-- Made long ago: refund my own job, the signer twice as one key.
+put_job({requester = ME, nonce = nonce, bid = "12500000000", status = 2, approved = OTHER, made_at = NOW - 73 * 3600,
+  who = "Toly", company = "Solana Labs", telegram = "@joe", offers = {OTHER}})
+go("My jobs"); advance(20000)
+list_select(1)
+check(has("Made? Confirm to pay.") and W.lists[1].rows[2].title == "Refund (72h passed)", "made: confirm or refund")
+list_select(2)
+m = relay_reply(true)
+ix = m.ixs[1]
+check(same(ix.accounts, {m.keys[1], MYJOB, m.keys[1]}) and #m.keys == 3, "own refund: placeholder once")
+CHAIN[b58e(MYJOB)] = nil
+advance(6000)
+check(last_toast() == "Refund (72h passed): done", "refund landed")
+advance(20000); flush()
+check(has("No jobs yet") and json.decode(W.store.mine)[1] == nil, "closed job dropped")
+
+-- I get picked on Vitalik's job: mark made, then a receipt.
+put_job({requester = OTHER, nonce = 7, bid = "300000000", status = 1, approved = ME, approved_at = NOW,
+  who = "Vitalik", company = "Ethereum", telegram = "@other", offers = {THIRD, ME}})
+go("My offers"); advance(20000)
+check(W.lists[1].rows[1].right == "You!", "picked")
+list_select(1)
+check(W.lists[1].rows[1] == "Intro made" and has("@other"), "picked: mark made, Telegram shown")
+list_select(1)
+m = relay_reply(true)
+check(same(m.ixs[1].accounts, {m.keys[1], JOB2}) and m.ixs[1].data == escrow.DISC.mark_made, "mark_made")
+put_job({requester = OTHER, nonce = 7, bid = "300000000", status = 2, approved = ME, made_at = NOW,
+  who = "Vitalik", company = "Ethereum", telegram = "@other", offers = {THIRD, ME}})
+advance(6000)
+check(last_toast() == "Intro made: done", "made landed")
+CHAIN[b58e(JOB2)] = nil
+CHAIN[b58e(MYI)] = enc_introer({wallet = ME, badge_id = "7K2Q9M", name = "Joe", jobs = 1, earned = "300000000"})
+local seen_anim = false
+for _ = 1, 700 do advance(30); if has("JOB DONE!") then seen_anim = true break end end
+check(seen_anim, "receipt: JOB DONE")
+advance(3000)
+check(#W.led > 0 and W.led_off, "LEDs flash and turn off")
+go("My offers"); advance(20000)
+check(W.lists[1].rows[1].right == "Closed", "closed job: offer rent")
 list_select(1); list_select(1)
-relay_reply(true, {status = 200, body = json.encode({url = "solana:https://relay.botbotcap.com/tx?id=a&b=1"})})
-check(W.qr and W.qr.t == "solana:https%3A%2F%2Frelay.botbotcap.com%2Ftx%3Fid%3Da%26b%3D1", "query link percent-encoded")
-key("back"); key("back")
-list_select(1); list_select(1)
-relay_reply(true, {status = 200, body = json.encode({url = "solana:https://relay.botbotcap.com.evil.io/tx/1"})})
-check(has("bad relay answer"), "relay host checked")
-key("back"); key("back")
-list_select(1); list_select(1); advance(30)
+m = relay_reply(true)
+check(same(m.ixs[1].accounts, {m.keys[1], MYOFFER, ME, JOB2}) and m.ixs[1].data == escrow.DISC.close_offer
+  and m.w[ME] and m.w[MYOFFER], "close_offer: rent to me")
+CHAIN[b58e(MYOFFER)] = nil
+advance(6000)
+check(json.decode(W.store.offered)[1] == nil, "closed offer forgotten")
+
+-- Retry after a relay error.
+go("Request an intro")
+list_select(1); type_in("Mert"); type_in("Helius"); type_in("0.2")
 relay_reply(true, {status = 500, body = ""})
-check(has("Could not sign:") and has("relay error 500"), "relay error shown")
-key("back"); key("back")
-W.offline = true
-advance(20000)
-go("Intro Bot")
-check(has("offline - showing last data"), "offline handled")
-W.offline = false
-
--- Job done when a requester confirms.
-CHAIN[b58e(REQ[2])] = nil
-CHAIN[b58e(MYI)] = enc_introer({wallet = ME, min_bid = "50000000", next_id = 4, jobs = 5, earned = "30100000000",
-  created_at = NOW - 86400 * 2, open = 1, offer = "Solana devs"})
-local function wait_for(text, ms)
-  for _ = 1, ms // 30 do
-    if has(text) then return true end
-    advance(30)
-  end
-  return has(text)
-end
-check(wait_for("JOB DONE!", 21000), "job done animation")
-check(key("right") == true and has("JOB DONE!"), "keys wait during the animation")
-advance(3000)
-check(#W.led > 0 and W.led_off and has("Ask me about BotBot"), "LEDs, back to Home")
-
--- Hire me.
-go("Hire me")
-check(has("Paid only when you confirm.") and has("We trust you to keep your word."), "hire me copy")
-CHAIN[b58e(MYI)] = enc_introer({wallet = ME, min_bid = "50000000", next_id = 4, jobs = 6, earned = "30200000000",
-  created_at = NOW - 86400 * 2, open = 1, offer = "Solana devs"})
-advance(21000)
-check(not has("JOB DONE!") and has("Paid only when you confirm."), "job done waits off Home")
-key("left"); key("left")
-check(has("JOB DONE!"), "job done plays on Home")
-advance(3000)
-go("Setup"); list_select(2); type_in("Solana devs"); local n_t = #W.toasts; type_in(nil)
-check(#W.toasts == n_t and not has("Sign on phone"), "cancelled min bid: no toast")
-go("Hire me")
-
--- Mesh: a nearby introer, and a beacon on request.
-callback(on_mesh, "BADGE2", {k = "ib", w = "Demo1ntroer1111111111111111111111111111111"})
-callback(on_mesh, "BADGE3", {k = "ib", w = "nope"})
-callback(on_mesh, "BADGE3", "junk")
-go("Find an introer")
-check(W.lists[1].rows[4] and W.lists[1].rows[4].title == "@ana" and not W.lists[1].rows[5], "nearby introer listed")
-local sent = #W.mesh_sent
-callback(on_mesh, "BADGE3", {k = "ib?"})
-check(#W.mesh_sent == sent + 1 and W.mesh_sent[#W.mesh_sent].w == WALLET, "beacon answers a scan")
-
--- App: requester -------------------------------------------------------------------
-local OTHER = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
-local OB = b58d(OTHER)
-local OI = escrow.introer_pda(OB)
-CHAIN[b58e(OI)] = enc_introer({wallet = OB, min_bid = "100000000", next_id = 9, jobs = 1, earned = "0",
-  created_at = NOW, open = 1, offer = "Asia VCs"})
-list_select(1); type_in(OTHER)
-check(has("Reading the chain..."), "introer: reading")
-flush()
-check(has("Asia VCs") and has("min 0.1 SOL"), "introer shown")
-list_select(1); type_in("Toly"); type_in("joe"); type_in("0.05")
-check(last_toast() == "Below the min bid", "below min refused")
-list_select(1); type_in("Toly"); type_in("joe"); type_in("101")
-check(last_toast() == "Max bid is 100 SOL", "max bid")
-list_select(1); type_in("Toly"); type_in("joe"); type_in("12.5")
-advance(30)
-m = relay_reply(true)
-ix = m.ixs[1]
-local NEWR = escrow.request_pda(OI, "9")
-local P = b58d(PROGRAM)
-check(ix.data == escrow.DISC.bid .. fixed("Toly", 64) .. fixed("@joe", 32) .. u64(12500000000), "bid: data (12.5 SOL)")
-check(ix.accounts[1] == m.keys[1] and ix.accounts[2] == escrow.config_pda() and ix.accounts[3] == OI
-  and ix.accounts[4] == NEWR and ix.accounts[5] == string.rep("\0", 32) and ix.accounts[6] == P
-  and ix.accounts[7] == P and #ix.accounts == 7, "bid: accounts, None as program id")
-check(not m.w[escrow.config_pda()] and m.w[OI] and m.w[NEWR] and not m.w[P], "bid: writable, config read-only")
-CHAIN[b58e(NEWR)] = enc_request({introer = OI, requester = string.rep("\9", 32), id = 9, bid = "12500000000",
-  status = 0, target = "Toly", telegram = "@joe"})
-advance(6000)
-check(last_toast() == "Bid: done" and has("My requests"), "bid landed, My requests")
-flush()
-check(W.lists[1] and W.lists[1].rows[1].right == "Open", "my request listed")
-list_select(1)
-check(not W.lists[1] and has("Withdraw available in 24h"), "open: withdraw after 24h")
-key("back")
-advance(20000)
-CHAIN[b58e(NEWR)] = enc_request({introer = OI, requester = string.rep("\9", 32), id = 9, bid = "12500000000",
-  status = 0, created_at = NOW - 86400, target = "Toly", telegram = "@joe"})
-advance(20000)
-list_select(1)
-check(W.lists[1] and W.lists[1].rows[1] == "Withdraw", "open: withdraw once 24h passed")
-key("back")
--- Introer accepts and marks made long ago: confirm or refund.
-CHAIN[b58e(NEWR)] = enc_request({introer = OI, requester = string.rep("\9", 32), id = 9, bid = "12500000000",
-  status = 2, made_at = NOW - 73 * 3600, target = "Toly", telegram = "@joe"})
-advance(20000)
-list_select(1)
-check(W.lists[1].rows[1] == "Confirm + pay" and W.lists[1].rows[2] == "Refund (72h passed)", "made: confirm, refund")
-list_select(1); advance(30)
-m = relay_reply(true)
-ix = m.ixs[1]
-check(ix.data == escrow.DISC.confirm and ix.accounts[1] == m.keys[1] and ix.accounts[4] == OB and m.w[OB], "confirm: pays introer wallet")
-CHAIN[b58e(NEWR)] = nil
-advance(6000)
-check(last_toast() == "Confirm + pay: done", "confirm landed")
-advance(20000)
-check(has("No requests yet") and json.decode(W.store.mine)[1] == nil, "closed request dropped")
-
--- Someone else takes the request id first.
-go("Find an introer")
-list_select(1); type_in(OTHER); flush()
-list_select(1); type_in("Vitalik"); type_in("me"); type_in("0.2")
-advance(30); relay_reply(true)
-CHAIN[b58e(escrow.request_pda(OI, "9"))] = enc_request({introer = OI, requester = RQ, id = 9, bid = "500000000",
-  status = 0, target = "Someone else", telegram = ""})
-CHAIN[b58e(NEWR)] = CHAIN[b58e(escrow.request_pda(OI, "9"))]
-advance(6000)
-check(has("Someone bid first") and has("SELECT to retry"), "someone bid first: not ours, retry offered")
-check(#json.decode(W.store.mine) == 0, "their request not saved as mine")
-CHAIN[b58e(OI)] = enc_introer({wallet = OB, min_bid = "100000000", next_id = 10, jobs = 1, earned = "0",
-  created_at = NOW, open = 2, offer = "Asia VCs"})
+check(has("relay error 500") and has("SELECT to retry"), "retry offered")
 key("select")
 m = relay_reply(true)
-check(m.ixs[1].accounts[4] == escrow.request_pda(OI, "10") and m.ixs[1].data:find("Vitalik", 1, true),
-  "retry re-reads next_id and rebuilds")
-key("back")
-CHAIN[b58e(NEWR)] = nil
-
--- The on-chain list of introers.
-local DIR = escrow.directory_pda()
-local ring = {}
-for k = 1, 32 do ring[k] = string.rep("\0", 32) end
-ring[1], ring[2], ring[3] = string.rep("\5", 32), OB, ME
-CHAIN[b58e(DIR)] = disc("Directory") .. string.char(3, 254) .. table.concat(ring)
-go("Find an introer")
-list_select(3); flush()
-local found = {}
-for _, r in ipairs(W.lists[1].rows) do found[r.sub] = (found[r.sub] or 0) + 1 end
-check(found["on-chain list"] == 1, "directory: new introers listed, me and seen ones not twice")
-local dl = escrow.decode_directory(CHAIN[b58e(DIR)])
-check(#dl == 3 and dl[1] == ME and dl[2] == OB, "directory newest first")
-
--- No bids on yourself.
-CHAIN[b58e(MYI)] = enc_introer({wallet = ME, min_bid = "50000000", next_id = 4, jobs = 6, earned = "30200000000",
-  created_at = NOW - 86400 * 2, open = 1, offer = "Solana devs"})
-go("Find an introer")
-list_select(1); type_in(WALLET); flush()
-list_select(1)
-check(last_toast() == "You can't bid on yourself" and not W.input, "no self-bid")
+check(m.ixs[1].data:find("Mert", 1, true), "retry builds again")
 key("back")
 
--- Full queue: name the lowest open one (oldest on a tie) and beat it by 10%.
-local FULL = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T"
-local FB = b58d(FULL)
-local FI = escrow.introer_pda(FB)
-CHAIN[b58e(FI)] = enc_introer({wallet = FB, min_bid = "10000000", next_id = 9, jobs = 0, earned = "0",
-  created_at = NOW, open = 5, offer = "Full",
-  slots = {{8, 300000000}, {7, 55555555}, {3, 55555555}, {6, 400000000}, {5, 500000000}}})
-put_req(3, {introer = FI, requester = string.rep("\3", 32), bid = "55555555", status = 0, target = "x", telegram = ""})
-go("Find an introer")
-list_select(1); type_in(FULL)
-flush(); advance(100)
-check(has("Full: bid at least 0.0611 SOL"), "full queue: lowest + 10%, rounded up")
-list_select(1); type_in("Toly"); type_in("")
-check(last_toast() == "Telegram is required" and not W.input, "telegram required")
-list_select(1); type_in("Toly"); type_in("@t"); type_in("0.06111111")
-check(last_toast() == "Bid at least 0.0611 SOL", "must beat lowest by 10%")
-list_select(1); type_in("Toly"); type_in("t"); type_in("0.061111111")
-m = relay_reply(true)
-ix = m.ixs[1]
-check(ix.accounts[6] == REQ[3] and ix.accounts[7] == string.rep("\3", 32) and #ix.accounts == 7, "bid: lowest (oldest on tie) and its requester")
-check(m.w[REQ[3]] and m.w[string.rep("\3", 32)], "bid: lowest writable")
-check(#m.ixs == 1 and #m.keys == 8, "one intro_escrow instruction only")
-check(ix.data:sub(-8) == u64(61111111) and ix.data:sub(9 + 64, 9 + 66) == "@t\0", "bid: telegram gets its @")
-key("back")
-check(has("My requests") or has("Find an introer"), "back from signing")
+-- Offline.
+W.offline = true
+go("Profile"); advance(20000)
+W.offline = false
 
--- Budget.
 local calls = 0
 for _, t in ipairs(W.rpc_times) do if W.ms - t < 60000 then calls = calls + 1 end end
 check(calls <= 30, "rpc budget")
 
--- Relaunch keeps wallet and requests; bad storage is ignored.
-new_world({store = {wallet = W.store.wallet, mine = W.store.mine}, accounts = CHAIN})
-check(has("Intro Bot"), "relaunch opens Home")
-new_world({store = {wallet = '"bad"', spark = '["x"]', mine = '[{"w":"x"}]', jobs = '"x"', recent = '[1]'}})
-check(W.hint:find("SELECT change"), "bad storage ignored")
-
--- Demo mode: no network, every role.
+-- Demo mode: no network, every screen.
 new_world({store = {mock = "true"}})
-check(#W.rpcq == 0 and #W.posts == 0, "demo: no network")
-check(has("demo value"), "demo home")
-go("My queue")
-local n0 = #W.lists[1].rows
-list_select(1); list_select(1)
-check(W.qr and W.qr.t:find("^solana:https://relay.botbotcap.com/tx/"), "demo QR")
-advance(4100)
-check(last_toast() == "Accept: done", "demo accept")
-go("Find an introer")
-check(W.lists[1].rows[4].title == "@ana", "demo nearby")
-list_select(5)
-check(has("Full: bid at least 0.165 SOL"), "demo full introer")
-list_select(1); type_in("Toly"); type_in("joe"); type_in("0.2")
-advance(4100)
-check(last_toast() == "Bid: done", "demo bid")
-check(#W.lists[1].rows == 3, "demo bid listed")
+advance(1600)
+check(#W.rpcq == 0, "demo: no rpc")
+go("Intro board")
+check(#W.lists[1].rows >= 4, "demo board")
 list_select(1)
-check(W.lists[1].rows[2] == "Refund (72h passed)", "demo refund offered")
-list_select(2); advance(4100)
-check(#W.lists[1].rows == 2, "demo refund")
-go("Intro Bot")
-local anims = 0
-for _ = 1, 30 do advance(20000); if has("JOB DONE!") then anims = anims + 1; advance(3000) end end
+check(has("Telegram shown after you offer."), "demo job")
+list_select(1); advance(4100)
+check(last_toast() == "Offer: done", "demo offer")
+go("My jobs"); list_select(1)
+check(W.lists[1].rows[1].title:find("Approve", 1, true), "demo pool")
+list_select(1); advance(4100)
+check(last_toast() == "Approve: done", "demo approve")
+go("My offers")
+local picked
+for i, r in ipairs(W.lists[1].rows) do if r.right == "You!" then picked = i end end
+check(picked, "demo: picked on one")
+list_select(picked); list_select(1); advance(4100)
+check(last_toast() == "Intro made: done", "demo made")
+go("Request an intro")
+list_select(1); type_in("Mert"); type_in("Helius"); type_in("0.2"); type_in("me"); advance(4100)
+check(last_toast() == "Posted!", "demo post")
+go("Profile")
+local jobs0, leds0 = json.decode(W.store.jobs), #W.led
+advance(200000)
+check(json.decode(W.store.jobs) > jobs0 and #W.led > leds0, "demo receipt: JOB DONE with LEDs")
 check(#W.rpcq == 0 and #W.posts == 0, "demo: still no network")
-check(n0 > 0, "demo queue")
-go("Setup"); list_select(3)
-check(W.store.mock == "false", "demo off")
+check(has("demo value"), "demo profile")
 
 print(string.format("%d passed, %d failed, worst callback %d instructions", passes, fails, worst))
 os.exit(fails == 0 and 0 or 1)

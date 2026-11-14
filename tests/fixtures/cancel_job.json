@@ -1,0 +1,9 @@
+{
+  "name": "cancel_job",
+  "program_id": "GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC",
+  "accounts": [
+    { "pubkey": "GyGKxMyg1p9SsHfm15MkNUu1u9TN2JtTspcdmrtGUdse", "signer": true, "writable": true },
+    { "pubkey": "DGbCkgZdabNLA4kHvwHh5Ug3YEX5EaeQShieYshgBqhk", "signer": false, "writable": true }
+  ],
+  "data_hex": "7ef19bf132ec5376"
+}

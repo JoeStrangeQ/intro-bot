@@ -9,7 +9,7 @@ import {
   ALLOWED_IX,
   TxStore,
   type Env,
-} from '../src/index';
+} from '../src/relay';
 
 const key = (n: number) => new Uint8Array(32).fill(n);
 const PROGRAM = bs58.decode(PROGRAM_ID);
@@ -25,7 +25,7 @@ function message({
   keys = [PLACEHOLDER, key(2), SYSTEM, PROGRAM],
   programs = [3],
   extra = [] as number[],
-  disc = [...Buffer.from('c738552692f3259e', 'hex')], // bid
+  disc = [...Buffer.from('22d03af881eab3d3', 'hex')], // post_job
   data = [1, 2, 3],
 } = {}) {
   const ixs = programs.flatMap((p) => [
@@ -147,14 +147,30 @@ describe('relay', () => {
     expect(await error(await post(other))).toBe('program not allowed');
   });
 
-  it('allows every user-facing escrow instruction', async () => {
+  it('allows exactly the v2 user-facing escrow instructions', async () => {
+    expect(Object.values(ALLOWED_IX).sort()).toEqual(
+      [
+        'register_introer',
+        'update_introer',
+        'post_job',
+        'cancel_job',
+        'offer',
+        'withdraw_offer',
+        'close_offer',
+        'approve',
+        'mark_made',
+        'confirm',
+        'refund_expired',
+        'refund_unconfirmed',
+      ].sort(),
+    );
     for (const hex of Object.keys(ALLOWED_IX)) {
       const res = await post(message({ disc: [...Buffer.from(hex, 'hex')] }));
       expect(res.status, ALLOWED_IX[hex]).toBe(200);
     }
   });
 
-  it('refuses admin and unknown escrow instructions', async () => {
+  it('refuses admin, removed v1 and unknown escrow instructions', async () => {
     const admin = {
       init_config: '17eb73e8a86001e7',
       set_admin: 'fba300345bc2bb5c',
@@ -163,6 +179,11 @@ describe('relay', () => {
       propose_admin: '79d6c7d4572775ea',
       accept_admin: '702a2d5a74b50daa',
       cancel_admin_proposal: '440691831049b6e5',
+      // v1 instructions that no longer exist.
+      bid: 'c738552692f3259e',
+      accept: '419646d885066b04',
+      decline: '18395aa25b5ef5b1',
+      withdraw: 'b712469c946da122',
     };
     for (const [name, hex] of Object.entries(admin)) {
       const res = await post(message({ disc: [...Buffer.from(hex, 'hex')] }));
@@ -223,6 +244,24 @@ describe('relay', () => {
     expect((await call(path, 'POST', account)).status).toBe(200);
     const other = { account: bs58.encode(key(8)) };
     expect((await call(path, 'POST', other)).status).toBe(404);
+  });
+
+  it('connect: the scanning wallet is reported to the badge', async () => {
+    const res = await call('/connect', 'POST', {});
+    const { id, url } = (await res.json()) as { id: string; url: string };
+    expect(url).toBe(`solana:${ORIGIN}/tx/${id}`);
+    const who = () => call(`/tx/${id}/who`).then((r) => r.json());
+    expect(await who()).toEqual({ wallet: null });
+    const signed = await call(`/tx/${id}`, 'POST', {
+      account: bs58.encode(WALLET),
+    });
+    const { transaction } = (await signed.json()) as { transaction: string };
+    const tx = Uint8Array.from(atob(transaction), (c) => c.charCodeAt(0));
+    // One empty signature, then the memo message with the wallet as payer.
+    expect(Array.from(tx.slice(65, 69))).toEqual([1, 0, 1, 2]);
+    expect(Array.from(tx.slice(69, 101))).toEqual(Array.from(WALLET));
+    expect(await who()).toEqual({ wallet: bs58.encode(WALLET) });
+    expect((await call(`/tx/${'0'.repeat(32)}/who`)).status).toBe(404);
   });
 
   it('builds links from the serving origin', async () => {

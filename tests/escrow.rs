@@ -1,4 +1,5 @@
-//! LiteSVM tests for the intro escrow program. Build first: `cargo build-sbf`.
+//! LiteSVM tests for the intro escrow program (v2). Build first:
+//! `cargo build-sbf` (the tests refuse a stale `.so`).
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 #![allow(
     clippy::unused_self,
@@ -8,13 +9,12 @@
 use anchor_lang::{
     prelude::Pubkey,
     solana_program::{bpf_loader_upgradeable, instruction::Instruction},
-    AccountDeserialize, InstructionData, ToAccountMetas,
+    AccountDeserialize, Discriminator, InstructionData, ToAccountMetas,
 };
 use intro_escrow::{
-    accounts as acc, instruction as ix, Config, Directory, Introer, OpenSlot, Request,
-    CONFIRM_WINDOW, DIRECTORY_LEN, LAMPORTS_PER_SOL as SOL, MAX_BID, MAX_OFFER, MAX_OPEN,
-    MAX_TARGET, MAX_TELEGRAM, MIN_BID_FLOOR, STATUS_ACCEPTED, STATUS_MADE, STATUS_OPEN,
-    WITHDRAW_DELAY, WORK_WINDOW,
+    accounts as acc, instruction as ix, Board, Config, Introer, Job, Offer, BOARD_LEN,
+    CANCEL_DELAY, CONFIRM_WINDOW, LAMPORTS_PER_SOL as SOL, MAX_BID, MIN_BID, OFFER_RING,
+    STATUS_APPROVED, STATUS_MADE, STATUS_OPEN, TEXT_LEN, WORK_WINDOW,
 };
 use litesvm::LiteSVM;
 use solana_clock::Clock;
@@ -26,42 +26,56 @@ const PROGRAM: &str = "../target/deploy/intro_escrow.so";
 const FEE: u64 = 5_000;
 /// Half the default per-instruction budget of 200k CU.
 const CU_LIMIT: u64 = 100_000;
-
-struct T {
-    svm: LiteSVM,
-    admin: Keypair,
-    config: Pubkey,
-    /// Live requests, checked against their lamports and the open lists.
-    live: Vec<Pubkey>,
-}
+type Text = [u8; TEXT_LEN];
 
 fn program_data() -> Pubkey {
     Pubkey::find_program_address(&[intro_escrow::ID.as_ref()], &bpf_loader_upgradeable::ID).0
 }
 
-fn config_key() -> Pubkey {
-    Pubkey::find_program_address(&[b"config"], &intro_escrow::ID).0
+fn pda(seeds: &[&[u8]]) -> Pubkey {
+    Pubkey::find_program_address(seeds, &intro_escrow::ID).0
 }
 
-fn directory_key() -> Pubkey {
-    Pubkey::find_program_address(&[b"directory"], &intro_escrow::ID).0
+fn config_key() -> Pubkey {
+    pda(&[b"config"])
+}
+
+fn board_key() -> Pubkey {
+    pda(&[b"board"])
 }
 
 fn introer_key(wallet: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"introer", wallet.as_ref()], &intro_escrow::ID).0
+    pda(&[b"introer", wallet.as_ref()])
 }
 
-fn request_key(introer: &Pubkey, id: u64) -> Pubkey {
-    Pubkey::find_program_address(
-        &[b"request", introer.as_ref(), &id.to_le_bytes()],
-        &intro_escrow::ID,
-    )
-    .0
+fn job_key(requester: &Pubkey, nonce: u64) -> Pubkey {
+    pda(&[b"job", requester.as_ref(), &nonce.to_le_bytes()])
+}
+
+thread_local! {
+    /// Serial of the latest post at each job address, recorded by `T::run`.
+    static SERIALS: std::cell::RefCell<std::collections::HashMap<Pubkey, u64>> =
+        std::cell::RefCell::default();
+}
+
+fn offer_key_at(job: &Pubkey, serial: u64, wallet: &Pubkey) -> Pubkey {
+    pda(&[
+        b"offer",
+        job.as_ref(),
+        &serial.to_le_bytes(),
+        wallet.as_ref(),
+    ])
+}
+
+/// Offer PDA on the latest post at `job`.
+fn offer_key(job: &Pubkey, wallet: &Pubkey) -> Pubkey {
+    let serial = SERIALS.with(|s| s.borrow().get(job).copied().unwrap_or(0));
+    offer_key_at(job, serial, wallet)
 }
 
 /// Zero-padded text field.
-fn pad<const N: usize>(text: &str) -> [u8; N] {
-    let mut out = [0; N];
+fn pad(text: &str) -> Text {
+    let mut out = [0; TEXT_LEN];
     out[..text.len()].copy_from_slice(text.as_bytes());
     out
 }
@@ -123,6 +137,7 @@ fn chain(authority: Option<Pubkey>) -> LiteSVM {
     svm
 }
 
+/// Sends `ix` alone, as the relay does, and checks it fits the CU budget.
 fn send(svm: &mut LiteSVM, payer: &Keypair, ix: Instruction) -> Result<(), String> {
     svm.expire_blockhash();
     let tx = Transaction::new_signed_with_payer(
@@ -133,8 +148,6 @@ fn send(svm: &mut LiteSVM, payer: &Keypair, ix: Instruction) -> Result<(), Strin
     );
     svm.send_transaction(tx)
         .map(|meta| {
-            // The relay sends each action as one bare instruction, so it must
-            // fit the default 200k CU budget with room to spare.
             assert!(
                 meta.compute_units_consumed <= CU_LIMIT,
                 "used {} CU",
@@ -150,17 +163,12 @@ fn fails(result: Result<(), String>, code: &str) {
     assert!(err.contains(code), "expected {code}, got: {err}");
 }
 
-#[track_caller]
-fn fails_bid(result: Result<Pubkey, String>, code: &str) {
-    fails(result.map(|_| ()), code);
-}
-
 fn init_config_ix(authority: Pubkey) -> Instruction {
     build(
         acc::InitConfig {
             authority,
             config: config_key(),
-            directory: directory_key(),
+            board: board_key(),
             program: intro_escrow::ID,
             program_data: program_data(),
             system_program: anchor_lang::system_program::ID,
@@ -169,19 +177,141 @@ fn init_config_ix(authority: Pubkey) -> Instruction {
     )
 }
 
-fn register_ix(wallet: Pubkey, offer: [u8; MAX_OFFER], min_bid: u64) -> Instruction {
+fn register_ix(wallet: Pubkey, name: Text) -> Instruction {
     build(
         acc::RegisterIntroer {
             wallet,
             introer: introer_key(&wallet),
-            directory: directory_key(),
             system_program: anchor_lang::system_program::ID,
         },
         ix::RegisterIntroer {
             badge_id: *b"BP26-001",
-            offer,
-            min_bid,
+            name,
         },
+    )
+}
+
+fn post_ix(requester: Pubkey, nonce: u64, who: Text, telegram: Text, bid: u64) -> Instruction {
+    build(
+        acc::PostJob {
+            requester,
+            config: config_key(),
+            board: board_key(),
+            job: job_key(&requester, nonce),
+            system_program: anchor_lang::system_program::ID,
+        },
+        ix::PostJob {
+            nonce,
+            who,
+            company: pad("Solana"),
+            telegram,
+            bid,
+        },
+    )
+}
+
+fn cancel_ix(requester: Pubkey, job: Pubkey) -> Instruction {
+    build(acc::CancelJob { requester, job }, ix::CancelJob {})
+}
+
+fn offer_ix(wallet: Pubkey, job: Pubkey) -> Instruction {
+    build(
+        acc::MakeOffer {
+            wallet,
+            config: config_key(),
+            introer: introer_key(&wallet),
+            job,
+            offer: offer_key(&job, &wallet),
+            system_program: anchor_lang::system_program::ID,
+        },
+        ix::Offer {},
+    )
+}
+
+fn withdraw_offer_ix(wallet: Pubkey, job: Pubkey) -> Instruction {
+    build(
+        acc::WithdrawOffer {
+            wallet,
+            offer: offer_key(&job, &wallet),
+            job,
+        },
+        ix::WithdrawOffer {},
+    )
+}
+
+fn close_offer_ix(caller: Pubkey, offer: Pubkey, wallet: Pubkey, job: Pubkey) -> Instruction {
+    build(
+        acc::CloseOffer {
+            caller,
+            offer,
+            wallet,
+            job,
+        },
+        ix::CloseOffer {},
+    )
+}
+
+fn approve_ix(requester: Pubkey, job: Pubkey, introer_wallet: Pubkey) -> Instruction {
+    approve_with(requester, job, offer_key(&job, &introer_wallet))
+}
+
+fn approve_with(requester: Pubkey, job: Pubkey, offer: Pubkey) -> Instruction {
+    build(
+        acc::Approve {
+            requester,
+            job,
+            offer,
+        },
+        ix::Approve {},
+    )
+}
+
+fn made_ix(wallet: Pubkey, job: Pubkey) -> Instruction {
+    build(acc::MarkMade { wallet, job }, ix::MarkMade {})
+}
+
+fn confirm_ix(requester: Pubkey, job: Pubkey, wallet: Pubkey) -> Instruction {
+    build(
+        acc::Confirm {
+            requester,
+            job,
+            introer: introer_key(&wallet),
+            wallet,
+        },
+        ix::Confirm {},
+    )
+}
+
+fn refund_ix(unconfirmed: bool, caller: Pubkey, job: Pubkey, requester: Pubkey) -> Instruction {
+    let accounts = acc::Refund {
+        caller,
+        job,
+        requester,
+    };
+    if unconfirmed {
+        build(accounts, ix::RefundUnconfirmed {})
+    } else {
+        build(accounts, ix::RefundExpired {})
+    }
+}
+
+fn admin_ix(admin: Pubkey, data: impl InstructionData) -> Instruction {
+    build(
+        acc::AdminOnly {
+            admin,
+            config: config_key(),
+        },
+        data,
+    )
+}
+
+fn accept_admin_ix(pending_admin: Pubkey) -> Instruction {
+    build(
+        acc::AcceptAdmin {
+            pending_admin,
+            config: config_key(),
+        },
+        ix::AcceptAdmin {},
     )
 }
 
@@ -189,6 +319,20 @@ fn funded(svm: &mut LiteSVM, sol: u64) -> Keypair {
     let key = Keypair::new();
     svm.airdrop(&key.pubkey(), sol * SOL).unwrap();
     key
+}
+
+fn read<T: AccountDeserialize>(svm: &LiteSVM, key: &Pubkey) -> T {
+    let data = svm.get_account(key).unwrap().data;
+    T::try_deserialize(&mut data.as_slice()).unwrap()
+}
+
+struct T {
+    svm: LiteSVM,
+    admin: Keypair,
+    /// Jobs and offers that may be live; checked after every tx.
+    jobs: Vec<Pubkey>,
+    offers: Vec<Pubkey>,
+    nonce: u64,
 }
 
 impl T {
@@ -203,8 +347,9 @@ impl T {
         Self {
             svm,
             admin,
-            config: config_key(),
-            live: vec![],
+            jobs: vec![],
+            offers: vec![],
+            nonce: 0,
         }
     }
 
@@ -216,28 +361,34 @@ impl T {
         self.svm.get_account(key).map_or(0, |a| a.lamports)
     }
 
-    fn config(&self) -> Config {
-        let data = self.svm.get_account(&self.config).unwrap().data;
-        Config::try_deserialize(&mut data.as_slice()).unwrap()
+    fn live(&self, key: &Pubkey) -> bool {
+        self.svm.get_account(key).is_some_and(|a| a.lamports > 0)
     }
 
-    fn directory(&self) -> Directory {
-        let data = self.svm.get_account(&directory_key()).unwrap().data;
-        Directory::try_deserialize(&mut data.as_slice()).unwrap()
+    fn rent(&self, key: &Pubkey) -> u64 {
+        let len = self.svm.get_account(key).unwrap().data.len();
+        self.svm.minimum_balance_for_rent_exemption(len)
+    }
+
+    fn config(&self) -> Config {
+        read(&self.svm, &config_key())
+    }
+
+    fn board(&self) -> Board {
+        let data = self.svm.get_account(&board_key()).unwrap().data;
+        bytemuck::pod_read_unaligned::<Board>(&data[8..])
     }
 
     fn introer(&self, wallet: &Pubkey) -> Introer {
-        let data = self.svm.get_account(&introer_key(wallet)).unwrap().data;
-        Introer::try_deserialize(&mut data.as_slice()).unwrap()
+        read(&self.svm, &introer_key(wallet))
     }
 
-    fn request(&self, key: &Pubkey) -> Request {
-        let data = self.svm.get_account(key).unwrap().data;
-        Request::try_deserialize(&mut data.as_slice()).unwrap()
+    fn job(&self, key: &Pubkey) -> Job {
+        read(&self.svm, key)
     }
 
-    fn gone(&self, key: &Pubkey) -> bool {
-        self.svm.get_account(key).is_none_or(|a| a.lamports == 0)
+    fn offer_state(&self, key: &Pubkey) -> Offer {
+        read(&self.svm, key)
     }
 
     fn warp(&mut self, seconds: i64) {
@@ -246,318 +397,120 @@ impl T {
         self.svm.set_sysvar(&clock);
     }
 
-    /// Lamports held for bids: the sum of live bids.
-    fn held(&self) -> u64 {
-        self.live
-            .iter()
-            .filter(|k| !self.gone(k))
-            .map(|k| self.request(k).bid)
-            .sum()
-    }
-
     fn now(&self) -> i64 {
         self.svm.get_sysvar::<Clock>().unix_timestamp
     }
 
-    /// Each live request holds exactly rent + bid, and each introer's open
-    /// list matches its open requests.
+    /// Books: each live job holds exactly rent + bid, each live offer
+    /// exactly rent.
     fn check_books(&mut self) {
         let svm = &self.svm;
-        self.live
-            .retain(|key| svm.get_account(key).is_some_and(|a| a.lamports > 0));
-        for key in &self.live {
-            let account = self.svm.get_account(key).unwrap();
-            let request = self.request(key);
-            let rent = self
-                .svm
-                .minimum_balance_for_rent_exemption(account.data.len());
-            assert_eq!(account.lamports, rent + request.bid, "request lamports");
+        self.jobs
+            .retain(|k| svm.get_account(k).is_some_and(|a| a.lamports > 0));
+        self.offers
+            .retain(|k| svm.get_account(k).is_some_and(|a| a.lamports > 0));
+        for key in &self.jobs {
+            let job = self.job(key);
+            assert_eq!(self.lamports(key), self.rent(key) + job.bid, "job lamports");
         }
-        // Each introer's open list matches its open requests.
-        let mut introers: Vec<Pubkey> = vec![];
-        for key in &self.live {
-            let request = self.request(key);
-            if !introers.contains(&request.introer) {
-                introers.push(request.introer);
-            }
-        }
-        for introer in introers {
-            let data = self.svm.get_account(&introer).unwrap().data;
-            let state = Introer::try_deserialize(&mut data.as_slice()).unwrap();
-            let count = usize::from(state.open_count);
-            let mut listed: Vec<OpenSlot> = state.open[..count].to_vec();
-            assert!(state.open[count..]
-                .iter()
-                .all(|s| *s == OpenSlot::default()));
-            let mut open: Vec<OpenSlot> = self
-                .live
-                .iter()
-                .map(|k| self.request(k))
-                .filter(|r| r.introer == introer && r.status == STATUS_OPEN)
-                .map(|r| OpenSlot {
-                    id: r.id,
-                    bid: r.bid,
-                })
-                .collect();
-            listed.sort_by_key(|s| s.id);
-            open.sort_by_key(|s| s.id);
-            assert_eq!(listed, open, "open slots");
+        for key in &self.offers {
+            assert_eq!(self.lamports(key), self.rent(key), "offer lamports");
         }
     }
 
     fn run(&mut self, payer: &Keypair, ix: Instruction) -> Result<(), String> {
+        let posted = ix
+            .data
+            .starts_with(ix::PostJob::DISCRIMINATOR)
+            .then(|| ix.accounts[3].pubkey);
         let result = send(&mut self.svm, payer, ix);
+        if let (Ok(()), Some(job)) = (&result, posted) {
+            let serial = self.job(&job).serial;
+            SERIALS.with(|s| s.borrow_mut().insert(job, serial));
+        }
         self.check_books();
         result
     }
 
-    fn register(&mut self, wallet: &Keypair, min_bid: u64) -> Result<(), String> {
-        let ix = register_ix(wallet.pubkey(), pad("Solana founders in Lisbon"), min_bid);
-        self.run(wallet, ix)
-    }
-
-    fn introer_with(&mut self, min_bid: u64) -> Keypair {
-        let wallet = self.user(1);
-        self.register(&wallet, min_bid).unwrap();
+    fn introer_named(&mut self, name: &str) -> Keypair {
+        let wallet = self.user(5);
+        self.run(&wallet, register_ix(wallet.pubkey(), pad(name)))
+            .unwrap();
         wallet
     }
 
-    fn bid_ix(
-        &self,
-        requester: &Pubkey,
-        wallet: &Pubkey,
-        amount: u64,
-        lowest: Option<(Pubkey, Pubkey)>,
-    ) -> Instruction {
-        let introer = introer_key(wallet);
-        let next = self
-            .svm
-            .get_account(&introer)
-            .map_or(0, |_| self.introer(wallet).next_id);
-        build(
-            acc::Bid {
-                requester: *requester,
-                config: self.config,
-                introer,
-                request: request_key(&introer, next),
-                system_program: anchor_lang::system_program::ID,
-                lowest: lowest.map(|l| l.0),
-                lowest_requester: lowest.map(|l| l.1),
-            },
-            ix::Bid {
-                target: pad("Toly"),
-                telegram: pad("@alice"),
-                amount,
-            },
-        )
-    }
-
-    fn try_bid(
-        &mut self,
-        requester: &Keypair,
-        wallet: &Pubkey,
-        amount: u64,
-        lowest: Option<(Pubkey, Pubkey)>,
-    ) -> Result<Pubkey, String> {
-        let key = request_key(&introer_key(wallet), self.introer(wallet).next_id);
-        let ix = self.bid_ix(&requester.pubkey(), wallet, amount, lowest);
-        send(&mut self.svm, requester, ix)?;
-        self.live.push(key);
-        self.check_books();
+    fn try_post(&mut self, requester: &Keypair, bid: u64) -> Result<Pubkey, String> {
+        self.nonce += 1;
+        let ix = post_ix(
+            requester.pubkey(),
+            self.nonce,
+            pad("Toly"),
+            pad("@alice"),
+            bid,
+        );
+        let key = job_key(&requester.pubkey(), self.nonce);
+        self.jobs.push(key);
+        self.run(requester, ix)?;
         Ok(key)
     }
 
-    fn bid(&mut self, requester: &Keypair, wallet: &Pubkey, amount: u64) -> Pubkey {
-        self.try_bid(requester, wallet, amount, None).unwrap()
+    fn post(&mut self, requester: &Keypair, bid: u64) -> Pubkey {
+        self.try_post(requester, bid).unwrap()
     }
 
-    fn step_ix(accept: bool, wallet: Pubkey, request: Pubkey) -> Instruction {
-        let accounts = acc::IntroerStep {
-            wallet,
-            introer: introer_key(&wallet),
-            request,
-        };
-        if accept {
-            build(accounts, ix::Accept {})
-        } else {
-            build(accounts, ix::MarkMade {})
-        }
+    fn offer(&mut self, wallet: &Keypair, job: Pubkey) -> Result<(), String> {
+        self.offers.push(offer_key(&job, &wallet.pubkey()));
+        self.run(wallet, offer_ix(wallet.pubkey(), job))
     }
 
-    fn accept(&mut self, wallet: &Keypair, request: Pubkey) -> Result<(), String> {
-        self.run(wallet, Self::step_ix(true, wallet.pubkey(), request))
+    fn approve(&mut self, requester: &Keypair, job: Pubkey, wallet: Pubkey) -> Result<(), String> {
+        self.run(requester, approve_ix(requester.pubkey(), job, wallet))
     }
 
-    fn made(&mut self, wallet: &Keypair, request: Pubkey) -> Result<(), String> {
-        self.run(wallet, Self::step_ix(false, wallet.pubkey(), request))
+    fn made(&mut self, wallet: &Keypair, job: Pubkey) -> Result<(), String> {
+        self.run(wallet, made_ix(wallet.pubkey(), job))
     }
 
-    fn withdraw_ix(&self, requester: Pubkey, wallet: &Pubkey, request: Pubkey) -> Instruction {
-        build(
-            acc::Withdraw {
-                requester,
-                introer: introer_key(wallet),
-                request,
-            },
-            ix::Withdraw {},
-        )
+    fn confirm(&mut self, requester: &Keypair, job: Pubkey, wallet: Pubkey) -> Result<(), String> {
+        self.run(requester, confirm_ix(requester.pubkey(), job, wallet))
     }
 
-    fn withdraw(
+    fn refund(
         &mut self,
-        requester: &Keypair,
-        wallet: &Pubkey,
-        request: Pubkey,
-    ) -> Result<(), String> {
-        // Past the withdraw delay; `withdraw_waits_a_day` checks the delay.
-        self.warp(WITHDRAW_DELAY);
-        let ix = self.withdraw_ix(requester.pubkey(), wallet, request);
-        self.run(requester, ix)
-    }
-
-    fn decline_ix(&self, wallet: Pubkey, request: Pubkey, requester: Pubkey) -> Instruction {
-        build(
-            acc::Decline {
-                wallet,
-                introer: introer_key(&wallet),
-                request,
-                requester,
-            },
-            ix::Decline {},
-        )
-    }
-
-    fn decline(
-        &mut self,
-        wallet: &Keypair,
-        request: Pubkey,
-        requester: Pubkey,
-    ) -> Result<(), String> {
-        let ix = self.decline_ix(wallet.pubkey(), request, requester);
-        self.run(wallet, ix)
-    }
-
-    fn confirm_ix(
-        &self,
-        introer: Pubkey,
-        wallet: Pubkey,
-        request: Pubkey,
-        requester: Pubkey,
-    ) -> Instruction {
-        build(
-            acc::Confirm {
-                requester,
-                introer,
-                request,
-                wallet,
-            },
-            ix::Confirm {},
-        )
-    }
-
-    fn confirm(
-        &mut self,
-        requester: &Keypair,
-        wallet: Pubkey,
-        request: Pubkey,
-    ) -> Result<(), String> {
-        let ix = self.confirm_ix(introer_key(&wallet), wallet, request, requester.pubkey());
-        self.run(requester, ix)
-    }
-
-    fn refund_ix(
-        &self,
         unconfirmed: bool,
-        caller: Pubkey,
-        introer: Pubkey,
-        request: Pubkey,
+        caller: &Keypair,
+        job: Pubkey,
         requester: Pubkey,
-    ) -> Instruction {
-        let accounts = acc::RefundExpired {
+    ) -> Result<(), String> {
+        self.run(
             caller,
-            introer,
-            request,
-            requester,
-        };
-        if unconfirmed {
-            build(accounts, ix::RefundUnconfirmed {})
-        } else {
-            build(accounts, ix::RefundExpired {})
-        }
-    }
-
-    fn refund_unconfirmed(
-        &mut self,
-        caller: &Keypair,
-        wallet: Pubkey,
-        request: Pubkey,
-        requester: Pubkey,
-    ) -> Result<(), String> {
-        let ix = self.refund_ix(
-            true,
-            caller.pubkey(),
-            introer_key(&wallet),
-            request,
-            requester,
-        );
-        self.run(caller, ix)
-    }
-
-    fn refund_expired(
-        &mut self,
-        caller: &Keypair,
-        wallet: Pubkey,
-        request: Pubkey,
-        requester: Pubkey,
-    ) -> Result<(), String> {
-        let ix = self.refund_ix(
-            false,
-            caller.pubkey(),
-            introer_key(&wallet),
-            request,
-            requester,
-        );
-        self.run(caller, ix)
-    }
-
-    fn admin_ix(&self, admin: Pubkey, data: impl InstructionData) -> Instruction {
-        build(
-            acc::AdminOnly {
-                admin,
-                config: self.config,
-            },
-            data,
+            refund_ix(unconfirmed, caller.pubkey(), job, requester),
         )
     }
 
-    fn set_paused(&mut self, paused: bool) {
-        let ix = self.admin_ix(self.admin.pubkey(), ix::SetPaused { paused });
-        let admin = self.admin.insecure_clone();
-        self.run(&admin, ix).unwrap();
-    }
-
-    /// Accepted and made request, ready to confirm.
-    fn made_request(&mut self, amount: u64) -> (Keypair, Keypair, Pubkey) {
-        let wallet = self.introer_with(MIN_BID_FLOOR);
+    /// Posted job with one offer, approved.
+    fn approved_job(&mut self, bid: u64) -> (Keypair, Keypair, Pubkey) {
         let requester = self.user(200);
-        let request = self.bid(&requester, &wallet.pubkey(), amount);
-        self.accept(&wallet, request).unwrap();
-        self.made(&wallet, request).unwrap();
-        (wallet, requester, request)
+        let introer = self.introer_named("Ana");
+        let job = self.post(&requester, bid);
+        self.offer(&introer, job).unwrap();
+        self.approve(&requester, job, introer.pubkey()).unwrap();
+        (requester, introer, job)
     }
 }
 
-// ---------- config ----------
+// ---------- config + admin ----------
 
 #[test]
-fn init_config_sets_upgrade_authority_as_admin() {
+fn init_config_sets_upgrade_authority_as_admin_and_makes_the_board() {
     let t = T::new();
     let config = t.config();
     assert_eq!(config.admin, t.admin.pubkey());
+    assert_eq!(config.pending_admin, Pubkey::default());
     assert!(!config.paused);
-    let directory = t.directory();
-    assert_eq!(directory.head, 0);
-    assert!(directory.wallets.iter().all(|w| *w == Pubkey::default()));
+    let board = t.board();
+    assert_eq!((board.head, board.posted), (0, 0));
+    assert!(board.jobs.iter().all(|j| *j == Pubkey::default()));
 }
 
 #[test]
@@ -587,7 +540,6 @@ fn init_config_rejects_fake_program_data() {
     let authority = Keypair::new();
     let mut svm = chain(Some(authority.pubkey()));
     let attacker = funded(&mut svm, 5);
-    // A ProgramData-shaped account naming the attacker, at another address.
     let fake = Pubkey::new_unique();
     let mut account = svm.get_account(&program_data()).unwrap();
     account.data[13..45].copy_from_slice(attacker.pubkey().as_ref());
@@ -601,997 +553,866 @@ fn init_config_rejects_fake_program_data() {
 fn init_config_runs_only_once() {
     let mut t = T::new();
     let admin = t.admin.insecure_clone();
-    assert!(send(&mut t.svm, &admin, init_config_ix(admin.pubkey())).is_err());
-    assert_eq!(t.config().admin, admin.pubkey());
+    assert!(t.run(&admin, init_config_ix(admin.pubkey())).is_err());
 }
 
 #[test]
-fn admin_setters_work_and_reject_others() {
+fn admin_change_is_two_step_and_cancellable() {
     let mut t = T::new();
     let admin = t.admin.insecure_clone();
     let stranger = t.user(1);
-    let new_admin = t.user(1);
-    let accept_ix = |config: Pubkey, signer: Pubkey| {
-        build(
-            acc::AcceptAdmin {
-                pending_admin: signer,
-                config,
-            },
-            ix::AcceptAdmin {},
-        )
-    };
+    let next = t.user(1);
+    let propose = |by: Pubkey, to: Pubkey| admin_ix(by, ix::ProposeAdmin { admin: to });
 
-    for ix in [
-        t.admin_ix(stranger.pubkey(), ix::SetPaused { paused: true }),
-        t.admin_ix(
-            stranger.pubkey(),
-            ix::ProposeAdmin {
-                admin: stranger.pubkey(),
-            },
-        ),
-    ] {
-        fails(t.run(&stranger, ix), "Unauthorized");
-    }
-    // Nobody pending: accept fails for everyone.
     fails(
-        t.run(&stranger, accept_ix(t.config, stranger.pubkey())),
+        t.run(&stranger, propose(stranger.pubkey(), stranger.pubkey())),
         "Unauthorized",
     );
-    // The default key can't be proposed.
-    let ix = t.admin_ix(
-        admin.pubkey(),
-        ix::ProposeAdmin {
-            admin: Pubkey::default(),
-        },
-    );
-    fails(t.run(&admin, ix), "NoAdmin");
-
-    let ix = t.admin_ix(admin.pubkey(), ix::SetPaused { paused: true });
-    t.run(&admin, ix).unwrap();
-    assert!(t.config().paused);
-    let ix = t.admin_ix(
-        admin.pubkey(),
-        ix::ProposeAdmin {
-            admin: new_admin.pubkey(),
-        },
-    );
-    t.run(&admin, ix).unwrap();
-    // Admin can cancel a proposal; then nobody can accept it.
     fails(
         t.run(
             &stranger,
-            t.admin_ix(stranger.pubkey(), ix::CancelAdminProposal {}),
+            admin_ix(stranger.pubkey(), ix::SetPaused { paused: true }),
+        ),
+        "Unauthorized",
+    );
+    fails(
+        t.run(
+            &stranger,
+            admin_ix(stranger.pubkey(), ix::CancelAdminProposal {}),
+        ),
+        "Unauthorized",
+    );
+    fails(
+        t.run(&admin, propose(admin.pubkey(), Pubkey::default())),
+        "NoAdmin",
+    );
+    // Nobody pending: nobody can accept.
+    fails(t.run(&next, accept_admin_ix(next.pubkey())), "Unauthorized");
+
+    t.run(&admin, propose(admin.pubkey(), next.pubkey()))
+        .unwrap();
+    assert_eq!(t.config().pending_admin, next.pubkey());
+    t.run(&admin, admin_ix(admin.pubkey(), ix::CancelAdminProposal {}))
+        .unwrap();
+    fails(t.run(&next, accept_admin_ix(next.pubkey())), "Unauthorized");
+
+    t.run(&admin, propose(admin.pubkey(), next.pubkey()))
+        .unwrap();
+    fails(
+        t.run(&stranger, accept_admin_ix(stranger.pubkey())),
+        "Unauthorized",
+    );
+    assert_eq!(t.config().admin, admin.pubkey());
+    t.run(&next, accept_admin_ix(next.pubkey())).unwrap();
+    let config = t.config();
+    assert_eq!(config.admin, next.pubkey());
+    assert_eq!(config.pending_admin, Pubkey::default());
+    fails(
+        t.run(
+            &admin,
+            admin_ix(admin.pubkey(), ix::SetPaused { paused: true }),
         ),
         "Unauthorized",
     );
     t.run(
-        &admin,
-        t.admin_ix(admin.pubkey(), ix::CancelAdminProposal {}),
+        &next,
+        admin_ix(next.pubkey(), ix::SetPaused { paused: true }),
     )
     .unwrap();
-    assert_eq!(t.config().pending_admin, Pubkey::default());
-    fails(
-        t.run(&new_admin, accept_ix(t.config, new_admin.pubkey())),
-        "Unauthorized",
-    );
-    let ix = t.admin_ix(
-        admin.pubkey(),
-        ix::ProposeAdmin {
-            admin: new_admin.pubkey(),
-        },
-    );
-    t.run(&admin, ix).unwrap();
-    // Proposing alone changes nothing; only the proposed key can accept.
-    assert_eq!(t.config().admin, admin.pubkey());
-    assert_eq!(t.config().pending_admin, new_admin.pubkey());
-    fails(
-        t.run(&stranger, accept_ix(t.config, stranger.pubkey())),
-        "Unauthorized",
-    );
-    t.run(&new_admin, accept_ix(t.config, new_admin.pubkey()))
-        .unwrap();
-    let config = t.config();
-    assert_eq!(config.admin, new_admin.pubkey());
-    assert_eq!(config.pending_admin, Pubkey::default());
-
-    // The old admin is out, the new one is in.
-    let ix = t.admin_ix(admin.pubkey(), ix::SetPaused { paused: false });
-    fails(t.run(&admin, ix), "Unauthorized");
-    let ix = t.admin_ix(new_admin.pubkey(), ix::SetPaused { paused: false });
-    t.run(&new_admin, ix).unwrap();
-    assert!(!t.config().paused);
+    assert!(t.config().paused);
 }
 
 #[test]
-fn admin_setters_keep_working_after_program_is_made_immutable() {
+fn admin_keeps_working_after_program_is_made_immutable() {
     let mut t = T::new();
     let key = program_data();
     let mut account = t.svm.get_account(&key).unwrap();
     account.data[12] = 0;
     t.svm.set_account(key, account).unwrap();
-    t.set_paused(true);
+    let admin = t.admin.insecure_clone();
+    t.run(
+        &admin,
+        admin_ix(admin.pubkey(), ix::SetPaused { paused: true }),
+    )
+    .unwrap();
     assert!(t.config().paused);
 }
 
-// ---------- introer + directory ----------
+// ---------- introer ----------
 
 #[test]
-fn register_introer_stores_terms_and_lists_wallet() {
+fn register_and_update_introer() {
     let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR * 3);
+    let wallet = t.introer_named("Ana");
     let introer = t.introer(&wallet.pubkey());
     assert_eq!(introer.wallet, wallet.pubkey());
     assert_eq!(&introer.badge_id, b"BP26-001");
-    assert_eq!(introer.offer, pad("Solana founders in Lisbon"));
-    assert_eq!(introer.min_bid, MIN_BID_FLOOR * 3);
-    assert_eq!(introer.next_id, 0);
-    assert_eq!(introer.open_count, 0);
-    assert_eq!(introer.jobs_done, 0);
+    assert_eq!(introer.name, pad("Ana"));
+    assert_eq!((introer.jobs_done, introer.earned), (0, 0));
     assert_eq!(introer.created_at, t.now());
-    let directory = t.directory();
-    assert_eq!(directory.head, 1);
-    assert_eq!(directory.wallets[0], wallet.pubkey());
-    // Registering twice fails and leaves the directory alone.
-    assert!(t.register(&wallet, MIN_BID_FLOOR).is_err());
-    assert_eq!(t.directory().head, 1);
-}
+    // Once only.
+    assert!(t
+        .run(&wallet, register_ix(wallet.pubkey(), pad("B")))
+        .is_err());
 
-#[test]
-fn directory_wraps_around() {
-    let mut t = T::new();
-    let mut wallets = vec![];
-    for _ in 0..DIRECTORY_LEN + 3 {
-        wallets.push(t.introer_with(MIN_BID_FLOOR).pubkey());
-    }
-    let directory = t.directory();
-    assert_eq!(usize::from(directory.head), 3);
-    // The 3 newest overwrote the 3 oldest.
-    for (slot, wallet) in directory.wallets.iter().enumerate() {
-        let expected = if slot < 3 {
-            wallets[DIRECTORY_LEN + slot]
-        } else {
-            wallets[slot]
-        };
-        assert_eq!(*wallet, expected, "slot {slot}");
-    }
-}
-
-#[test]
-fn register_introer_checks_min_bid_and_offer() {
-    let mut t = T::new();
-    let wallet = t.user(1);
-    fails(t.register(&wallet, MIN_BID_FLOOR - 1), "BidTooLow");
-    fails(t.register(&wallet, MAX_BID + 1), "BidTooHigh");
-    let mut bad = pad::<MAX_OFFER>("ab");
-    bad[5] = b'x';
-    fails(
-        t.run(&wallet, register_ix(wallet.pubkey(), bad, MIN_BID_FLOOR)),
-        "BadText",
-    );
-    let mut bad = pad::<MAX_OFFER>("ab");
-    bad[0] = 0xff;
-    fails(
-        t.run(&wallet, register_ix(wallet.pubkey(), bad, MIN_BID_FLOOR)),
-        "BadText",
-    );
-    let full = pad::<MAX_OFFER>(&"é".repeat(MAX_OFFER / 2));
-    t.run(&wallet, register_ix(wallet.pubkey(), full, MIN_BID_FLOOR))
-        .unwrap();
-}
-
-#[test]
-fn update_introer_only_by_owner() {
-    let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let stranger = t.user(1);
-    let update = |signer: Pubkey, min_bid: u64| {
+    let update = |signer: Pubkey, name: Text| {
         build(
             acc::UpdateIntroer {
                 wallet: signer,
                 introer: introer_key(&wallet.pubkey()),
             },
             ix::UpdateIntroer {
-                offer: pad("New offer"),
-                min_bid,
+                badge_id: *b"BP26-002",
+                name,
             },
         )
     };
-    assert!(t.run(&stranger, update(stranger.pubkey(), SOL)).is_err());
+    let stranger = t.user(1);
+    assert!(t
+        .run(&stranger, update(stranger.pubkey(), pad("X")))
+        .is_err());
     fails(
-        t.run(&wallet, update(wallet.pubkey(), MIN_BID_FLOOR - 1)),
-        "BidTooLow",
+        t.run(&wallet, update(wallet.pubkey(), [0; TEXT_LEN])),
+        "BadText",
     );
-    t.run(&wallet, update(wallet.pubkey(), SOL)).unwrap();
+    t.run(&wallet, update(wallet.pubkey(), pad("Ana B")))
+        .unwrap();
     let introer = t.introer(&wallet.pubkey());
-    assert_eq!(introer.min_bid, SOL);
-    assert_eq!(introer.offer, pad("New offer"));
+    assert_eq!(introer.name, pad("Ana B"));
+    assert_eq!(&introer.badge_id, b"BP26-002");
+}
+
+#[test]
+fn register_checks_the_name() {
+    let mut t = T::new();
+    let wallet = t.user(1);
+    fails(
+        t.run(&wallet, register_ix(wallet.pubkey(), [0; TEXT_LEN])),
+        "BadText",
+    );
+    let mut bad = pad("ab");
+    bad[5] = b'x';
+    fails(t.run(&wallet, register_ix(wallet.pubkey(), bad)), "BadText");
+    let mut bad = pad("ab");
+    bad[0] = 0xff;
+    fails(t.run(&wallet, register_ix(wallet.pubkey(), bad)), "BadText");
+    t.run(&wallet, register_ix(wallet.pubkey(), pad(&"é".repeat(16))))
+        .unwrap();
 }
 
 // ---------- happy path ----------
 
 #[test]
-fn happy_path_pays_introer_and_returns_rent() {
+fn happy_path_pays_the_approved_introer_and_returns_rent() {
     let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let requester = t.user(10);
-    let bid = 2 * SOL;
+    let requester = t.user(20);
+    let ana = t.introer_named("Ana");
+    let bo = t.introer_named("Bo");
     let before = t.lamports(&requester.pubkey());
-    let request = t.bid(&requester, &wallet.pubkey(), bid);
+    let job = t.post(&requester, 2 * SOL);
 
-    let stored = t.request(&request);
-    assert_eq!(stored.introer, introer_key(&wallet.pubkey()));
+    let stored = t.job(&job);
     assert_eq!(stored.requester, requester.pubkey());
-    assert_eq!(stored.id, 0);
-    assert_eq!(stored.bid, bid);
+    assert_eq!(stored.nonce, t.nonce);
+    assert_eq!(stored.serial, 0);
+    assert_eq!(stored.bid, 2 * SOL);
     assert_eq!(stored.status, STATUS_OPEN);
-    assert_eq!(stored.target, pad("Toly"));
-    assert_eq!(stored.telegram, pad("@alice"));
     assert_eq!(stored.created_at, t.now());
-    assert_eq!(t.introer(&wallet.pubkey()).open_count, 1);
-    assert_eq!(t.introer(&wallet.pubkey()).next_id, 1);
-    assert_eq!(t.held(), bid);
+    assert_eq!(stored.approved, Pubkey::default());
+    assert_eq!((stored.who, stored.company), (pad("Toly"), pad("Solana")));
+    assert_eq!(stored.telegram, pad("@alice"));
+    let board = t.board();
+    assert_eq!((board.head, board.posted), (1, 1));
+    assert_eq!(board.jobs[0], job);
 
-    t.warp(100);
-    t.accept(&wallet, request).unwrap();
-    let stored = t.request(&request);
-    assert_eq!(stored.status, STATUS_ACCEPTED);
-    assert_eq!(stored.accepted_at, t.now());
-    assert_eq!(t.introer(&wallet.pubkey()).open_count, 0);
+    t.offer(&ana, job).unwrap();
+    t.offer(&bo, job).unwrap();
+    let stored = t.job(&job);
+    assert_eq!(stored.offer_count, 2);
+    assert_eq!(stored.offers_head, 2);
+    assert_eq!(&stored.offers[..2], &[ana.pubkey(), bo.pubkey()]);
+    let offer = t.offer_state(&offer_key(&job, &bo.pubkey()));
+    assert_eq!((offer.job, offer.introer), (job, bo.pubkey()));
+    assert_eq!(offer.job_serial, 0);
 
-    t.warp(100);
-    t.made(&wallet, request).unwrap();
-    let stored = t.request(&request);
+    t.warp(60);
+    t.approve(&requester, job, bo.pubkey()).unwrap();
+    let stored = t.job(&job);
+    assert_eq!(stored.status, STATUS_APPROVED);
+    assert_eq!(stored.approved, bo.pubkey());
+    assert_eq!(stored.approved_at, t.now());
+
+    // Only the approved introer marks it made.
+    fails(t.made(&ana, job), "Unauthorized");
+    t.warp(60);
+    t.made(&bo, job).unwrap();
+    let stored = t.job(&job);
     assert_eq!(stored.status, STATUS_MADE);
     assert_eq!(stored.made_at, t.now());
 
-    let wallet_before = t.lamports(&wallet.pubkey());
-    t.confirm(&requester, wallet.pubkey(), request).unwrap();
-    assert!(t.gone(&request));
-    assert_eq!(t.lamports(&wallet.pubkey()), wallet_before + bid);
-    // Requester is down only the bid and two tx fees: rent came back.
-    assert_eq!(t.lamports(&requester.pubkey()), before - bid - 2 * FEE);
-    let introer = t.introer(&wallet.pubkey());
-    assert_eq!(introer.jobs_done, 1);
-    assert_eq!(introer.earned, bid);
-    assert_eq!(t.held(), 0);
+    let bo_before = t.lamports(&bo.pubkey());
+    t.confirm(&requester, job, bo.pubkey()).unwrap();
+    assert!(!t.live(&job));
+    assert_eq!(t.lamports(&bo.pubkey()), bo_before + 2 * SOL);
+    // Requester is down only the bid and 3 tx fees: rent came back.
+    assert_eq!(t.lamports(&requester.pubkey()), before - 2 * SOL - 3 * FEE);
+    let stats = t.introer(&bo.pubkey());
+    assert_eq!((stats.jobs_done, stats.earned), (1, 2 * SOL));
+    assert_eq!(t.introer(&ana.pubkey()).jobs_done, 0);
 
-    // A second job adds up.
-    let request = t.bid(&requester, &wallet.pubkey(), SOL);
-    assert_eq!(t.request(&request).id, 1);
-    t.accept(&wallet, request).unwrap();
-    t.confirm(&requester, wallet.pubkey(), request).unwrap();
-    let introer = t.introer(&wallet.pubkey());
-    assert_eq!(introer.jobs_done, 2);
-    assert_eq!(introer.earned, 3 * SOL);
+    // Offers close afterwards, rent to each introer.
+    for wallet in [&ana, &bo] {
+        let offer = offer_key(&job, &wallet.pubkey());
+        let rent = t.lamports(&offer);
+        let before = t.lamports(&wallet.pubkey());
+        let anyone = t.user(1);
+        t.run(
+            &anyone,
+            close_offer_ix(anyone.pubkey(), offer, wallet.pubkey(), job),
+        )
+        .unwrap();
+        assert_eq!(t.lamports(&wallet.pubkey()), before + rent);
+    }
 }
 
 #[test]
-fn confirm_works_from_accepted_but_not_open() {
+fn confirm_works_from_approved_but_not_open() {
     let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let requester = t.user(10);
-    let request = t.bid(&requester, &wallet.pubkey(), SOL);
-    fails(t.confirm(&requester, wallet.pubkey(), request), "BadStatus");
-    t.accept(&wallet, request).unwrap();
-    t.confirm(&requester, wallet.pubkey(), request).unwrap();
-    assert!(t.gone(&request));
-}
-
-// ---------- bid rules ----------
-
-#[test]
-fn bid_enforces_min_max_and_text() {
-    let mut t = T::new();
-    let wallet = t.introer_with(SOL);
-    let requester = t.user(200);
-    let w = wallet.pubkey();
-    fails_bid(t.try_bid(&requester, &w, SOL - 1, None), "BidTooLow");
-    fails_bid(t.try_bid(&requester, &w, MAX_BID + 1, None), "BidTooHigh");
-    t.try_bid(&requester, &w, MAX_BID, None).unwrap();
-
-    let text_bid = |t: &T, target: [u8; MAX_TARGET], telegram: [u8; MAX_TELEGRAM]| {
-        let mut ix = t.bid_ix(&requester.pubkey(), &w, SOL, None);
-        ix.data = ix::Bid {
-            target,
-            telegram,
-            amount: SOL,
-        }
-        .data();
-        ix
-    };
-    // Empty target.
-    let ix = text_bid(&t, [0; MAX_TARGET], pad("@a"));
-    fails(t.run(&requester, ix), "BadText");
-    // Garbage after the padding.
-    let mut target = pad("Toly");
-    target[MAX_TARGET - 1] = b'x';
-    let ix = text_bid(&t, target, pad("@a"));
-    fails(t.run(&requester, ix), "BadText");
-    // Not UTF-8.
-    let mut telegram = pad("@a");
-    telegram[1] = 0xc3;
-    let ix = text_bid(&t, pad("Toly"), telegram);
-    fails(t.run(&requester, ix), "BadText");
-    // Empty handle.
-    let ix = text_bid(&t, pad("Toly"), [0; MAX_TELEGRAM]);
-    fails(t.run(&requester, ix), "BadText");
-    // Full-length text is fine.
-    let ix = text_bid(&t, [b'x'; MAX_TARGET], [b'y'; MAX_TELEGRAM]);
-    t.live.push(request_key(&introer_key(&w), 1));
-    t.run(&requester, ix).unwrap();
-}
-
-#[test]
-fn bid_to_unknown_introer_fails() {
-    let mut t = T::new();
-    let requester = t.user(5);
-    let nobody = Pubkey::new_unique();
-    let ix = t.bid_ix(&requester.pubkey(), &nobody, SOL, None);
-    assert!(t.run(&requester, ix).is_err());
-}
-
-#[test]
-fn bid_with_wrong_request_id_fails() {
-    let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let requester = t.user(5);
-    let mut ix = t.bid_ix(&requester.pubkey(), &wallet.pubkey(), SOL, None);
-    ix.accounts[3].pubkey = request_key(&introer_key(&wallet.pubkey()), 7);
-    assert!(t.run(&requester, ix).is_err());
-}
-
-#[test]
-fn paused_blocks_bids_but_not_payouts_or_refunds() {
-    let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
     let requester = t.user(20);
-    let w = wallet.pubkey();
+    let ana = t.introer_named("Ana");
+    let job = t.post(&requester, SOL);
+    t.offer(&ana, job).unwrap();
+    // Open: approved is the default key, so there's no introer to pay.
+    assert!(t.confirm(&requester, job, ana.pubkey()).is_err());
+    t.approve(&requester, job, ana.pubkey()).unwrap();
+    t.confirm(&requester, job, ana.pubkey()).unwrap();
+    assert_eq!(t.introer(&ana.pubkey()).jobs_done, 1);
+}
+
+// ---------- post / cancel ----------
+
+#[test]
+fn post_job_checks_bid_text_and_pause() {
+    let mut t = T::new();
+    let requester = t.user(300);
     let r = requester.pubkey();
-    let to_confirm = t.bid(&requester, &w, SOL);
-    let to_withdraw = t.bid(&requester, &w, SOL);
-    let to_decline = t.bid(&requester, &w, SOL);
-    let unconfirmed = t.bid(&requester, &w, SOL);
-    let expired = t.bid(&requester, &w, SOL);
-    for request in [to_confirm, unconfirmed, expired] {
-        t.accept(&wallet, request).unwrap();
-    }
-    t.made(&wallet, unconfirmed).unwrap();
-    t.set_paused(true);
-
-    fails_bid(t.try_bid(&requester, &w, SOL, None), "Paused");
-    t.confirm(&requester, w, to_confirm).unwrap();
-    t.withdraw(&requester, &w, to_withdraw).unwrap();
-    t.decline(&wallet, to_decline, r).unwrap();
-    t.warp(WORK_WINDOW + 1);
-    let anyone = t.user(1);
-    t.refund_unconfirmed(&anyone, w, unconfirmed, r).unwrap();
-    t.refund_expired(&requester, w, expired, r).unwrap();
-    assert_eq!(t.held(), 0);
-    assert_eq!(t.introer(&w).jobs_done, 1);
-
-    t.set_paused(false);
-    t.bid(&requester, &w, SOL);
-}
-
-// ---------- full queue / outbid ----------
-
-/// Introer with a full queue bidding 2, 1, 3, 4, 5 SOL: the lowest is [1].
-fn full_queue(t: &mut T) -> (Keypair, Vec<(Keypair, Pubkey)>) {
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let mut open = vec![];
-    for sol in [2, 1, 3, 4, 5] {
-        let requester = t.user(10);
-        let request = t.bid(&requester, &wallet.pubkey(), sol * SOL);
-        open.push((requester, request));
-    }
-    assert_eq!(t.introer(&wallet.pubkey()).open_count, MAX_OPEN);
-    (wallet, open)
-}
-
-#[test]
-fn full_queue_needs_the_lowest_request() {
-    let mut t = T::new();
-    let (wallet, open) = full_queue(&mut t);
-    let w = wallet.pubkey();
-    let newcomer = t.user(10);
-    fails_bid(t.try_bid(&newcomer, &w, 9 * SOL, None), "QueueFull");
-    let lowest = Some((open[1].1, open[1].0.pubkey()));
-    // Must beat the lowest by 10%.
-    fails_bid(t.try_bid(&newcomer, &w, SOL, lowest), "BidTooLow");
-    fails_bid(
-        t.try_bid(&newcomer, &w, SOL + SOL / 10 - 1, lowest),
-        "BidTooLow",
+    fails(t.try_post(&requester, MIN_BID - 1).map(|_| ()), "BidTooLow");
+    fails(
+        t.try_post(&requester, MAX_BID + 1).map(|_| ()),
+        "BidTooHigh",
     );
-    // Passing a request that is not the lowest fails.
-    let not_lowest = Some((open[0].1, open[0].0.pubkey()));
-    fails_bid(t.try_bid(&newcomer, &w, 9 * SOL, not_lowest), "NotLowest");
-    // The refund must go to the stored requester.
-    let swapped = Some((open[1].1, newcomer.pubkey()));
-    fails_bid(t.try_bid(&newcomer, &w, 9 * SOL, swapped), "WrongRequester");
-    // Nothing moved.
-    assert_eq!(t.introer(&w).open_count, MAX_OPEN);
-    assert_eq!(t.held(), 15 * SOL);
-    // Exactly +10% is enough.
-    t.try_bid(&newcomer, &w, SOL + SOL / 10, lowest).unwrap();
-}
-
-#[test]
-fn outbid_refunds_and_closes_the_lowest() {
-    let mut t = T::new();
-    let (wallet, open) = full_queue(&mut t);
-    let w = wallet.pubkey();
-    let (loser, lowest) = (&open[1].0, open[1].1);
-    let loser_before = t.lamports(&loser.pubkey());
-    let lowest_lamports = t.lamports(&lowest);
-    let newcomer = t.user(10);
-    let request = t
-        .try_bid(&newcomer, &w, 2 * SOL, Some((lowest, loser.pubkey())))
-        .unwrap();
-    assert!(t.gone(&lowest));
-    assert_eq!(t.lamports(&loser.pubkey()), loser_before + lowest_lamports);
-    assert_eq!(t.request(&request).bid, 2 * SOL);
-    assert_eq!(t.introer(&w).open_count, MAX_OPEN);
-    assert_eq!(t.held(), 16 * SOL);
-    // The next lowest is now the oldest 2 SOL bid (a tie goes to the oldest).
-    let next = t.introer(&w).lowest_open().unwrap();
-    assert_eq!(next.id, t.request(&open[0].1).id);
-    // The refunded request cannot be settled again.
-    let ix = t.withdraw_ix(loser.pubkey(), &w, lowest);
-    fails(t.run(loser, ix), "AccountNotInitialized");
-}
-
-#[test]
-fn outbid_cannot_take_accepted_or_foreign_requests() {
-    let mut t = T::new();
-    let (wallet, open) = full_queue(&mut t);
-    let w = wallet.pubkey();
-    let other_wallet = t.introer_with(MIN_BID_FLOOR);
-    let other_requester = t.user(5);
-    let foreign = t.bid(&other_requester, &other_wallet.pubkey(), MIN_BID_FLOOR);
-    let newcomer = t.user(30);
-    // Another introer's request as the lowest.
-    fails_bid(
-        t.try_bid(
-            &newcomer,
-            &w,
-            9 * SOL,
-            Some((foreign, other_requester.pubkey())),
+    t.post(&requester, MIN_BID);
+    t.post(&requester, MAX_BID);
+    for (who, telegram) in [
+        ([0; TEXT_LEN], pad("@a")),
+        (pad("Toly"), [0; TEXT_LEN]),
+        (
+            {
+                let mut bad = pad("Toly");
+                bad[TEXT_LEN - 1] = b'x';
+                bad
+            },
+            pad("@a"),
         ),
-        "WrongRequest",
-    );
-    // Accept the lowest, then fill the slot again: the accepted request is no
-    // longer listed, so it can't be passed as the lowest.
-    t.accept(&wallet, open[1].1).unwrap();
-    t.try_bid(&newcomer, &w, 2 * SOL, None).unwrap();
-    let accepted = Some((open[1].1, open[1].0.pubkey()));
-    fails_bid(t.try_bid(&newcomer, &w, 9 * SOL, accepted), "NotLowest");
-    assert_eq!(t.request(&open[1].1).status, STATUS_ACCEPTED);
-}
-
-#[test]
-fn requester_can_outbid_their_own_lowest_request() {
-    let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let w = wallet.pubkey();
-    let requester = t.user(30);
-    let mut open = vec![];
-    for sol in 1..=5 {
-        open.push(t.bid(&requester, &w, sol * SOL));
+        (pad("Toly"), {
+            let mut bad = pad("@a");
+            bad[1] = 0xc3;
+            bad
+        }),
+    ] {
+        fails(
+            t.run(&requester, post_ix(r, 900, who, telegram, SOL)),
+            "BadText",
+        );
     }
-    let before = t.lamports(&requester.pubkey());
-    let refund = t.lamports(&open[0]);
-    let request = t
-        .try_bid(&requester, &w, 6 * SOL, Some((open[0], requester.pubkey())))
-        .unwrap();
-    assert!(t.gone(&open[0]));
-    let rent = t.lamports(&request) - 6 * SOL;
-    assert_eq!(
-        t.lamports(&requester.pubkey()),
-        before + refund - 6 * SOL - rent - FEE
-    );
-}
-
-#[test]
-fn queue_near_max_bid_can_still_be_outbid() {
-    let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let w = wallet.pubkey();
-    let requester = t.user(600);
-    let mut open = vec![];
-    for sol in 91..=95 {
-        open.push(t.bid(&requester, &w, sol * SOL));
+    let mut ix = post_ix(r, 900, pad("Toly"), pad("@a"), SOL);
+    ix.data = ix::PostJob {
+        nonce: 900,
+        who: pad("Toly"),
+        company: [0; TEXT_LEN],
+        telegram: pad("@a"),
+        bid: SOL,
     }
-    // 110% of 91 SOL is above MAX_BID, so MAX_BID is enough.
-    let lowest = Some((open[0], requester.pubkey()));
-    fails_bid(t.try_bid(&requester, &w, MAX_BID - 1, lowest), "BidTooLow");
-    t.try_bid(&requester, &w, MAX_BID, lowest).unwrap();
-    // A full queue of MAX_BID bids can't be beaten.
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let w = wallet.pubkey();
-    let rich = t.user(600);
-    let mut open = vec![];
-    for _ in 0..MAX_OPEN {
-        open.push(t.bid(&rich, &w, MAX_BID));
-    }
-    fails_bid(
-        t.try_bid(&requester, &w, MAX_BID, Some((open[0], rich.pubkey()))),
-        "BidTooLow",
-    );
-}
+    .data();
+    fails(t.run(&requester, ix), "BadText");
 
-#[test]
-fn outbid_rounds_the_ten_percent_up() {
-    let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let w = wallet.pubkey();
-    let requester = t.user(30);
-    // Lowest 0.010000001 SOL: 110% is 0.0110000011, rounded up to 11_000_002.
-    let mut open = vec![t.bid(&requester, &w, MIN_BID_FLOOR + 1)];
-    for _ in 1..MAX_OPEN {
-        open.push(t.bid(&requester, &w, SOL));
-    }
-    let lowest = Some((open[0], requester.pubkey()));
-    fails_bid(t.try_bid(&requester, &w, 11_000_001, lowest), "BidTooLow");
-    t.try_bid(&requester, &w, 11_000_002, lowest).unwrap();
-}
-
-#[test]
-fn introer_cannot_bid_on_themselves() {
-    let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    fails_bid(t.try_bid(&wallet, &wallet.pubkey(), SOL, None), "SelfBid");
-}
-
-#[test]
-fn lowest_is_ignored_when_queue_has_room() {
-    let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let first = t.user(5);
-    let request = t.bid(&first, &wallet.pubkey(), SOL);
-    let second = t.user(5);
-    t.try_bid(
-        &second,
-        &wallet.pubkey(),
-        2 * SOL,
-        Some((request, first.pubkey())),
+    let admin = t.admin.insecure_clone();
+    t.run(
+        &admin,
+        admin_ix(admin.pubkey(), ix::SetPaused { paused: true }),
     )
     .unwrap();
-    assert_eq!(t.request(&request).status, STATUS_OPEN);
-}
-
-// ---------- withdraw / decline ----------
-
-#[test]
-fn withdraw_only_open_and_only_requester() {
-    let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let requester = t.user(10);
-    let stranger = t.user(1);
-    let w = wallet.pubkey();
-    let request = t.bid(&requester, &w, SOL);
-    fails(t.withdraw(&stranger, &w, request), "WrongRequester");
-    let before = t.lamports(&requester.pubkey());
-    let held = t.lamports(&request);
-    t.withdraw(&requester, &w, request).unwrap();
-    assert!(t.gone(&request));
-    assert_eq!(t.lamports(&requester.pubkey()), before + held - FEE);
-    assert_eq!(t.introer(&w).open_count, 0);
-
-    let request = t.bid(&requester, &w, SOL);
-    t.accept(&wallet, request).unwrap();
-    fails(t.withdraw(&requester, &w, request), "BadStatus");
-    t.made(&wallet, request).unwrap();
-    fails(t.withdraw(&requester, &w, request), "BadStatus");
+    fails(t.try_post(&requester, SOL).map(|_| ()), "Paused");
 }
 
 #[test]
-fn withdraw_waits_a_day() {
+fn post_job_seeds_bind_requester_and_nonce() {
     let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let w = wallet.pubkey();
-    let requester = t.user(10);
-    let request = t.bid(&requester, &w, SOL);
-    t.warp(WITHDRAW_DELAY - 1);
-    let ix = t.withdraw_ix(requester.pubkey(), &w, request);
-    fails(t.run(&requester, ix), "TooEarly");
-    t.warp(1);
-    let ix = t.withdraw_ix(requester.pubkey(), &w, request);
-    t.run(&requester, ix).unwrap();
-    // Decline stays instant.
-    let request = t.bid(&requester, &w, SOL);
-    t.decline(&wallet, request, requester.pubkey()).unwrap();
-}
-
-#[test]
-fn mark_made_only_within_the_work_window() {
-    let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let requester = t.user(10);
-    let request = t.bid(&requester, &wallet.pubkey(), SOL);
-    t.accept(&wallet, request).unwrap();
-    t.warp(WORK_WINDOW + 1);
-    fails(t.made(&wallet, request), "WorkExpired");
-    // Exactly at the deadline still works.
-    let request = t.bid(&requester, &wallet.pubkey(), SOL);
-    t.accept(&wallet, request).unwrap();
-    t.warp(WORK_WINDOW);
-    t.made(&wallet, request).unwrap();
-}
-
-#[test]
-fn withdraw_through_another_introer_fails() {
-    let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let other = t.introer_with(MIN_BID_FLOOR);
-    let requester = t.user(10);
-    let request = t.bid(&requester, &wallet.pubkey(), SOL);
-    // Would lower the wrong introer's open_count.
-    assert!(t.withdraw(&requester, &other.pubkey(), request).is_err());
-    assert_eq!(t.introer(&wallet.pubkey()).open_count, 1);
-}
-
-#[test]
-fn decline_refunds_requester_and_only_by_introer() {
-    let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let requester = t.user(10);
-    let request = t.bid(&requester, &wallet.pubkey(), SOL);
-    let stranger = t.introer_with(MIN_BID_FLOOR);
-    assert!(t.decline(&stranger, request, requester.pubkey()).is_err());
-    fails(
-        t.decline(&wallet, request, wallet.pubkey()),
-        "WrongRequester",
-    );
-    let before = t.lamports(&requester.pubkey());
-    let held = t.lamports(&request);
-    t.decline(&wallet, request, requester.pubkey()).unwrap();
-    assert_eq!(t.lamports(&requester.pubkey()), before + held);
-    assert_eq!(t.introer(&wallet.pubkey()).open_count, 0);
-
-    let request = t.bid(&requester, &wallet.pubkey(), SOL);
-    t.accept(&wallet, request).unwrap();
-    fails(t.decline(&wallet, request, requester.pubkey()), "BadStatus");
-}
-
-// ---------- introer steps ----------
-
-#[test]
-fn accept_and_made_need_the_introer_and_order() {
-    let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let requester = t.user(10);
-    let request = t.bid(&requester, &wallet.pubkey(), SOL);
-    let other = t.introer_with(MIN_BID_FLOOR);
-    assert!(t.accept(&other, request).is_err());
-    fails(t.made(&wallet, request), "BadStatus");
-    t.accept(&wallet, request).unwrap();
-    fails(t.accept(&wallet, request), "BadStatus");
-    assert!(t.made(&other, request).is_err());
-    t.made(&wallet, request).unwrap();
-    fails(t.made(&wallet, request), "BadStatus");
-}
-
-// ---------- confirm / refunds ----------
-
-#[test]
-fn confirm_needs_the_requester() {
-    let mut t = T::new();
-    let (wallet, requester, request) = t.made_request(SOL);
-    let w = wallet.pubkey();
-    let stranger = t.user(1);
-    let ix = t.confirm_ix(introer_key(&w), w, request, stranger.pubkey());
-    fails(t.run(&stranger, ix), "WrongRequester");
-    // The requester must sign: the introer can't confirm their own job.
-    let mut ix = t.confirm_ix(introer_key(&w), w, request, requester.pubkey());
-    ix.accounts[0].is_signer = false;
-    assert!(t.run(&wallet, ix).is_err());
-    t.confirm(&requester, w, request).unwrap();
-}
-
-#[test]
-fn payout_destination_cannot_be_swapped() {
-    let mut t = T::new();
-    let (wallet, requester, request) = t.made_request(SOL);
-    let w = wallet.pubkey();
-    let r = requester.pubkey();
-    let thief = t.user(1);
-    let ix = t.confirm_ix(introer_key(&w), thief.pubkey(), request, r);
-    fails(t.run(&requester, ix), "WrongWallet");
-    // The thief's own introer PDA with the victim's request.
-    t.register(&thief, MIN_BID_FLOOR).unwrap();
-    let ix = t.confirm_ix(introer_key(&thief.pubkey()), thief.pubkey(), request, r);
+    let requester = t.user(5);
+    let mut ix = post_ix(requester.pubkey(), 1, pad("Toly"), pad("@a"), SOL);
+    ix.accounts[3].pubkey = job_key(&requester.pubkey(), 2);
     assert!(t.run(&requester, ix).is_err());
-    assert_eq!(t.introer(&thief.pubkey()).jobs_done, 0);
-    // Refund destinations are fixed too.
-    t.warp(CONFIRM_WINDOW + 1);
-    let ix = t.refund_ix(
-        true,
-        thief.pubkey(),
-        introer_key(&w),
-        request,
-        thief.pubkey(),
-    );
-    fails(t.run(&thief, ix), "WrongRequester");
-    let ix = t.refund_ix(
-        true,
-        thief.pubkey(),
-        introer_key(&thief.pubkey()),
-        request,
-        r,
-    );
-    assert!(t.run(&thief, ix).is_err());
-    let before = t.lamports(&w);
-    t.confirm(&requester, w, request).unwrap();
-    assert_eq!(t.lamports(&w), before + SOL);
+    // Same nonce twice: the second post fails.
+    t.run(
+        &requester,
+        post_ix(requester.pubkey(), 1, pad("A"), pad("@a"), SOL),
+    )
+    .unwrap();
+    t.jobs.push(job_key(&requester.pubkey(), 1));
+    assert!(t
+        .run(
+            &requester,
+            post_ix(requester.pubkey(), 1, pad("B"), pad("@a"), SOL)
+        )
+        .is_err());
 }
 
 #[test]
-fn requester_can_still_confirm_after_the_window() {
+fn board_ring_wraps_around() {
     let mut t = T::new();
-    let (wallet, requester, request) = t.made_request(SOL);
-    t.warp(CONFIRM_WINDOW * 10);
-    t.confirm(&requester, wallet.pubkey(), request).unwrap();
-    assert_eq!(t.introer(&wallet.pubkey()).jobs_done, 1);
-}
-
-#[test]
-fn refund_unconfirmed_waits_for_the_confirm_window() {
-    let mut t = T::new();
-    let (wallet, requester, request) = t.made_request(SOL);
-    let (w, r) = (wallet.pubkey(), requester.pubkey());
-    let anyone = t.user(1);
-    t.warp(CONFIRM_WINDOW);
-    fails(t.refund_unconfirmed(&anyone, w, request, r), "NotExpired");
-    t.warp(1);
-    let held = t.lamports(&request);
-    let requester_before = t.lamports(&r);
-    let wallet_before = t.lamports(&w);
-    t.refund_unconfirmed(&anyone, w, request, r).unwrap();
-    assert!(t.gone(&request));
-    assert_eq!(t.lamports(&w), wallet_before);
-    assert_eq!(t.lamports(&r), requester_before + held);
-    assert_eq!(t.introer(&w).jobs_done, 0);
-    // Double settle is impossible.
-    assert!(t.refund_unconfirmed(&anyone, w, request, r).is_err());
-    assert!(t.confirm(&requester, w, request).is_err());
-    assert_eq!(t.introer(&w).jobs_done, 0);
-}
-
-#[test]
-fn refund_unconfirmed_needs_made() {
-    let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let w = wallet.pubkey();
     let requester = t.user(10);
-    let r = requester.pubkey();
-    let anyone = t.user(1);
-    let request = t.bid(&requester, &w, SOL);
-    t.warp(WORK_WINDOW * 2);
-    fails(t.refund_unconfirmed(&anyone, w, request, r), "BadStatus");
-    t.accept(&wallet, request).unwrap();
-    t.warp(WORK_WINDOW * 2);
-    fails(t.refund_unconfirmed(&anyone, w, request, r), "BadStatus");
+    let mut jobs = vec![];
+    for _ in 0..BOARD_LEN + 2 {
+        jobs.push(t.post(&requester, MIN_BID));
+    }
+    let board = t.board();
+    assert_eq!(usize::from(board.head), 2);
+    assert_eq!(board.posted, (BOARD_LEN + 2) as u64);
+    assert_eq!(board.jobs[0], jobs[BOARD_LEN]);
+    assert_eq!(board.jobs[1], jobs[BOARD_LEN + 1]);
+    assert_eq!(board.jobs[2], jobs[2]);
 }
 
 #[test]
-fn refund_expired_waits_for_the_work_window() {
+fn cancel_job_waits_an_hour() {
     let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let w = wallet.pubkey();
     let requester = t.user(10);
-    let r = requester.pubkey();
-    let anyone = t.user(1);
-    let request = t.bid(&requester, &w, SOL);
-    fails(t.refund_expired(&requester, w, request, r), "BadStatus");
-    t.accept(&wallet, request).unwrap();
-    t.warp(WORK_WINDOW);
-    fails(t.refund_expired(&requester, w, request, r), "NotExpired");
-    t.warp(1);
-    // Only the requester may refund right after the work window.
-    fails(t.refund_expired(&anyone, w, request, r), "NotExpired");
+    let job = t.post(&requester, SOL);
+    t.warp(CANCEL_DELAY - 1);
     fails(
-        t.refund_expired(&anyone, w, request, anyone.pubkey()),
-        "WrongRequester",
+        t.run(&requester, cancel_ix(requester.pubkey(), job)),
+        "TooEarly",
     );
-    let before = t.lamports(&r);
-    let held = t.lamports(&request);
-    t.refund_expired(&requester, w, request, r).unwrap();
-    assert_eq!(t.lamports(&r), before + held - FEE);
-    assert_eq!(t.introer(&w).jobs_done, 0);
-    assert!(t.refund_expired(&requester, w, request, r).is_err());
-}
-
-#[test]
-fn late_confirm_beats_a_refund_by_others() {
-    let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let w = wallet.pubkey();
-    let requester = t.user(10);
-    let r = requester.pubkey();
-    let anyone = t.user(1);
-    let request = t.bid(&requester, &w, SOL);
-    t.accept(&wallet, request).unwrap();
-    // Past the work window, inside the grace: others can't refund yet...
-    t.warp(WORK_WINDOW + CONFIRM_WINDOW);
-    fails(t.refund_expired(&anyone, w, request, r), "NotExpired");
-    // ...so the requester can still confirm the original request.
-    let before = t.lamports(&w);
-    t.confirm(&requester, w, request).unwrap();
-    assert_eq!(t.lamports(&w), before + SOL);
-    assert_eq!(t.introer(&w).jobs_done, 1);
-}
-
-#[test]
-fn others_refund_expired_after_the_grace() {
-    let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let w = wallet.pubkey();
-    let requester = t.user(10);
-    let r = requester.pubkey();
-    let anyone = t.user(1);
-    let request = t.bid(&requester, &w, SOL);
-    t.accept(&wallet, request).unwrap();
-    t.warp(WORK_WINDOW + CONFIRM_WINDOW);
-    fails(t.refund_expired(&anyone, w, request, r), "NotExpired");
     t.warp(1);
-    let before = t.lamports(&r);
-    let held = t.lamports(&request);
-    t.refund_expired(&anyone, w, request, r).unwrap();
-    assert_eq!(t.lamports(&r), before + held);
-    assert_eq!(t.introer(&w).jobs_done, 0);
+    t.run(&requester, cancel_ix(requester.pubkey(), job))
+        .unwrap();
 }
 
 #[test]
-fn refund_expired_does_not_apply_once_made() {
+fn cancel_job_only_by_requester_and_only_open() {
     let mut t = T::new();
-    let (wallet, requester, request) = t.made_request(SOL);
-    t.warp(WORK_WINDOW * 2);
+    let requester = t.user(10);
+    let stranger = t.user(1);
+    let job = t.post(&requester, SOL);
+    // A stranger can't cancel, even naming the requester's job.
+    t.warp(CANCEL_DELAY);
+    assert!(t.run(&stranger, cancel_ix(stranger.pubkey(), job)).is_err());
+    let before = t.lamports(&requester.pubkey());
+    let held = t.lamports(&job);
+    t.warp(CANCEL_DELAY);
+    t.run(&requester, cancel_ix(requester.pubkey(), job))
+        .unwrap();
+    assert_eq!(t.lamports(&requester.pubkey()), before + held - FEE);
+
+    let (requester, _, job) = t.approved_job(SOL);
+    t.warp(CANCEL_DELAY);
     fails(
-        t.refund_expired(&requester, wallet.pubkey(), request, requester.pubkey()),
+        t.run(&requester, cancel_ix(requester.pubkey(), job)),
         "BadStatus",
     );
+}
+
+// ---------- offers ----------
+
+#[test]
+fn offer_rules() {
+    let mut t = T::new();
+    let requester = t.user(10);
+    let job = t.post(&requester, SOL);
+    // Not registered.
+    let nobody = t.user(1);
+    assert!(t.offer(&nobody, job).is_err());
+    // Requester can't offer, even when registered.
+    t.run(&requester, register_ix(requester.pubkey(), pad("Me")))
+        .unwrap();
+    fails(t.offer(&requester, job), "SelfOffer");
+    // One offer per introer.
+    let ana = t.introer_named("Ana");
+    t.offer(&ana, job).unwrap();
+    assert!(t.offer(&ana, job).is_err());
+    assert_eq!(t.job(&job).offer_count, 1);
+    // Paused blocks offers.
+    let admin = t.admin.insecure_clone();
+    t.run(
+        &admin,
+        admin_ix(admin.pubkey(), ix::SetPaused { paused: true }),
+    )
+    .unwrap();
+    let bo = t.introer_named("Bo");
+    fails(t.offer(&bo, job), "Paused");
+    t.run(
+        &admin,
+        admin_ix(admin.pubkey(), ix::SetPaused { paused: false }),
+    )
+    .unwrap();
+    // Not open any more.
+    t.approve(&requester, job, ana.pubkey()).unwrap();
+    fails(t.offer(&bo, job), "BadStatus");
+}
+
+#[test]
+fn offers_are_unlimited_and_the_ring_keeps_the_newest() {
+    let mut t = T::new();
+    let requester = t.user(10);
+    let job = t.post(&requester, SOL);
+    let mut wallets = vec![];
+    for i in 0..OFFER_RING + 3 {
+        let wallet = t.introer_named(&format!("I{i}"));
+        t.offer(&wallet, job).unwrap();
+        wallets.push(wallet.pubkey());
+    }
+    let stored = t.job(&job);
+    assert_eq!(usize::from(stored.offer_count), OFFER_RING + 3);
+    assert_eq!(usize::from(stored.offers_head), 3);
+    assert_eq!(stored.offers[0], wallets[OFFER_RING]);
+    assert_eq!(stored.offers[3], wallets[3]);
+    // An offer that fell out of the ring can still be approved.
+    t.approve(&requester, job, wallets[0]).unwrap();
+}
+
+#[test]
+fn withdraw_offer_rules() {
+    let mut t = T::new();
+    let requester = t.user(10);
+    let ana = t.introer_named("Ana");
+    let bo = t.introer_named("Bo");
+    let job = t.post(&requester, SOL);
+    t.offer(&ana, job).unwrap();
+    t.offer(&bo, job).unwrap();
+    // Only the offering introer can withdraw.
+    let mut ix = withdraw_offer_ix(bo.pubkey(), job);
+    ix.accounts[1].pubkey = offer_key(&job, &ana.pubkey());
+    assert!(t.run(&bo, ix).is_err());
+    // Wrong job account.
+    let other = t.post(&requester, SOL);
+    let mut ix = withdraw_offer_ix(ana.pubkey(), job);
+    ix.accounts[2].pubkey = other;
+    fails(t.run(&ana, ix), "WrongJob");
+
+    t.approve(&requester, job, ana.pubkey()).unwrap();
+    // The approved offer is locked while the job is live; others are free.
+    fails(
+        t.run(&ana, withdraw_offer_ix(ana.pubkey(), job)),
+        "OfferInUse",
+    );
+    let rent = t.lamports(&offer_key(&job, &bo.pubkey()));
+    let before = t.lamports(&bo.pubkey());
+    t.run(&bo, withdraw_offer_ix(bo.pubkey(), job)).unwrap();
+    assert_eq!(t.lamports(&bo.pubkey()), before + rent - FEE);
+    // The withdrawn offer is gone.
+    assert!(t.approve(&requester, job, bo.pubkey()).is_err());
+    t.made(&ana, job).unwrap();
+    fails(
+        t.run(&ana, withdraw_offer_ix(ana.pubkey(), job)),
+        "OfferInUse",
+    );
+    t.confirm(&requester, job, ana.pubkey()).unwrap();
+    t.run(&ana, withdraw_offer_ix(ana.pubkey(), job)).unwrap();
+}
+
+#[test]
+fn withdraw_offer_drops_it_from_the_ring_and_count() {
+    let mut t = T::new();
+    let requester = t.user(10);
+    let ana = t.introer_named("Ana");
+    let bo = t.introer_named("Bo");
+    let job = t.post(&requester, SOL);
+    t.offer(&ana, job).unwrap();
+    t.offer(&bo, job).unwrap();
+    t.run(&ana, withdraw_offer_ix(ana.pubkey(), job)).unwrap();
+    let stored = t.job(&job);
+    assert_eq!(stored.offer_count, 1);
+    assert!(!stored.offers.contains(&ana.pubkey()));
+    assert!(stored.offers.contains(&bo.pubkey()));
+    // Offering again lists Ana once.
+    t.offer(&ana, job).unwrap();
+    let stored = t.job(&job);
+    assert_eq!(stored.offer_count, 2);
+    assert_eq!(
+        stored.offers.iter().filter(|w| **w == ana.pubkey()).count(),
+        1
+    );
+    // Withdrawing after the job is gone leaves nothing to update.
+    t.warp(CANCEL_DELAY);
+    t.run(&requester, cancel_ix(requester.pubkey(), job))
+        .unwrap();
+    t.run(&bo, withdraw_offer_ix(bo.pubkey(), job)).unwrap();
+}
+
+#[test]
+fn withdrawn_offer_cannot_be_approved() {
+    let mut t = T::new();
+    let requester = t.user(10);
+    let ana = t.introer_named("Ana");
+    let job = t.post(&requester, SOL);
+    t.offer(&ana, job).unwrap();
+    t.run(&ana, withdraw_offer_ix(ana.pubkey(), job)).unwrap();
+    assert!(t.approve(&requester, job, ana.pubkey()).is_err());
+    // Offering again works.
+    t.offer(&ana, job).unwrap();
+    t.approve(&requester, job, ana.pubkey()).unwrap();
+}
+
+#[test]
+fn close_offer_only_once_the_job_is_gone() {
+    let mut t = T::new();
+    let requester = t.user(10);
+    let ana = t.introer_named("Ana");
+    let job = t.post(&requester, SOL);
+    t.offer(&ana, job).unwrap();
+    let offer = offer_key(&job, &ana.pubkey());
+    let anyone = t.user(1);
+    fails(
+        t.run(
+            &anyone,
+            close_offer_ix(anyone.pubkey(), offer, ana.pubkey(), job),
+        ),
+        "JobLive",
+    );
+    t.warp(CANCEL_DELAY);
+    t.run(&requester, cancel_ix(requester.pubkey(), job))
+        .unwrap();
+    // Rent must go to the introer.
+    fails(
+        t.run(
+            &anyone,
+            close_offer_ix(anyone.pubkey(), offer, anyone.pubkey(), job),
+        ),
+        "WrongWallet",
+    );
+    let other = t.post(&requester, SOL);
+    fails(
+        t.run(
+            &anyone,
+            close_offer_ix(anyone.pubkey(), offer, ana.pubkey(), other),
+        ),
+        "WrongJob",
+    );
+    let before = t.lamports(&ana.pubkey());
+    let rent = t.lamports(&offer);
+    t.run(
+        &anyone,
+        close_offer_ix(anyone.pubkey(), offer, ana.pubkey(), job),
+    )
+    .unwrap();
+    assert_eq!(t.lamports(&ana.pubkey()), before + rent);
+    assert!(t
+        .run(
+            &anyone,
+            close_offer_ix(anyone.pubkey(), offer, ana.pubkey(), job)
+        )
+        .is_err());
+}
+
+#[test]
+fn reposting_at_the_same_address_does_not_revive_old_offers() {
+    let mut t = T::new();
+    let requester = t.user(10);
+    let ana = t.introer_named("Ana");
+    let r = requester.pubkey();
+    t.run(&requester, post_ix(r, 7, pad("A"), pad("@a"), SOL))
+        .unwrap();
+    let job = job_key(&r, 7);
+    t.jobs.push(job);
+    t.offer(&ana, job).unwrap();
+    t.warp(CANCEL_DELAY);
+    t.run(&requester, cancel_ix(r, job)).unwrap();
+    // Same nonce again: a new post at the same address.
+    t.run(&requester, post_ix(r, 7, pad("B"), pad("@a"), SOL))
+        .unwrap();
+    t.jobs.push(job);
+    assert_eq!(t.job(&job).serial, 1);
+    assert_eq!(t.job(&job).offer_count, 0);
+    // The old offer can't be approved on the new post (its seeds name the
+    // old serial)...
+    let old = offer_key_at(&job, 0, &ana.pubkey());
+    assert!(t.run(&requester, approve_with(r, job, old)).is_err());
+    // ...anyone can clear it, rent back to Ana...
+    let anyone = t.user(1);
+    let before = t.lamports(&ana.pubkey());
+    let rent = t.lamports(&old);
+    t.run(
+        &anyone,
+        close_offer_ix(anyone.pubkey(), old, ana.pubkey(), job),
+    )
+    .unwrap();
+    assert_eq!(t.lamports(&ana.pubkey()), before + rent);
+    // ...and Ana offers on the new post as usual.
+    t.offer(&ana, job).unwrap();
+    t.approve(&requester, job, ana.pubkey()).unwrap();
+}
+
+// ---------- approve / made / confirm ----------
+
+#[test]
+fn approve_needs_the_requester_an_offer_and_open() {
+    let mut t = T::new();
+    let requester = t.user(10);
+    let ana = t.introer_named("Ana");
+    let bo = t.introer_named("Bo");
+    let job = t.post(&requester, SOL);
+    t.offer(&ana, job).unwrap();
+    // No offer from Bo.
+    assert!(t.approve(&requester, job, bo.pubkey()).is_err());
+    // An offer on another job doesn't count.
+    let other = t.post(&requester, SOL);
+    t.offer(&bo, other).unwrap();
+    let ix = approve_with(requester.pubkey(), job, offer_key(&other, &bo.pubkey()));
+    assert!(t.run(&requester, ix).is_err());
+    // Only the requester approves.
+    let stranger = t.user(1);
+    assert!(t
+        .run(&stranger, approve_ix(stranger.pubkey(), job, ana.pubkey()))
+        .is_err());
+    t.approve(&requester, job, ana.pubkey()).unwrap();
+    fails(t.approve(&requester, job, ana.pubkey()), "BadStatus");
+}
+
+#[test]
+fn mark_made_only_by_the_approved_within_the_work_window() {
+    let mut t = T::new();
+    let (requester, ana, job) = t.approved_job(SOL);
+    let stranger = t.user(1);
+    fails(t.made(&stranger, job), "Unauthorized");
+    t.warp(WORK_WINDOW + 1);
+    fails(t.made(&ana, job), "WorkExpired");
+    // Exactly at the deadline works.
+    let (_, ana, job) = t.approved_job(SOL);
+    t.warp(WORK_WINDOW);
+    t.made(&ana, job).unwrap();
+    fails(t.made(&ana, job), "BadStatus");
+    // Not before approval.
+    let open = t.post(&requester, SOL);
+    fails(t.made(&ana, open), "BadStatus");
+}
+
+#[test]
+fn payout_goes_only_to_the_approved_introer() {
+    let mut t = T::new();
+    let (requester, ana, job) = t.approved_job(SOL);
+    let thief = t.introer_named("Thief");
+    let other = t.post(&requester, SOL);
+    t.offer(&thief, other).unwrap();
+    // Thief's wallet with the real introer PDA.
+    let mut ix = confirm_ix(requester.pubkey(), job, ana.pubkey());
+    ix.accounts[3].pubkey = thief.pubkey();
+    fails(t.run(&requester, ix), "WrongWallet");
+    // Thief's wallet and PDA.
+    assert!(t.confirm(&requester, job, thief.pubkey()).is_err());
+    // Someone else can't confirm.
+    let ix = confirm_ix(thief.pubkey(), job, ana.pubkey());
+    assert!(t.run(&thief, ix).is_err());
+    let before = t.lamports(&ana.pubkey());
+    t.confirm(&requester, job, ana.pubkey()).unwrap();
+    assert_eq!(t.lamports(&ana.pubkey()), before + SOL);
+    assert_eq!(t.introer(&thief.pubkey()).jobs_done, 0);
+    // Double settle is impossible.
+    assert!(t.confirm(&requester, job, ana.pubkey()).is_err());
+    assert_eq!(t.introer(&ana.pubkey()).jobs_done, 1);
+}
+
+#[test]
+fn paused_never_blocks_payouts_or_refunds() {
+    let mut t = T::new();
+    let (requester, ana, to_confirm) = t.approved_job(SOL);
+    let to_cancel = t.post(&requester, SOL);
+    let (requester2, _, to_refund) = t.approved_job(SOL);
+    let admin = t.admin.insecure_clone();
+    t.run(
+        &admin,
+        admin_ix(admin.pubkey(), ix::SetPaused { paused: true }),
+    )
+    .unwrap();
+    t.warp(CANCEL_DELAY);
+    t.run(&requester, cancel_ix(requester.pubkey(), to_cancel))
+        .unwrap();
+    t.made(&ana, to_confirm).unwrap();
+    t.confirm(&requester, to_confirm, ana.pubkey()).unwrap();
+    t.warp(WORK_WINDOW + 1);
+    t.refund(false, &requester2, to_refund, requester2.pubkey())
+        .unwrap();
+    assert!(t.jobs.is_empty());
+}
+
+// ---------- refunds ----------
+
+#[test]
+fn refund_expired_timing() {
+    let mut t = T::new();
+    let (requester, _ana, job) = t.approved_job(SOL);
+    let r = requester.pubkey();
+    let anyone = t.user(1);
+    t.warp(WORK_WINDOW);
+    fails(t.refund(false, &requester, job, r), "NotExpired");
+    t.warp(1);
+    // Others wait CONFIRM_WINDOW more.
+    fails(t.refund(false, &anyone, job, r), "NotExpired");
+    // The refund can't be pointed at another wallet.
+    assert!(t.refund(false, &anyone, job, anyone.pubkey()).is_err());
+    let before = t.lamports(&r);
+    let held = t.lamports(&job);
+    t.refund(false, &requester, job, r).unwrap();
+    assert_eq!(t.lamports(&r), before + held - FEE);
+    assert!(t.refund(false, &requester, job, r).is_err());
+}
+
+#[test]
+fn others_refund_expired_after_the_grace_and_late_confirm_wins_before() {
+    let mut t = T::new();
+    let (requester, ana, job) = t.approved_job(SOL);
+    let r = requester.pubkey();
+    let anyone = t.user(1);
+    t.warp(WORK_WINDOW + CONFIRM_WINDOW);
+    fails(t.refund(false, &anyone, job, r), "NotExpired");
+    // Inside the grace the requester can still confirm.
+    t.confirm(&requester, job, ana.pubkey()).unwrap();
+    assert_eq!(t.introer(&ana.pubkey()).jobs_done, 1);
+
+    let (requester, _, job) = t.approved_job(SOL);
+    let r = requester.pubkey();
+    t.warp(WORK_WINDOW + CONFIRM_WINDOW + 1);
+    let before = t.lamports(&r);
+    let held = t.lamports(&job);
+    t.refund(false, &anyone, job, r).unwrap();
+    assert_eq!(t.lamports(&r), before + held);
+}
+
+#[test]
+fn refund_unconfirmed_timing() {
+    let mut t = T::new();
+    let (requester, ana, job) = t.approved_job(SOL);
+    let r = requester.pubkey();
+    let anyone = t.user(1);
+    fails(t.refund(true, &requester, job, r), "BadStatus");
+    t.made(&ana, job).unwrap();
+    fails(t.refund(false, &requester, job, r), "BadStatus");
+    t.warp(CONFIRM_WINDOW);
+    fails(t.refund(true, &requester, job, r), "NotExpired");
+    t.warp(1);
+    fails(t.refund(true, &anyone, job, r), "NotExpired");
+    t.warp(CONFIRM_WINDOW);
+    let before = t.lamports(&r);
+    let held = t.lamports(&job);
+    t.refund(true, &anyone, job, r).unwrap();
+    assert_eq!(t.lamports(&r), before + held);
+    assert_eq!(t.introer(&ana.pubkey()).jobs_done, 0);
+}
+
+#[test]
+fn refunds_need_the_right_state() {
+    let mut t = T::new();
+    let requester = t.user(10);
+    let r = requester.pubkey();
+    let job = t.post(&requester, SOL);
+    t.warp(WORK_WINDOW * 3);
+    fails(t.refund(false, &requester, job, r), "BadStatus");
+    fails(t.refund(true, &requester, job, r), "BadStatus");
 }
 
 // ---------- lamport accounting ----------
 
 #[test]
-fn extra_lamports_sent_to_a_request_go_back_to_requester() {
+fn extra_lamports_sent_to_a_job_go_back_to_requester() {
     let mut t = T::new();
-    let (wallet, requester, request) = t.made_request(SOL);
-    let (w, r) = (wallet.pubkey(), requester.pubkey());
-    // Someone tops up the request account directly.
+    let (requester, ana, job) = t.approved_job(SOL);
     let donor = t.user(2);
-    let ix =
-        anchor_lang::solana_program::system_instruction::transfer(&donor.pubkey(), &request, SOL);
+    let ix = anchor_lang::solana_program::system_instruction::transfer(&donor.pubkey(), &job, SOL);
     send(&mut t.svm, &donor, ix).unwrap();
-    let held = t.lamports(&request);
-    let wallet_before = t.lamports(&w);
-    let requester_before = t.lamports(&r);
-    t.live.clear();
-    t.confirm(&requester, w, request).unwrap();
-    // The introer gets exactly the bid; the rest goes back to the requester.
-    assert_eq!(t.lamports(&w), wallet_before + SOL);
-    assert_eq!(t.lamports(&r), requester_before + held - SOL - FEE);
-    assert_eq!(t.held(), 0);
-}
-
-#[test]
-fn many_requests_keep_books_balanced() {
-    let mut t = T::new();
-    let a = t.introer_with(MIN_BID_FLOOR);
-    let b = t.introer_with(MIN_BID_FLOOR);
-    let requester = t.user(200);
-    let r = requester.pubkey();
-    let r1 = t.bid(&requester, &a.pubkey(), SOL);
-    let r2 = t.bid(&requester, &b.pubkey(), 2 * SOL);
-    let r3 = t.bid(&requester, &a.pubkey(), 3 * SOL);
-    let r4 = t.bid(&requester, &b.pubkey(), 4 * SOL);
-    assert_eq!(t.held(), 10 * SOL);
-    // Requests of one introer can't be driven through the other.
-    assert!(t.accept(&b, r1).is_err());
-    assert!(t.decline(&a, r2, r).is_err());
-    t.accept(&a, r1).unwrap();
-    t.confirm(&requester, a.pubkey(), r1).unwrap();
-    t.decline(&b, r2, r).unwrap();
-    t.withdraw(&requester, &a.pubkey(), r3).unwrap();
-    t.accept(&b, r4).unwrap();
-    t.made(&b, r4).unwrap();
-    t.warp(CONFIRM_WINDOW + 1);
-    let anyone = t.user(1);
-    t.refund_unconfirmed(&anyone, b.pubkey(), r4, r).unwrap();
-    assert_eq!(t.held(), 0);
-    assert_eq!(t.introer(&a.pubkey()).earned, SOL);
-    assert_eq!(t.introer(&b.pubkey()).earned, 0);
-    assert_eq!(t.introer(&a.pubkey()).open_count, 0);
-    assert_eq!(t.introer(&b.pubkey()).open_count, 0);
-    assert!(t.live.is_empty());
-}
-
-#[test]
-fn request_ids_are_never_reused() {
-    let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let requester = t.user(10);
-    let r0 = t.bid(&requester, &wallet.pubkey(), SOL);
-    t.withdraw(&requester, &wallet.pubkey(), r0).unwrap();
-    let r1 = t.bid(&requester, &wallet.pubkey(), SOL);
-    assert_ne!(r0, r1);
-    assert_eq!(t.request(&r1).id, 1);
+    t.jobs.clear();
+    let held = t.lamports(&job);
+    let ana_before = t.lamports(&ana.pubkey());
+    let before = t.lamports(&requester.pubkey());
+    t.confirm(&requester, job, ana.pubkey()).unwrap();
+    assert_eq!(t.lamports(&ana.pubkey()), ana_before + SOL);
+    assert_eq!(t.lamports(&requester.pubkey()), before + held - SOL - FEE);
 }
 
 #[test]
 fn constants_match_spec() {
     assert_eq!(MAX_BID, 100 * SOL);
-    assert_eq!(MIN_BID_FLOOR, 10_000_000);
-    assert_eq!(MAX_OPEN, 5);
-    assert_eq!(CONFIRM_WINDOW, 72 * 3600);
+    assert_eq!(MIN_BID, 10_000_000);
     assert_eq!(WORK_WINDOW, 7 * 86_400);
-    assert_eq!(STATUS_MADE, 2);
+    assert_eq!(CONFIRM_WINDOW, 72 * 3600);
+    assert_eq!((BOARD_LEN, OFFER_RING, TEXT_LEN), (64, 16, 32));
+    assert_eq!((STATUS_OPEN, STATUS_APPROVED, STATUS_MADE), (0, 1, 2));
 }
 
-// ---------- fixed layouts + fixtures for the badge ----------
+// ---------- fixed layouts + fixtures ----------
 
 fn u64_at(data: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(data[at..at + 8].try_into().unwrap())
 }
 
-/// Byte offsets documented in docs/spec.md; the badge decodes these in Lua.
+/// Byte offsets documented in docs/spec-v2.md.
 #[test]
 fn account_layouts_have_fixed_offsets() {
     let mut t = T::new();
-    let wallet = t.introer_with(MIN_BID_FLOOR);
-    let w = wallet.pubkey();
-    let requester = t.user(10);
-    let request = t.bid(&requester, &w, 2 * SOL);
-    t.accept(&wallet, request).unwrap();
+    let (requester, ana, job) = t.approved_job(2 * SOL);
 
     let data = t.svm.get_account(&config_key()).unwrap().data;
     assert_eq!(data.len(), 74);
     assert_eq!(&data[8..40], t.admin.pubkey().as_ref());
-    assert!(data[40..72].iter().all(|b| *b == 0)); // pending_admin
-    assert_eq!(data[72], 0); // paused
-    assert_eq!(data[73], t.config().bump);
+    assert!(data[40..72].iter().all(|b| *b == 0));
+    assert_eq!((data[72], data[73]), (0, t.config().bump));
 
-    let data = t.svm.get_account(&introer_key(&w)).unwrap().data;
-    assert_eq!(data.len(), 230);
-    assert_eq!(&data[8..40], w.as_ref());
-    assert_eq!(u64_at(&data, 40), MIN_BID_FLOOR);
-    assert_eq!(u64_at(&data, 48), 1); // next_id
-    assert_eq!(&data[56..60], &0u32.to_le_bytes()); // jobs_done
-    assert_eq!(u64_at(&data, 60), 0); // earned
-    assert_eq!(u64_at(&data, 68) as i64, t.introer(&w).created_at);
-    assert_eq!(data[76], 0); // open_count
-    assert_eq!(data[77], t.introer(&w).bump);
-    assert_eq!(&data[78..86], b"BP26-001");
-    assert_eq!(&data[86..150], &pad::<64>("Solana founders in Lisbon"));
-    // open: 5 × (id u64, bid u64) from 150. Request 0 was accepted, 1 is open.
-    let request_1 = t.bid(&requester, &w, 3 * SOL);
-    let data = t.svm.get_account(&introer_key(&w)).unwrap().data;
-    assert_eq!(data[76], 1);
-    assert_eq!(u64_at(&data, 150), 1);
-    assert_eq!(u64_at(&data, 158), 3 * SOL);
-    assert!(data[166..230].iter().all(|b| *b == 0));
-    assert_eq!(t.request(&request_1).id, 1);
+    let data = t.svm.get_account(&board_key()).unwrap().data;
+    assert_eq!(data.len(), 24 + 32 * BOARD_LEN);
+    assert_eq!((data[8], data[9]), (1, t.board().bump));
+    assert_eq!(u64_at(&data, 16), 1);
+    assert_eq!(&data[24..56], job.as_ref());
 
-    let data = t.svm.get_account(&request).unwrap().data;
-    assert_eq!(data.len(), 210);
-    assert_eq!(&data[8..40], introer_key(&w).as_ref());
-    assert_eq!(&data[40..72], requester.pubkey().as_ref());
-    assert_eq!(u64_at(&data, 72), 0); // id
-    assert_eq!(u64_at(&data, 80), 2 * SOL);
-    assert_eq!(data[88], STATUS_ACCEPTED);
-    assert_eq!(u64_at(&data, 89) as i64, t.request(&request).created_at);
-    assert_eq!(u64_at(&data, 97) as i64, t.now()); // accepted_at
-    assert_eq!(u64_at(&data, 105), 0); // made_at
-    assert_eq!(data[113], t.request(&request).bump);
-    assert_eq!(&data[114..178], &pad::<64>("Toly"));
-    assert_eq!(&data[178..210], &pad::<32>("@alice"));
+    let data = t.svm.get_account(&introer_key(&ana.pubkey())).unwrap().data;
+    assert_eq!(data.len(), 101);
+    assert_eq!(&data[8..40], ana.pubkey().as_ref());
+    assert_eq!(&data[40..48], b"BP26-001");
+    assert_eq!(&data[48..80], &pad("Ana"));
+    assert_eq!(&data[80..84], &0u32.to_le_bytes());
+    assert_eq!(u64_at(&data, 84), 0);
+    assert_eq!(
+        u64_at(&data, 92) as i64,
+        t.introer(&ana.pubkey()).created_at
+    );
+    assert_eq!(data[100], t.introer(&ana.pubkey()).bump);
 
-    let data = t.svm.get_account(&directory_key()).unwrap().data;
-    assert_eq!(data.len(), 8 + 2 + 32 * DIRECTORY_LEN);
-    assert_eq!(data[8], 1);
-    assert_eq!(data[9], t.directory().bump);
-    assert_eq!(&data[10..42], w.as_ref());
+    let state = t.job(&job);
+    let data = t.svm.get_account(&job).unwrap().data;
+    assert_eq!(data.len(), 733);
+    assert_eq!(&data[8..40], requester.pubkey().as_ref());
+    assert_eq!(u64_at(&data, 40), state.nonce);
+    assert_eq!(u64_at(&data, 48), 0); // serial
+    assert_eq!(u64_at(&data, 56), 2 * SOL);
+    assert_eq!(data[64], STATUS_APPROVED);
+    assert_eq!(u64_at(&data, 65) as i64, state.created_at);
+    assert_eq!(u64_at(&data, 73) as i64, state.approved_at);
+    assert_eq!(u64_at(&data, 81), 0); // made_at
+    assert_eq!(&data[89..121], ana.pubkey().as_ref());
+    assert_eq!(&data[121..123], &1u16.to_le_bytes());
+    assert_eq!(&data[123..155], &pad("Toly"));
+    assert_eq!(&data[155..187], &pad("Solana"));
+    assert_eq!(&data[187..219], &pad("@alice"));
+    assert_eq!(data[219], state.bump);
+    assert_eq!(data[220], 1); // offers_head
+    assert_eq!(&data[221..253], ana.pubkey().as_ref()); // offers[0]
+    assert!(data[253..733].iter().all(|b| *b == 0));
+
+    let offer = offer_key(&job, &ana.pubkey());
+    let data = t.svm.get_account(&offer).unwrap().data;
+    assert_eq!(data.len(), 89);
+    assert_eq!(&data[8..40], job.as_ref());
+    assert_eq!(&data[40..72], ana.pubkey().as_ref());
+    assert_eq!(u64_at(&data, 72), 0); // job_serial
+    assert_eq!(u64_at(&data, 80) as i64, t.offer_state(&offer).created_at);
+    assert_eq!(data[88], t.offer_state(&offer).bump);
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -1622,89 +1443,129 @@ fn fixture(name: &str, ix: &Instruction) -> String {
 }
 
 /// Writes one instruction per file to `tests/fixtures/`, built from fixed
-/// keys, after checking each one runs. The badge's Lua encoders are compared
-/// against these. Account dumps go to `tests/fixtures/accounts.json`.
+/// keys, after checking each one runs. Clients compare their encoders with
+/// these. Account dumps go to `tests/fixtures/accounts.json`.
 #[test]
 fn write_instruction_fixtures() {
     let key = |n: u8| Keypair::new_from_array([n; 32]);
-    let (admin, wallet, requester) = (key(1), key(2), key(3));
+    let (admin, introer, requester, other) = (key(1), key(2), key(3), key(4));
     let mut t = T::with_admin(admin.insecure_clone());
     let mut clock: Clock = t.svm.get_sysvar();
     clock.unix_timestamp = 1_790_000_000;
     t.svm.set_sysvar(&clock);
-    for k in [&wallet, &requester] {
+    for k in [&introer, &requester, &other] {
         t.svm.airdrop(&k.pubkey(), 30 * SOL).unwrap();
     }
-    let (w, r) = (wallet.pubkey(), requester.pubkey());
-    let introer = introer_key(&w);
-    let req = |id| request_key(&introer, id);
-    let mut out: Vec<(&str, Instruction)> = vec![];
+    let (i, r) = (introer.pubkey(), requester.pubkey());
+    let job = |nonce: u64| job_key(&r, nonce);
+    // init_config already ran in `with_admin`; record the same instruction.
+    let mut out: Vec<(&str, Instruction)> = vec![("init_config", init_config_ix(admin.pubkey()))];
     let mut go = |t: &mut T, name: &'static str, payer: &Keypair, ix: Instruction| {
         t.run(payer, ix.clone()).unwrap();
         out.push((name, ix));
     };
-    let bid_more = |t: &mut T, sol: u64| {
-        let id = t.introer(&w).next_id;
-        let ix = t.bid_ix(&r, &w, sol * SOL, None);
-        t.live.push(req(id));
-        t.run(&requester, ix).unwrap();
+    let post = |t: &mut T, nonce: u64| {
+        t.jobs.push(job(nonce));
+        post_ix(r, nonce, pad("Toly"), pad("@alice"), SOL)
     };
 
-    let ix = register_ix(w, pad("Solana founders in Lisbon"), MIN_BID_FLOOR);
-    go(&mut t, "register_introer", &wallet, ix);
+    go(
+        &mut t,
+        "register_introer",
+        &introer,
+        register_ix(i, pad("Ana")),
+    );
     let ix = build(
-        acc::UpdateIntroer { wallet: w, introer },
+        acc::UpdateIntroer {
+            wallet: i,
+            introer: introer_key(&i),
+        },
         ix::UpdateIntroer {
-            offer: pad("Solana founders"),
-            min_bid: MIN_BID_FLOOR,
+            badge_id: *b"BP26-001",
+            name: pad("Ana B"),
         },
     );
-    go(&mut t, "update_introer", &wallet, ix);
-    let ix = t.bid_ix(&r, &w, SOL, None);
-    t.live.push(req(0));
-    go(&mut t, "bid", &requester, ix);
-    go(&mut t, "accept", &wallet, T::step_ix(true, w, req(0)));
-    go(&mut t, "mark_made", &wallet, T::step_ix(false, w, req(0)));
-    let ix = t.confirm_ix(introer, w, req(0), r);
-    go(&mut t, "confirm", &requester, ix);
-    bid_more(&mut t, 1);
-    bid_more(&mut t, 1);
-    t.warp(WITHDRAW_DELAY);
-    let ix = t.withdraw_ix(r, &w, req(1));
-    go(&mut t, "withdraw", &requester, ix);
-    let ix = t.decline_ix(w, req(2), r);
-    go(&mut t, "decline", &wallet, ix);
-    bid_more(&mut t, 1);
-    bid_more(&mut t, 1);
-    t.accept(&wallet, req(3)).unwrap();
-    t.made(&wallet, req(3)).unwrap();
-    t.accept(&wallet, req(4)).unwrap();
-    t.warp(WORK_WINDOW + 1);
-    let ix = t.refund_ix(true, w, introer, req(3), r);
-    go(&mut t, "refund_unconfirmed", &wallet, ix);
-    let ix = t.refund_ix(false, r, introer, req(4), r);
-    go(&mut t, "refund_expired", &requester, ix);
-    // Full queue: bids 1..=5 SOL (ids 5..=9); outbid the 1 SOL one.
-    for sol in 1..=5 {
-        bid_more(&mut t, sol);
+    go(&mut t, "update_introer", &introer, ix);
+    let ix = post(&mut t, 1);
+    go(&mut t, "post_job", &requester, ix);
+    t.offers.push(offer_key(&job(1), &i));
+    go(&mut t, "offer", &introer, offer_ix(i, job(1)));
+    go(&mut t, "approve", &requester, approve_ix(r, job(1), i));
+    go(&mut t, "mark_made", &introer, made_ix(i, job(1)));
+    go(&mut t, "confirm", &requester, confirm_ix(r, job(1), i));
+    go(
+        &mut t,
+        "close_offer",
+        &other,
+        close_offer_ix(other.pubkey(), offer_key(&job(1), &i), i, job(1)),
+    );
+    let ix = post(&mut t, 2);
+    t.run(&requester, ix).unwrap();
+    t.offers.push(offer_key(&job(2), &i));
+    t.run(&introer, offer_ix(i, job(2))).unwrap();
+    go(
+        &mut t,
+        "withdraw_offer",
+        &introer,
+        withdraw_offer_ix(i, job(2)),
+    );
+    t.warp(CANCEL_DELAY);
+    go(&mut t, "cancel_job", &requester, cancel_ix(r, job(2)));
+    for nonce in [3, 4] {
+        let ix = post(&mut t, nonce);
+        t.run(&requester, ix).unwrap();
+        t.offers.push(offer_key(&job(nonce), &i));
+        t.run(&introer, offer_ix(i, job(nonce))).unwrap();
+        t.run(&requester, approve_ix(r, job(nonce), i)).unwrap();
     }
-    let ix = t.bid_ix(&r, &w, 6 * SOL, Some((req(5), r)));
-    t.live.push(req(10));
-    go(&mut t, "bid_outbid", &requester, ix);
-    let ix = t.admin_ix(admin.pubkey(), ix::SetPaused { paused: false });
-    go(&mut t, "set_paused", &admin, ix);
-    let ix = t.admin_ix(admin.pubkey(), ix::ProposeAdmin { admin: w });
-    go(&mut t, "propose_admin", &admin, ix);
-    let ix = build(
-        acc::AcceptAdmin {
-            pending_admin: w,
-            config: config_key(),
-        },
-        ix::AcceptAdmin {},
+    t.run(&introer, made_ix(i, job(4))).unwrap();
+    t.warp(WORK_WINDOW + 1);
+    go(
+        &mut t,
+        "refund_expired",
+        &requester,
+        refund_ix(false, r, job(3), r),
     );
-    go(&mut t, "accept_admin", &wallet, ix);
+    go(
+        &mut t,
+        "refund_unconfirmed",
+        &requester,
+        refund_ix(true, r, job(4), r),
+    );
+    // A live job with an offer, for the account dump.
+    let ix = post(&mut t, 5);
+    t.run(&requester, ix).unwrap();
+    t.offers.push(offer_key(&job(5), &i));
+    t.run(&introer, offer_ix(i, job(5))).unwrap();
+    go(
+        &mut t,
+        "set_paused",
+        &admin,
+        admin_ix(admin.pubkey(), ix::SetPaused { paused: false }),
+    );
+    go(
+        &mut t,
+        "propose_admin",
+        &admin,
+        admin_ix(admin.pubkey(), ix::ProposeAdmin { admin: i }),
+    );
+    go(
+        &mut t,
+        "cancel_admin_proposal",
+        &admin,
+        admin_ix(admin.pubkey(), ix::CancelAdminProposal {}),
+    );
+    t.run(
+        &admin,
+        admin_ix(admin.pubkey(), ix::ProposeAdmin { admin: i }),
+    )
+    .unwrap();
+    go(&mut t, "accept_admin", &introer, accept_admin_ix(i));
 
     let dir = std::path::Path::new("fixtures");
+    if dir.exists() {
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     std::fs::create_dir_all(dir).unwrap();
     for (name, ix) in &out {
         std::fs::write(dir.join(format!("{name}.json")), fixture(name, ix)).unwrap();
@@ -1717,11 +1578,12 @@ fn write_instruction_fixtures() {
         )
     };
     let accounts = format!(
-        "{{\n  \"config\": {},\n  \"directory\": {},\n  \"introer\": {},\n  \"request\": {}\n}}\n",
+        "{{\n  \"config\": {},\n  \"board\": {},\n  \"introer\": {},\n  \"job\": {},\n  \"offer\": {}\n}}\n",
         dump(config_key()),
-        dump(directory_key()),
-        dump(introer),
-        dump(req(10)),
+        dump(board_key()),
+        dump(introer_key(&i)),
+        dump(job(5)),
+        dump(offer_key(&job(5), &i)),
     );
     std::fs::write(dir.join("accounts.json"), accounts).unwrap();
 }

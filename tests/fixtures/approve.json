@@ -1,0 +1,10 @@
+{
+  "name": "approve",
+  "program_id": "GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC",
+  "accounts": [
+    { "pubkey": "GyGKxMyg1p9SsHfm15MkNUu1u9TN2JtTspcdmrtGUdse", "signer": true, "writable": false },
+    { "pubkey": "Fy31zdAYkcXAthT74fLypXaBV3BdiNe65rzpF2GQz1GK", "signer": false, "writable": true },
+    { "pubkey": "B8T1Ec74JaSBHVXvNaGe7zBpBj9iuhtt65Qvrc8Z9Y9z", "signer": false, "writable": false }
+  ],
+  "data_hex": "454ad9247375614c"
+}
