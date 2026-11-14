@@ -1727,25 +1727,6 @@
             "type": "u16"
           },
           {
-            "name": "offers",
-            "docs": [
-              "Newest offering introer wallets, a ring."
-            ],
-            "type": {
-              "array": [
-                "pubkey",
-                16
-              ]
-            }
-          },
-          {
-            "name": "offers_head",
-            "docs": [
-              "Next ring slot to write."
-            ],
-            "type": "u8"
-          },
-          {
             "name": "who",
             "docs": [
               "UTF-8, zero-padded."
@@ -1778,6 +1759,26 @@
           {
             "name": "bump",
             "type": "u8"
+          },
+          {
+            "name": "offers_head",
+            "docs": [
+              "Next ring slot to write."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "offers",
+            "docs": [
+              "Newest offering introer wallets, a ring. Last, so board reads can",
+              "skip it with a data slice."
+            ],
+            "type": {
+              "array": [
+                "pubkey",
+                16
+              ]
+            }
           }
         ]
       }

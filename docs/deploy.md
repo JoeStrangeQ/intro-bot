@@ -69,15 +69,15 @@ If a deploy fails midway, `solana program show --buffers` lists the buffer; clos
 - [ ] IDL in repo matches the deployed build.
 - [ ] Everyone agrees: no more code changes are possible after `--final`.
 
-## Cost estimate (from the built .so, 340,424 bytes)
+## Cost estimate (from the built .so, 340,376 bytes)
 
 Rent = `(128 + bytes) × 6,960` lamports (same as `solana rent <bytes>`).
 
 | Item | Bytes | SOL | Kept? |
 | --- | --- | --- | --- |
-| ProgramData (45 + .so, `--max-len` = .so size) | 340,469 | 2.3706 | locked forever once immutable |
+| ProgramData (45 + .so, `--max-len` = .so size) | 340,421 | 2.3702 | locked forever once immutable |
 | Program account | 36 | 0.0011 | locked |
-| Buffer during deploy (37 + .so) | 340,461 | 2.3705 | returned after deploy |
+| Buffer during deploy (37 + .so) | 340,413 | 2.3702 | returned after deploy |
 | Deploy tx fees (~340 writes × 5,000 + priority) | | ~0.002–0.01 | spent |
 | Config account | 74 | 0.0014 | locked |
 | Board account | 2,072 | 0.0153 | locked |

@@ -442,15 +442,16 @@ pub struct Job {
     pub approved: Pubkey,
     /// Offers ever made (saturates).
     pub offer_count: u16,
-    /// Newest offering introer wallets, a ring.
-    pub offers: [Pubkey; OFFER_RING],
-    /// Next ring slot to write.
-    pub offers_head: u8,
     /// UTF-8, zero-padded.
     pub who: [u8; TEXT_LEN],
     pub company: [u8; TEXT_LEN],
     pub telegram: [u8; TEXT_LEN],
     pub bump: u8,
+    /// Next ring slot to write.
+    pub offers_head: u8,
+    /// Newest offering introer wallets, a ring. Last, so board reads can
+    /// skip it with a data slice.
+    pub offers: [Pubkey; OFFER_RING],
 }
 
 impl Job {

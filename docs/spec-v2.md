@@ -119,12 +119,14 @@ jobs_done u32 @80, earned u64 @84, created_at i64 @92, bump @100.
 | 81 | made_at | i64 |
 | 89 | approved | Pubkey (introer wallet; zeros until approved) |
 | 121 | offer_count | u16 |
-| 123 + 32·i | offers[i], i = 0..15 | Pubkey (ring, zeros when empty) |
-| 635 | offers_head | u8 (next ring slot) |
-| 636 | who | [u8; 32] |
-| 668 | company | [u8; 32] |
-| 700 | telegram | [u8; 32] |
-| 732 | bump | u8 |
+| 123 | who | [u8; 32] |
+| 155 | company | [u8; 32] |
+| 187 | telegram | [u8; 32] |
+| 219 | bump | u8 |
+| 220 | offers_head | u8 (next ring slot) |
+| 221 + 32·i | offers[i], i = 0..15 | Pubkey (ring, zeros when empty) |
+
+The offers ring is last: a board listing can read bytes 0..220 with a data slice.
 
 `Offer` ["offer", job, introer_wallet], 89 bytes: job @8, introer (wallet) @40,
 job_serial u64 @72, created_at i64 @80, bump @88.

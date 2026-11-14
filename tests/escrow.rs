@@ -1313,13 +1313,13 @@ fn account_layouts_have_fixed_offsets() {
     assert_eq!(u64_at(&data, 81), 0); // made_at
     assert_eq!(&data[89..121], ana.pubkey().as_ref());
     assert_eq!(&data[121..123], &1u16.to_le_bytes());
-    assert_eq!(&data[123..155], ana.pubkey().as_ref()); // offers[0]
-    assert!(data[155..635].iter().all(|b| *b == 0));
-    assert_eq!(data[635], 1); // offers_head
-    assert_eq!(&data[636..668], &pad("Toly"));
-    assert_eq!(&data[668..700], &pad("Solana"));
-    assert_eq!(&data[700..732], &pad("@alice"));
-    assert_eq!(data[732], state.bump);
+    assert_eq!(&data[123..155], &pad("Toly"));
+    assert_eq!(&data[155..187], &pad("Solana"));
+    assert_eq!(&data[187..219], &pad("@alice"));
+    assert_eq!(data[219], state.bump);
+    assert_eq!(data[220], 1); // offers_head
+    assert_eq!(&data[221..253], ana.pubkey().as_ref()); // offers[0]
+    assert!(data[253..733].iter().all(|b| *b == 0));
 
     let offer = offer_key(&job, &ana.pubkey());
     let data = t.svm.get_account(&offer).unwrap().data;
