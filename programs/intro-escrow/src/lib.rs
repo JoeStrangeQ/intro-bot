@@ -16,6 +16,9 @@ pub const WORK_WINDOW: i64 = 7 * 24 * 60 * 60;
 /// Time the requester has to confirm a made intro. Also the extra wait
 /// before anyone but the requester can trigger a refund.
 pub const CONFIRM_WINDOW: i64 = 72 * 60 * 60;
+/// An open job can be cancelled only this long after it was posted, so
+/// post + cancel can't cheaply flush the board.
+pub const CANCEL_DELAY: i64 = 60 * 60;
 pub const TEXT_LEN: usize = 32;
 pub const BOARD_LEN: usize = 64;
 pub const OFFER_RING: usize = 16;
@@ -179,6 +182,10 @@ pub mod intro_escrow {
     pub fn cancel_job(ctx: Context<CancelJob>) -> Result<()> {
         let job = &ctx.accounts.job;
         require!(job.status == STATUS_OPEN, EscrowError::BadStatus);
+        require!(
+            Clock::get()?.unix_timestamp >= after(job.created_at, CANCEL_DELAY)?,
+            EscrowError::TooEarly
+        );
         emit!(JobCancelled { job: job.key() });
         emit!(Refunded {
             job: job.key(),
@@ -210,14 +217,22 @@ pub mod intro_escrow {
     }
 
     /// Introer takes back their offer and its rent. Refused for the
-    /// approved offer while its job is live.
+    /// approved offer while its job is live. A live job drops the wallet
+    /// from its ring and its count.
     pub fn withdraw_offer(ctx: Context<WithdrawOffer>) -> Result<()> {
         let offer = &ctx.accounts.offer;
-        if let Some(job) = live_job(&ctx.accounts.job, offer)? {
+        let info = ctx.accounts.job.to_account_info();
+        if is_live_job(&info, offer)? {
+            let mut data = info.try_borrow_mut_data()?;
+            let status = *data.get(JOB_STATUS).ok_or(EscrowError::WrongJob)?;
+            let approved = data
+                .get(JOB_APPROVED..JOB_APPROVED + 32)
+                .ok_or(EscrowError::WrongJob)?;
             require!(
-                job.status == STATUS_OPEN || job.approved != offer.introer,
+                status == STATUS_OPEN || approved != offer.introer.as_ref(),
                 EscrowError::OfferInUse
             );
+            drop_offer(&mut data, &offer.introer)?;
         }
         emit!(OfferWithdrawn {
             job: offer.job,
@@ -230,10 +245,10 @@ pub mod intro_escrow {
     pub fn close_offer(ctx: Context<CloseOffer>) -> Result<()> {
         let offer = &ctx.accounts.offer;
         require!(
-            live_job(&ctx.accounts.job, offer)?.is_none(),
+            !is_live_job(&ctx.accounts.job, offer)?,
             EscrowError::JobLive
         );
-        emit!(OfferWithdrawn {
+        emit!(OfferClosed {
             job: offer.job,
             introer: offer.introer,
         });
@@ -241,10 +256,10 @@ pub mod intro_escrow {
     }
 
     /// Requester picks one offer.
-    pub fn approve(ctx: Context<Approve>, introer_wallet: Pubkey) -> Result<()> {
+    pub fn approve(ctx: Context<Approve>) -> Result<()> {
         let a = ctx.accounts;
         require!(a.job.status == STATUS_OPEN, EscrowError::BadStatus);
-        require!(a.offer.job_serial == a.job.serial, EscrowError::StaleOffer);
+        let introer_wallet = a.offer.introer;
         a.job.status = STATUS_APPROVED;
         a.job.approved = introer_wallet;
         a.job.approved_at = Clock::get()?.unix_timestamp;
@@ -350,16 +365,58 @@ fn refund_after(a: &Refund, since: i64, wait: i64, reason: u8) -> Result<()> {
     Ok(())
 }
 
-/// The job an offer was made on, if it still exists. A job re-posted at the
-/// same address (same requester and nonce) has a new serial and doesn't
-/// count.
-fn live_job(info: &UncheckedAccount, offer: &Offer) -> Result<Option<Job>> {
-    if info.owner != &crate::ID || info.data_is_empty() {
-        return Ok(None);
+// Byte offsets in a Job account (see `account_layouts_have_fixed_offsets`).
+const JOB_SERIAL: usize = 48;
+const JOB_STATUS: usize = 64;
+const JOB_APPROVED: usize = 89;
+const JOB_OFFER_COUNT: usize = 121;
+const JOB_OFFERS: usize = 221;
+
+/// Whether the job an offer was made on still exists. A job re-posted at
+/// the same address (same requester and nonce) has a new serial and doesn't
+/// count. Reads fixed offsets instead of deserializing the whole job.
+fn is_live_job(info: &AccountInfo, offer: &Offer) -> Result<bool> {
+    if info.owner != &crate::ID {
+        return Ok(false);
     }
     let data = info.try_borrow_data()?;
-    let job = Job::try_deserialize(&mut &data[..])?;
-    Ok((job.serial == offer.job_serial).then_some(job))
+    if data.len() != 8 + Job::INIT_SPACE || !data.starts_with(Job::DISCRIMINATOR) {
+        return Ok(false);
+    }
+    let serial = data
+        .get(JOB_SERIAL..JOB_SERIAL + 8)
+        .and_then(|b| b.try_into().ok())
+        .map(u64::from_le_bytes)
+        .ok_or(EscrowError::WrongJob)?;
+    Ok(serial == offer.job_serial)
+}
+
+/// Removes `wallet` from a live job's offers ring and lowers its count.
+fn drop_offer(data: &mut [u8], wallet: &Pubkey) -> Result<()> {
+    let count = data
+        .get_mut(JOB_OFFER_COUNT..JOB_OFFER_COUNT + 2)
+        .ok_or(EscrowError::WrongJob)?;
+    let left = u16::from_le_bytes([count[0], count[1]]).saturating_sub(1);
+    count.copy_from_slice(&left.to_le_bytes());
+    let ring = data
+        .get_mut(JOB_OFFERS..JOB_OFFERS + 32 * OFFER_RING)
+        .ok_or(EscrowError::WrongJob)?;
+    for slot in ring.chunks_exact_mut(32) {
+        if slot == wallet.as_ref() {
+            slot.fill(0);
+        }
+    }
+    Ok(())
+}
+
+/// Writes `key` at `head` of a ring and advances `head`.
+fn push_ring(ring: &mut [Pubkey], head: &mut u8, key: Pubkey) {
+    let len = ring.len().max(1);
+    let slot = usize::from(*head) % len;
+    if let Some(entry) = ring.get_mut(slot) {
+        *entry = key;
+    }
+    *head = ((slot + 1) % len) as u8;
 }
 
 /// Text is UTF-8, non-empty and zero-padded: nothing but zeros after the
@@ -401,11 +458,7 @@ pub struct Board {
 impl Board {
     /// Lists `job` at `head`, advances it, and returns the job's serial.
     fn add(&mut self, job: Pubkey) -> Result<u64> {
-        let slot = usize::from(self.head) % BOARD_LEN;
-        if let Some(entry) = self.jobs.get_mut(slot) {
-            *entry = job;
-        }
-        self.head = ((slot + 1) % BOARD_LEN) as u8;
+        push_ring(&mut self.jobs, &mut self.head, job);
         let serial = self.posted;
         self.posted = serial.checked_add(1).ok_or(EscrowError::Overflow)?;
         Ok(serial)
@@ -440,7 +493,7 @@ pub struct Job {
     pub made_at: i64,
     /// Approved introer wallet; default until approved.
     pub approved: Pubkey,
-    /// Offers ever made (saturates).
+    /// Live offers (withdrawn ones are taken off; saturates).
     pub offer_count: u16,
     /// UTF-8, zero-padded.
     pub who: [u8; TEXT_LEN],
@@ -456,11 +509,9 @@ pub struct Job {
 
 impl Job {
     fn add_offer(&mut self, wallet: Pubkey) {
-        let slot = usize::from(self.offers_head) % OFFER_RING;
-        if let Some(entry) = self.offers.get_mut(slot) {
-            *entry = wallet;
+        if !self.offers.contains(&wallet) {
+            push_ring(&mut self.offers, &mut self.offers_head, wallet);
         }
-        self.offers_head = ((slot + 1) % OFFER_RING) as u8;
         self.offer_count = self.offer_count.saturating_add(1);
     }
 }
@@ -531,7 +582,7 @@ pub struct PostJob<'info> {
     pub requester: Signer<'info>,
     #[account(seeds = [b"config"], bump = config.bump)]
     pub config: Account<'info, Config>,
-    #[account(mut, seeds = [b"board"], bump)]
+    #[account(mut, seeds = [b"board"], bump = board.load()?.bump)]
     pub board: AccountLoader<'info, Board>,
     #[account(
         init,
@@ -573,7 +624,7 @@ pub struct MakeOffer<'info> {
         init,
         payer = wallet,
         space = 8 + Offer::INIT_SPACE,
-        seeds = [b"offer", job.key().as_ref(), wallet.key().as_ref()],
+        seeds = [b"offer", job.key().as_ref(), &job.serial.to_le_bytes(), wallet.key().as_ref()],
         bump
     )]
     pub offer: Account<'info, Offer>,
@@ -587,12 +638,13 @@ pub struct WithdrawOffer<'info> {
     #[account(
         mut,
         close = wallet,
-        seeds = [b"offer", offer.job.as_ref(), wallet.key().as_ref()],
+        seeds = [b"offer", offer.job.as_ref(), &offer.job_serial.to_le_bytes(), wallet.key().as_ref()],
         bump = offer.bump
     )]
     pub offer: Account<'info, Offer>,
-    /// CHECK: must be `offer.job`; read only to see if it is still live.
-    #[account(address = offer.job @ EscrowError::WrongJob)]
+    /// CHECK: must be `offer.job`; if still live, its offers ring and count
+    /// are updated at fixed offsets.
+    #[account(mut, address = offer.job @ EscrowError::WrongJob)]
     pub job: UncheckedAccount<'info>,
 }
 
@@ -602,7 +654,7 @@ pub struct CloseOffer<'info> {
     #[account(
         mut,
         close = wallet,
-        seeds = [b"offer", offer.job.as_ref(), offer.introer.as_ref()],
+        seeds = [b"offer", offer.job.as_ref(), &offer.job_serial.to_le_bytes(), offer.introer.as_ref()],
         bump = offer.bump
     )]
     pub offer: Account<'info, Offer>,
@@ -615,7 +667,6 @@ pub struct CloseOffer<'info> {
 }
 
 #[derive(Accounts)]
-#[instruction(introer_wallet: Pubkey)]
 pub struct Approve<'info> {
     pub requester: Signer<'info>,
     #[account(
@@ -625,7 +676,11 @@ pub struct Approve<'info> {
         has_one = requester @ EscrowError::Unauthorized
     )]
     pub job: Box<Account<'info, Job>>,
-    #[account(seeds = [b"offer", job.key().as_ref(), introer_wallet.as_ref()], bump = offer.bump)]
+    /// The chosen offer, made on this post.
+    #[account(
+        seeds = [b"offer", job.key().as_ref(), &job.serial.to_le_bytes(), offer.introer.as_ref()],
+        bump = offer.bump
+    )]
     pub offer: Account<'info, Offer>,
 }
 
@@ -721,6 +776,12 @@ pub struct OfferWithdrawn {
 }
 
 #[event]
+pub struct OfferClosed {
+    pub job: Pubkey,
+    pub introer: Pubkey,
+}
+
+#[event]
 pub struct Approved {
     pub job: Pubkey,
     pub introer: Pubkey,
@@ -770,8 +831,6 @@ pub enum EscrowError {
     SelfOffer,
     #[msg("Job is in the wrong state")]
     BadStatus,
-    #[msg("Offer was made on an earlier post at this address")]
-    StaleOffer,
     #[msg("The approved offer can't be withdrawn while its job is live")]
     OfferInUse,
     #[msg("The job is still live")]
@@ -788,4 +847,6 @@ pub enum EscrowError {
     NotExpired,
     #[msg("Math overflow")]
     Overflow,
+    #[msg("Too early to cancel")]
+    TooEarly,
 }

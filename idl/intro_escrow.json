@@ -101,6 +101,9 @@
         },
         {
           "name": "offer",
+          "docs": [
+            "The chosen offer, made on this post."
+          ],
           "pda": {
             "seeds": [
               {
@@ -118,19 +121,20 @@
                 "path": "job"
               },
               {
-                "kind": "arg",
-                "path": "introer_wallet"
+                "kind": "account",
+                "path": "job.serial",
+                "account": "Job"
+              },
+              {
+                "kind": "account",
+                "path": "offer.introer",
+                "account": "Offer"
               }
             ]
           }
         }
       ],
-      "args": [
-        {
-          "name": "introer_wallet",
-          "type": "pubkey"
-        }
-      ]
+      "args": []
     },
     {
       "name": "cancel_admin_proposal",
@@ -267,6 +271,11 @@
               {
                 "kind": "account",
                 "path": "offer.job",
+                "account": "Offer"
+              },
+              {
+                "kind": "account",
+                "path": "offer.job_serial",
                 "account": "Offer"
               },
               {
@@ -599,6 +608,11 @@
               {
                 "kind": "account",
                 "path": "job"
+              },
+              {
+                "kind": "account",
+                "path": "job.serial",
+                "account": "Job"
               },
               {
                 "kind": "account",
@@ -1089,7 +1103,8 @@
       "name": "withdraw_offer",
       "docs": [
         "Introer takes back their offer and its rent. Refused for the",
-        "approved offer while its job is live."
+        "approved offer while its job is live. A live job drops the wallet",
+        "from its ring and its count."
       ],
       "discriminator": [
         203,
@@ -1129,13 +1144,22 @@
               },
               {
                 "kind": "account",
+                "path": "offer.job_serial",
+                "account": "Offer"
+              },
+              {
+                "kind": "account",
                 "path": "wallet"
               }
             ]
           }
         },
         {
-          "name": "job"
+          "name": "job",
+          "docs": [
+            "are updated at fixed offsets."
+          ],
+          "writable": true
         }
       ],
       "args": []
@@ -1314,6 +1338,19 @@
       ]
     },
     {
+      "name": "OfferClosed",
+      "discriminator": [
+        237,
+        38,
+        102,
+        204,
+        165,
+        180,
+        177,
+        164
+      ]
+    },
+    {
       "name": "OfferWithdrawn",
       "discriminator": [
         239,
@@ -1414,48 +1451,48 @@
     },
     {
       "code": 6009,
-      "name": "StaleOffer",
-      "msg": "Offer was made on an earlier post at this address"
-    },
-    {
-      "code": 6010,
       "name": "OfferInUse",
       "msg": "The approved offer can't be withdrawn while its job is live"
     },
     {
-      "code": 6011,
+      "code": 6010,
       "name": "JobLive",
       "msg": "The job is still live"
     },
     {
-      "code": 6012,
+      "code": 6011,
       "name": "WrongJob",
       "msg": "Job does not match"
     },
     {
-      "code": 6013,
+      "code": 6012,
       "name": "WrongWallet",
       "msg": "Wallet does not match"
     },
     {
-      "code": 6014,
+      "code": 6013,
       "name": "WrongRequester",
       "msg": "Requester does not match"
     },
     {
-      "code": 6015,
+      "code": 6014,
       "name": "WorkExpired",
       "msg": "Work window has passed"
     },
     {
-      "code": 6016,
+      "code": 6015,
       "name": "NotExpired",
       "msg": "Not expired yet"
     },
     {
-      "code": 6017,
+      "code": 6016,
       "name": "Overflow",
       "msg": "Math overflow"
+    },
+    {
+      "code": 6017,
+      "name": "TooEarly",
+      "msg": "Too early to cancel"
     }
   ],
   "types": [
@@ -1722,7 +1759,7 @@
           {
             "name": "offer_count",
             "docs": [
-              "Offers ever made (saturates)."
+              "Live offers (withdrawn ones are taken off; saturates)."
             ],
             "type": "u16"
           },
@@ -1861,6 +1898,22 @@
           {
             "name": "bump",
             "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OfferClosed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "job",
+            "type": "pubkey"
+          },
+          {
+            "name": "introer",
+            "type": "pubkey"
           }
         ]
       }

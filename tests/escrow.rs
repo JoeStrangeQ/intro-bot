@@ -9,12 +9,12 @@
 use anchor_lang::{
     prelude::Pubkey,
     solana_program::{bpf_loader_upgradeable, instruction::Instruction},
-    AccountDeserialize, InstructionData, ToAccountMetas,
+    AccountDeserialize, Discriminator, InstructionData, ToAccountMetas,
 };
 use intro_escrow::{
     accounts as acc, instruction as ix, Board, Config, Introer, Job, Offer, BOARD_LEN,
-    CONFIRM_WINDOW, LAMPORTS_PER_SOL as SOL, MAX_BID, MIN_BID, OFFER_RING, STATUS_APPROVED,
-    STATUS_MADE, STATUS_OPEN, TEXT_LEN, WORK_WINDOW,
+    CANCEL_DELAY, CONFIRM_WINDOW, LAMPORTS_PER_SOL as SOL, MAX_BID, MIN_BID, OFFER_RING,
+    STATUS_APPROVED, STATUS_MADE, STATUS_OPEN, TEXT_LEN, WORK_WINDOW,
 };
 use litesvm::LiteSVM;
 use solana_clock::Clock;
@@ -52,8 +52,25 @@ fn job_key(requester: &Pubkey, nonce: u64) -> Pubkey {
     pda(&[b"job", requester.as_ref(), &nonce.to_le_bytes()])
 }
 
+thread_local! {
+    /// Serial of the latest post at each job address, recorded by `T::run`.
+    static SERIALS: std::cell::RefCell<std::collections::HashMap<Pubkey, u64>> =
+        std::cell::RefCell::default();
+}
+
+fn offer_key_at(job: &Pubkey, serial: u64, wallet: &Pubkey) -> Pubkey {
+    pda(&[
+        b"offer",
+        job.as_ref(),
+        &serial.to_le_bytes(),
+        wallet.as_ref(),
+    ])
+}
+
+/// Offer PDA on the latest post at `job`.
 fn offer_key(job: &Pubkey, wallet: &Pubkey) -> Pubkey {
-    pda(&[b"offer", job.as_ref(), wallet.as_ref()])
+    let serial = SERIALS.with(|s| s.borrow().get(job).copied().unwrap_or(0));
+    offer_key_at(job, serial, wallet)
 }
 
 /// Zero-padded text field.
@@ -235,13 +252,17 @@ fn close_offer_ix(caller: Pubkey, offer: Pubkey, wallet: Pubkey, job: Pubkey) ->
 }
 
 fn approve_ix(requester: Pubkey, job: Pubkey, introer_wallet: Pubkey) -> Instruction {
+    approve_with(requester, job, offer_key(&job, &introer_wallet))
+}
+
+fn approve_with(requester: Pubkey, job: Pubkey, offer: Pubkey) -> Instruction {
     build(
         acc::Approve {
             requester,
             job,
-            offer: offer_key(&job, &introer_wallet),
+            offer,
         },
-        ix::Approve { introer_wallet },
+        ix::Approve {},
     )
 }
 
@@ -398,7 +419,15 @@ impl T {
     }
 
     fn run(&mut self, payer: &Keypair, ix: Instruction) -> Result<(), String> {
+        let posted = ix
+            .data
+            .starts_with(ix::PostJob::DISCRIMINATOR)
+            .then(|| ix.accounts[3].pubkey);
         let result = send(&mut self.svm, payer, ix);
+        if let (Ok(()), Some(job)) = (&result, posted) {
+            let serial = self.job(&job).serial;
+            SERIALS.with(|s| s.borrow_mut().insert(job, serial));
+        }
         self.check_books();
         result
     }
@@ -855,20 +884,38 @@ fn board_ring_wraps_around() {
 }
 
 #[test]
+fn cancel_job_waits_an_hour() {
+    let mut t = T::new();
+    let requester = t.user(10);
+    let job = t.post(&requester, SOL);
+    t.warp(CANCEL_DELAY - 1);
+    fails(
+        t.run(&requester, cancel_ix(requester.pubkey(), job)),
+        "TooEarly",
+    );
+    t.warp(1);
+    t.run(&requester, cancel_ix(requester.pubkey(), job))
+        .unwrap();
+}
+
+#[test]
 fn cancel_job_only_by_requester_and_only_open() {
     let mut t = T::new();
     let requester = t.user(10);
     let stranger = t.user(1);
     let job = t.post(&requester, SOL);
     // A stranger can't cancel, even naming the requester's job.
+    t.warp(CANCEL_DELAY);
     assert!(t.run(&stranger, cancel_ix(stranger.pubkey(), job)).is_err());
     let before = t.lamports(&requester.pubkey());
     let held = t.lamports(&job);
+    t.warp(CANCEL_DELAY);
     t.run(&requester, cancel_ix(requester.pubkey(), job))
         .unwrap();
     assert_eq!(t.lamports(&requester.pubkey()), before + held - FEE);
 
     let (requester, _, job) = t.approved_job(SOL);
+    t.warp(CANCEL_DELAY);
     fails(
         t.run(&requester, cancel_ix(requester.pubkey(), job)),
         "BadStatus",
@@ -974,6 +1021,35 @@ fn withdraw_offer_rules() {
 }
 
 #[test]
+fn withdraw_offer_drops_it_from_the_ring_and_count() {
+    let mut t = T::new();
+    let requester = t.user(10);
+    let ana = t.introer_named("Ana");
+    let bo = t.introer_named("Bo");
+    let job = t.post(&requester, SOL);
+    t.offer(&ana, job).unwrap();
+    t.offer(&bo, job).unwrap();
+    t.run(&ana, withdraw_offer_ix(ana.pubkey(), job)).unwrap();
+    let stored = t.job(&job);
+    assert_eq!(stored.offer_count, 1);
+    assert!(!stored.offers.contains(&ana.pubkey()));
+    assert!(stored.offers.contains(&bo.pubkey()));
+    // Offering again lists Ana once.
+    t.offer(&ana, job).unwrap();
+    let stored = t.job(&job);
+    assert_eq!(stored.offer_count, 2);
+    assert_eq!(
+        stored.offers.iter().filter(|w| **w == ana.pubkey()).count(),
+        1
+    );
+    // Withdrawing after the job is gone leaves nothing to update.
+    t.warp(CANCEL_DELAY);
+    t.run(&requester, cancel_ix(requester.pubkey(), job))
+        .unwrap();
+    t.run(&bo, withdraw_offer_ix(bo.pubkey(), job)).unwrap();
+}
+
+#[test]
 fn withdrawn_offer_cannot_be_approved() {
     let mut t = T::new();
     let requester = t.user(10);
@@ -1003,6 +1079,7 @@ fn close_offer_only_once_the_job_is_gone() {
         ),
         "JobLive",
     );
+    t.warp(CANCEL_DELAY);
     t.run(&requester, cancel_ix(requester.pubkey(), job))
         .unwrap();
     // Rent must go to the introer.
@@ -1048,22 +1125,29 @@ fn reposting_at_the_same_address_does_not_revive_old_offers() {
     let job = job_key(&r, 7);
     t.jobs.push(job);
     t.offer(&ana, job).unwrap();
+    t.warp(CANCEL_DELAY);
     t.run(&requester, cancel_ix(r, job)).unwrap();
     // Same nonce again: a new post at the same address.
     t.run(&requester, post_ix(r, 7, pad("B"), pad("@a"), SOL))
         .unwrap();
     t.jobs.push(job);
     assert_eq!(t.job(&job).serial, 1);
-    // The old offer can't be approved on the new post...
-    fails(t.approve(&requester, job, ana.pubkey()), "StaleOffer");
-    // ...and anyone can clear it, after which Ana can offer again.
-    let offer = offer_key(&job, &ana.pubkey());
+    assert_eq!(t.job(&job).offer_count, 0);
+    // The old offer can't be approved on the new post (its seeds name the
+    // old serial)...
+    let old = offer_key_at(&job, 0, &ana.pubkey());
+    assert!(t.run(&requester, approve_with(r, job, old)).is_err());
+    // ...anyone can clear it, rent back to Ana...
     let anyone = t.user(1);
+    let before = t.lamports(&ana.pubkey());
+    let rent = t.lamports(&old);
     t.run(
         &anyone,
-        close_offer_ix(anyone.pubkey(), offer, ana.pubkey(), job),
+        close_offer_ix(anyone.pubkey(), old, ana.pubkey(), job),
     )
     .unwrap();
+    assert_eq!(t.lamports(&ana.pubkey()), before + rent);
+    // ...and Ana offers on the new post as usual.
     t.offer(&ana, job).unwrap();
     t.approve(&requester, job, ana.pubkey()).unwrap();
 }
@@ -1083,8 +1167,7 @@ fn approve_needs_the_requester_an_offer_and_open() {
     // An offer on another job doesn't count.
     let other = t.post(&requester, SOL);
     t.offer(&bo, other).unwrap();
-    let mut ix = approve_ix(requester.pubkey(), job, bo.pubkey());
-    ix.accounts[2].pubkey = offer_key(&other, &bo.pubkey());
+    let ix = approve_with(requester.pubkey(), job, offer_key(&other, &bo.pubkey()));
     assert!(t.run(&requester, ix).is_err());
     // Only the requester approves.
     let stranger = t.user(1);
@@ -1150,6 +1233,7 @@ fn paused_never_blocks_payouts_or_refunds() {
         admin_ix(admin.pubkey(), ix::SetPaused { paused: true }),
     )
     .unwrap();
+    t.warp(CANCEL_DELAY);
     t.run(&requester, cancel_ix(requester.pubkey(), to_cancel))
         .unwrap();
     t.made(&ana, to_confirm).unwrap();
@@ -1425,6 +1509,7 @@ fn write_instruction_fixtures() {
         &introer,
         withdraw_offer_ix(i, job(2)),
     );
+    t.warp(CANCEL_DELAY);
     go(&mut t, "cancel_job", &requester, cancel_ix(r, job(2)));
     for nonce in [3, 4] {
         let ix = post(&mut t, nonce);

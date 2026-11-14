@@ -88,11 +88,19 @@ All accounts are fixed size. Text is UTF-8, zero-padded to 32 bytes, and must no
 Integers are little-endian. Offsets include the 8-byte discriminator.
 
 **Additions to the spec above** (for safety):
-- `Board.posted` counts jobs ever posted; each job gets `serial = posted`. Each `Offer` stores
-  `job_serial`. If a requester re-posts with the same nonce after the job closed (same
-  address), old offers don't count: `approve` refuses them (`StaleOffer`) and anyone can
-  `close_offer` them.
+- `Board.posted` counts jobs ever posted; each job gets `serial = posted`. The Offer PDA is
+  `["offer", job, serial u64 le, introer_wallet]` and stores `job_serial`. If a requester
+  re-posts with the same nonce after the job closed (same address), old offers have other
+  addresses, so they can't be approved; anyone can `close_offer` them.
+- `cancel_job` only from 1 hour after `created_at` (`TooEarly` before). Without it, post +
+  cancel could cheaply flush the 64-slot board. Remaining risk: someone willing to lock
+  64 small bids for an hour can still push others off the board; admin `set_paused` is the
+  backstop, and clients can also find jobs by other means.
+- The offers ring holds each wallet once. `withdraw_offer` on a live job removes the wallet
+  from the ring and lowers `offer_count`, so `offer_count` is the number of live offers.
+- `approve` takes no args: it approves `offer.introer` of the Offer account passed.
 - `Board` is zero-copy (it's too big for the stack), so it has 6 padding bytes before `posted`.
+- Events: `close_offer` emits `OfferClosed{job, introer}`.
 - `update_introer(badge_id, name)` takes both fields.
 - `offer` needs the introer PDA; that's what "registered" means. `offer_count` saturates.
 - Refund wait for anyone but the requester: `+ CONFIRM_WINDOW` (72 h) on top of the requester's.
@@ -128,13 +136,12 @@ jobs_done u32 @80, earned u64 @84, created_at i64 @92, bump @100.
 
 The offers ring is last: a board listing can read bytes 0..220 with a data slice.
 
-`Offer` ["offer", job, introer_wallet], 89 bytes: job @8, introer (wallet) @40,
+`Offer` ["offer", job, job_serial u64 le, introer_wallet], 89 bytes: job @8, introer (wallet) @40,
 job_serial u64 @72, created_at i64 @80, bump @88.
 
 Instruction args (Borsh after the 8-byte discriminator): `register_introer(badge_id [u8;8],
 name [u8;32])`, `update_introer(badge_id [u8;8], name [u8;32])`, `post_job(nonce u64, who [u8;32],
-company [u8;32], telegram [u8;32], bid u64)`, `approve(introer_wallet Pubkey)`,
-`propose_admin(Pubkey)`, `set_paused(bool)`. Others take no args.
+company [u8;32], telegram [u8;32], bid u64)`, `propose_admin(Pubkey)`, `set_paused(bool)`. Others take no args.
 
 Account order (s = signer, w = writable):
 
@@ -148,15 +155,15 @@ Account order (s = signer, w = writable):
 | `post_job` | requester (s,w), config, board (w), job (w), system_program |
 | `cancel_job` | requester (s,w), job (w) |
 | `offer` | wallet (s,w), config, introer, job (w), offer (w), system_program |
-| `withdraw_offer` | wallet (s,w), offer (w), job |
+| `withdraw_offer` | wallet (s,w), offer (w), job (w, = offer.job) |
 | `close_offer` | caller (s), offer (w), wallet (w, = offer.introer), job (= offer.job) |
-| `approve` | requester (s), job (w), offer (the chosen introer's) |
+| `approve` | requester (s), job (w), offer (the chosen one, on this post) |
 | `mark_made` | wallet (s, = job.approved), job (w) |
 | `confirm` | requester (s,w), job (w), introer (w, PDA of job.approved), wallet (w, = job.approved) |
 | `refund_expired` / `refund_unconfirmed` | caller (s), job (w), requester (w) |
 
 Events: `JobPosted{job, requester, bid}`, `JobCancelled{job}`, `Offered{job, introer}`,
-`OfferWithdrawn{job, introer}` (also on `close_offer`), `Approved{job, introer}`,
+`OfferWithdrawn{job, introer}`, `OfferClosed{job, introer}`, `Approved{job, introer}`,
 `Made{job, made_at}`, `Receipt{job, introer, requester, bid, jobs_done, earned}`,
 `Refunded{job, reason}` (0 cancelled, 1 expired, 2 unconfirmed), `IntroerRegistered`, and the
 admin events. `introer` in events is the wallet.
