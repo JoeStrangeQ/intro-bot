@@ -1,0 +1,13 @@
+{
+  "id": "intro-bot",
+  "name": "Intro Bot",
+  "version": "2.0.0",
+  "author": "@botbotcap",
+  "summary": "Get paid for intros at Breakpoint, or bid for one. Sign on your phone. By BotBot.",
+  "description": "Introers show their offer and queue; anyone nearby can bid SOL for an intro. The bid waits in an on-chain escrow and the introer is paid only when you confirm. Every step is signed on your phone wallet by QR; the badge holds no keys. Ask me about BotBot: botbotcap.com",
+  "icon": "heart",
+  "accent": "6A50D8",
+  "category": "social",
+  "permissions": ["rpc", "http", "mesh", "led"],
+  "hosts": ["relay.botbotcap.com"]
+}
