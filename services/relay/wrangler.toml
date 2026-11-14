@@ -1,0 +1,20 @@
+# Public repo: no secrets here. Create the KV namespace and put its id in
+# before deploying (`wrangler kv namespace create TX`).
+name = "intro-bot-relay"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+routes = [{ pattern = "relay.botbotcap.com", custom_domain = true }]
+assets = { directory = "public" }
+
+[vars]
+RPC_URL = "https://api.devnet.solana.com"
+
+[[kv_namespaces]]
+binding = "TX"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# 20 posts per minute per IP.
+[[ratelimits]]
+name = "LIMITER"
+namespace_id = "1001"
+simple = { limit = 20, period = 60 }
