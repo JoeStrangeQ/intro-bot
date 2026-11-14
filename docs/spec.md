@@ -18,6 +18,8 @@ Relay: `https://relay.botbotcap.com` (Solana Pay transaction requests only).
 
 ## Program: `intro_escrow`
 
+> Superseded by `docs/spec-v2.md` (requester-first board). The v1 program below is replaced.
+
 Program id: `GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC` (keypair kept outside the repo).
 IDL: `idl/intro_escrow.json`. Deploy steps: `docs/deploy.md`.
 Native SOL only. All amounts in lamports (u64).

@@ -1,0 +1,10 @@
+{
+  "name": "withdraw_offer",
+  "program_id": "GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC",
+  "accounts": [
+    { "pubkey": "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu", "signer": true, "writable": true },
+    { "pubkey": "ChA4GPfDGEZSxjK2atz5w4tNTE5VPFSFRnsnzwYShAyd", "signer": false, "writable": true },
+    { "pubkey": "DGbCkgZdabNLA4kHvwHh5Ug3YEX5EaeQShieYshgBqhk", "signer": false, "writable": true }
+  ],
+  "data_hex": "cb2683eacc7a3596"
+}

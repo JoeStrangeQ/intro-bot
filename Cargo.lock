@@ -1437,6 +1437,7 @@ name = "intro-escrow"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",
+ "bytemuck",
  "solana-native-token",
 ]
 
@@ -1445,6 +1446,7 @@ name = "intro-escrow-tests"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",
+ "bytemuck",
  "intro-escrow",
  "litesvm",
  "solana-account",

@@ -1,0 +1,11 @@
+{
+  "name": "close_offer",
+  "program_id": "GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC",
+  "accounts": [
+    { "pubkey": "EdmxWPmx2WH6WgFfTdu9xfkYf3k1g5wD1zccTVySEEh1", "signer": true, "writable": false },
+    { "pubkey": "B8T1Ec74JaSBHVXvNaGe7zBpBj9iuhtt65Qvrc8Z9Y9z", "signer": false, "writable": true },
+    { "pubkey": "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu", "signer": false, "writable": true },
+    { "pubkey": "Fy31zdAYkcXAthT74fLypXaBV3BdiNe65rzpF2GQz1GK", "signer": false, "writable": false }
+  ],
+  "data_hex": "bf484323efd16184"
+}
