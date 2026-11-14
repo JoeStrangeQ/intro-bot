@@ -32,6 +32,11 @@ const TTL_MS = 600_000;
 const MAX_MESSAGE = 1232 - 1 - 64; // packet size minus one signature
 const MAX_BODY = MAX_MESSAGE * 2 + 64;
 const BLOCKHASH_MS = 5_000;
+// "Connect" links carry no badge message: the wallet signs a memo, and the
+// badge learns the wallet's address from /tx/<id>/who. No typing.
+const CONNECT = 'connect';
+const MEMO = bs58.decode('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
+const MEMO_TEXT = new TextEncoder().encode('Intro Bot by BotBot: connect badge');
 
 type Stub = { fetch(req: Request): Promise<Response> };
 export type Env = {
@@ -62,6 +67,9 @@ export class TxStore {
     }
     const t = await s.get<Entry>('t');
     if (!t || Date.now() > t.exp) return new Response(null, { status: 404 });
+    if (new URL(req.url).pathname.endsWith('/who')) {
+      return new Response(t.by ?? '');
+    }
     if (req.method === 'POST') {
       // Claim for one wallet; that wallet may retry, others get 404.
       const account = await req.text();
@@ -75,9 +83,15 @@ export class TxStore {
   }
 }
 
-const store = (env: Env, id: string, method: string, body?: string) =>
+const store = (
+  env: Env,
+  id: string,
+  method: string,
+  body?: string,
+  sub = '',
+) =>
   env.TX.get(env.TX.idFromName(id)).fetch(
-    new Request(`https://store/${id}`, { method, body }),
+    new Request(`https://store/${id}${sub}`, { method, body }),
   );
 
 const CORS = {
@@ -219,6 +233,22 @@ export async function blockhash(env: Env, fetcher: typeof fetch) {
   return hash;
 }
 
+/** A one-memo transaction signed by `wallet`, proving the connect scan. */
+export function memoTx(wallet: Uint8Array, hash: Uint8Array) {
+  const msg = new Uint8Array([
+    ...[1, 0, 1, 2],
+    ...wallet,
+    ...MEMO,
+    ...hash,
+    ...[1, 1, 0, MEMO_TEXT.length],
+    ...MEMO_TEXT,
+  ]);
+  const tx = new Uint8Array(1 + 64 + msg.length);
+  tx[0] = 1;
+  tx.set(msg, 65);
+  return tx;
+}
+
 export async function handle(
   req: Request,
   env: Env,
@@ -249,6 +279,20 @@ export async function handle(
       if (!put.ok) throw new Error('store failed');
       return json({ url: `solana:${url.origin}/tx/${id}` });
     }
+    if (path === '/connect' && req.method === 'POST') {
+      await limit('create');
+      const id = crypto.randomUUID().replace(/-/g, '');
+      const put = await store(env, id, 'PUT', CONNECT);
+      if (!put.ok) throw new Error('store failed');
+      return json({ id, url: `solana:${url.origin}/tx/${id}` });
+    }
+    const who = /^\/tx\/([0-9a-f]{32})\/who$/.exec(path)?.[1];
+    if (who && req.method === 'GET') {
+      await limit('read');
+      const found = await store(env, who, 'GET', undefined, '/who');
+      if (!found.ok) return json({ error: 'expired or unknown' }, 404);
+      return json({ wallet: (await found.text()) || null });
+    }
     const id = /^\/tx\/([0-9a-f]{32})$/.exec(path)?.[1];
     if (!id || (req.method !== 'GET' && req.method !== 'POST')) {
       return json({ error: 'not found' }, 404);
@@ -276,7 +320,14 @@ export async function handle(
     hash.catch(() => {});
     const found = await store(env, id, 'POST', bs58.encode(account));
     if (!found.ok) return json({ error: 'expired or unknown' }, 404);
-    const msg = fromHex(await found.text());
+    const stored = await found.text();
+    if (stored === CONNECT) {
+      return json({
+        transaction: btoa(String.fromCharCode(...memoTx(account, await hash))),
+        message: 'Connect your badge to Intro Bot',
+      });
+    }
+    const msg = fromHex(stored);
     const { keys, keysAt, hashAt } = check(msg);
     // The wallet must not already be in the message: keys would merge.
     if (keys.some((k) => same(k, account))) throw new Bad('account in use');

@@ -246,6 +246,24 @@ describe('relay', () => {
     expect((await call(path, 'POST', other)).status).toBe(404);
   });
 
+  it('connect: the scanning wallet is reported to the badge', async () => {
+    const res = await call('/connect', 'POST', {});
+    const { id, url } = (await res.json()) as { id: string; url: string };
+    expect(url).toBe(`solana:${ORIGIN}/tx/${id}`);
+    const who = () => call(`/tx/${id}/who`).then((r) => r.json());
+    expect(await who()).toEqual({ wallet: null });
+    const signed = await call(`/tx/${id}`, 'POST', {
+      account: bs58.encode(WALLET),
+    });
+    const { transaction } = (await signed.json()) as { transaction: string };
+    const tx = Uint8Array.from(atob(transaction), (c) => c.charCodeAt(0));
+    // One empty signature, then the memo message with the wallet as payer.
+    expect(Array.from(tx.slice(65, 69))).toEqual([1, 0, 1, 2]);
+    expect(Array.from(tx.slice(69, 101))).toEqual(Array.from(WALLET));
+    expect(await who()).toEqual({ wallet: bs58.encode(WALLET) });
+    expect((await call(`/tx/${'0'.repeat(32)}/who`)).status).toBe(404);
+  });
+
   it('builds links from the serving origin', async () => {
     const res = await handle(
       new Request('http://127.0.0.1:8787/tx', {
