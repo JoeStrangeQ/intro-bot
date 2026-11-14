@@ -90,7 +90,7 @@ Reads the chain with `confirmed` commitment (repo rule). Small answers: the badg
 ## Web app (`apps/intro-bot`)
 Routes: `/` board + "become an introer"; `/b/:wallet` introer page (offer, machine value
 ticker, queue, bid form: target, Telegram, amount); `/r/:request` request page
-(confirm / dispute / withdraw / release / refund buttons by state).
+(confirm / withdraw / refund buttons by state).
 BotBot look: reuse `apps/botbot` theme (Platinum Mac windows, lavender `--desktop #c9bff2`,
 `--brand #6a50d8`, Chicago / Inter / IBM Plex Mono fonts, `BotGlyph` logo). Footer and
 empty states link to https://botbotcap.com. Plain short copy.
