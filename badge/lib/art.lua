@@ -1,20 +1,20 @@
--- lib/art.lua: BotBot's rainbow "B" (botbot-brand glyphs.py): 12x12 cells in 6 bands of
+-- lib/art.lua: BotBot's rainbow bot face (botbot-brand glyphs.py): 12x12 cells in 6 bands of
 -- 2 rows, green to blue, with a 1px black drop shadow at +1,+1. Drawn as pixel art.
 local M = {}
 
 local B = {
-  "##########..",
-  "###########.",
+  ".....##.....",
+  "....####....",
+  "############",
+  "############",
+  "###..##..###",
+  "###..##..###",
+  "############",
+  "############",
   "###......###",
-  "###......###",
-  "###########.",
-  "##########..",
-  "###......###",
-  "###......###",
-  "###......###",
-  "###......###",
-  "###########.",
-  "##########..",
+  "####....####",
+  "############",
+  "############",
 }
 M.RAINBOW = {0x61BB46, 0xFDB827, 0xF5821F, 0xE03A3E, 0x963D97, 0x009DDC}
 local BAND = {"A", "C", "D", "E", "F", "G"}  -- palette letters, top to bottom

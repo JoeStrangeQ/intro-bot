@@ -15,6 +15,7 @@ end
 
 -- Minimal JSON (enough for the API answers and to size storage) ------------
 local json = {}
+local CONNECT_ID = string.rep("ab", 16)
 do
   local function enc(v)
     local t = type(v)
@@ -255,7 +256,7 @@ end
 local function new_world(opts)
   opts = opts or {}
   W = {ms = 0, objs = 0, labels = {}, lists = {}, qr = nil, timers = {}, toasts = {}, store = opts.store or {},
-    accounts = opts.accounts or {}, rpcq = {}, rpc_times = {}, posts = {}, led = {}, hint = "", input = nil,
+    accounts = opts.accounts or {}, rpcq = {}, rpc_times = {}, posts = {}, connects = {}, whos = {}, led = {}, hint = "", input = nil,
     confirm = nil, id = 0, mesh_sent = {}, offline = false, relay_fail = nil}
   local function obj(kind, o)
     W.objs = W.objs + 1
@@ -346,9 +347,13 @@ local function new_world(opts)
     W.rpcq[#W.rpcq + 1] = {method = method, params = params, cb = cb}
   end}
   _G.http = {post = function(url, body, cb)
+    if url == "https://relay.botbotcap.com/connect" then W.connects[#W.connects + 1] = cb return end
     check(url == "https://relay.botbotcap.com/tx", "relay url")
     check(#json.encode(body) <= 2048, "http body <= 2 KB")
     W.posts[#W.posts + 1] = {body = body, cb = cb}
+  end, get = function(url, cb)
+    check(url == "https://relay.botbotcap.com/tx/" .. CONNECT_ID .. "/who", "who url")
+    W.whos[#W.whos + 1] = cb
   end}
   _G.mesh = {
     send = function(to, msg) check(#json.encode(msg) <= 200, "mesh msg <= 200 bytes"); W.mesh_sent[#W.mesh_sent + 1] = msg end,
@@ -420,6 +425,23 @@ local function relay_reply(ok, res)
   if os.getenv("DUMP") then io.open(os.getenv("DUMP"), "a"):write(p.body.message, "\n"):close() end
   callback(p.cb, ok, res or {status = 200, body = json.encode({url = "solana:https://relay.botbotcap.com/tx/abc123"})})
   return read_msg(m)
+end
+-- Answer the connect QR, then the relay's "who" poll with the scanning wallet.
+local function connect_as(wallet)
+  local cb = table.remove(W.connects, 1)
+  assert(cb, "no connect post")
+  callback(cb, true, {status = 200, body = json.encode({id = CONNECT_ID,
+    url = "solana:https://relay.botbotcap.com/tx/" .. CONNECT_ID})})
+  check(W.qr and W.qr.t == "solana:https://relay.botbotcap.com/tx/" .. CONNECT_ID, "connect QR")
+  advance(2000)
+  local w = table.remove(W.whos, 1)
+  assert(w, "no who poll")
+  callback(w, true, {status = 200, body = '{"wallet":null}'})
+  check(W.qr, "still waiting before the scan")
+  advance(2000)
+  w = table.remove(W.whos, 1)
+  assert(w, "no second who poll")
+  callback(w, true, {status = 200, body = json.encode({wallet = wallet})})
 end
 local function has(text)
   for _, l in ipairs(W.labels) do if l.t and l.t:find(text, 1, true) then return true end end
@@ -602,14 +624,14 @@ end
 new_world({accounts = CHAIN})
 check(has("Intro Bot") and has("Robots that earn"), "splash: the B and the CTA")
 advance(1600)
-check(has("Who do you want to meet?") and has("Robots that earn \u{2192} botbotcap.com"), "opens on Request an intro, CTA")
+check(has("Who do you want to meet?") and has("Robots that earn: botbotcap.com"), "opens on Request an intro, CTA")
 check(has("Your Telegram is shown to people who offer."), "Telegram warning")
 check(#W.rpcq == 0, "no rpc without a wallet")
 
 -- Post a job: wallet first, then who, company, bid, Telegram.
 list_select(1)
-check(W.input and W.input.prompt == "Your wallet address", "asks the wallet first")
-type_in(WALLET); flush()
+check(not W.input and W.labels[1] and W.labels[1].t == "Connect", "connects the wallet first, no typing")
+connect_as(WALLET); flush()
 check(W.input and W.input.prompt == "Who do you want to meet?", "then who")
 type_in("Toly"); type_in("Solana Labs"); type_in("0.001")
 check(last_toast() == "At least 0.01 SOL", "bid floor")
