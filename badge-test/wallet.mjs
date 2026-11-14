@@ -70,7 +70,7 @@ async function initConfig(admin) {
     keys: [
       { pubkey: admin.publicKey, isSigner: true, isWritable: true },
       { pubkey: pda('config'), isSigner: false, isWritable: true },
-      { pubkey: pda('directory'), isSigner: false, isWritable: true },
+      { pubkey: pda('board'), isSigner: false, isWritable: true },
       { pubkey: PROGRAM, isSigner: false, isWritable: false },
       { pubkey: programData, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },

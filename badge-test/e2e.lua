@@ -101,7 +101,8 @@ end
 local function balance(key) return tostring(rpc_call("getBalance", {b58e(key), {commitment = "confirmed"}}).value) end
 local function diff(a, b) return math.tointeger(tonumber(b) - tonumber(a)) end
 local function introer_of(w) return escrow.decode_introer(account(escrow.introer_pda(w))) end
-local function request_of(intro, id) return escrow.decode_request(account(escrow.request_pda(intro, id))) end
+local function job_at(pda) return escrow.decode_job(account(pda)) end
+local function serial(pda) return job_at(pda).serial end  -- offers are per job serial
 
 local function key(name)
   local f = assert(io.open(KEYS .. "/" .. name .. ".json"))
@@ -141,122 +142,131 @@ local function time_travel(seconds)
   check(bytes.time(account(CLOCK), 33) >= now + seconds, "clock moved " .. seconds // 3600 .. "h")
 end
 
--- The flow ----------------------------------------------------------------------------
-local admin, introer, req1, req2, other = key("admin"), key("introer"), key("req1"), key("req2"), key("other")
-local INTRO = escrow.introer_pda(introer.pub)
+-- The flow (docs/spec-v2.md) ------------------------------------------------------------
+local admin, ana, kai, req1, req2 = key("admin"), key("introer"), key("other"), key("req1"), key("req2")
 local SOL = 1000000000
 
 local big = decode('{"a":[12345678901,12345678902],"b":5,"c":"x12345678901"}')
 check(big.a[1] == "12345678901" and big.a[2] == "12345678902" and big.b == 5 and big.c == "x12345678901",
   "big numbers become strings, side by side too")
 print("-- chain: " .. RPC_URL .. "   relay: " .. RELAY_URL .. (CAN_TIME and "   (time travel)" or ""))
-check(account(escrow.config_pda()) ~= nil, "config made by init_config (upgrade authority " .. b58e(admin.pub):sub(1, 6) .. "..)")
+check(account(escrow.config_pda()) ~= nil and account(escrow.board_pda()) ~= nil,
+  "config and board made by init_config (upgrade authority " .. b58e(admin.pub):sub(1, 6) .. "..)")
 
--- Register.
-must("register_introer", escrow.ix_register(introer.pub, "E2E-0001", "Founders in Lisbon", "10000000"), introer)
-local x = introer_of(introer.pub)
-check(x and x.wallet == introer.pub and x.offer == "Founders in Lisbon" and x.min_bid == "10000000"
-  and x.badge_id == "E2E-0001" and x.open == 0 and x.jobs == 0 and x.next_id == "0", "badge decodes the live introer")
-local dir = escrow.decode_directory(account(escrow.directory_pda()))
-check(dir and dir[1] == introer.pub, "badge decodes the live directory: introer listed")
-must("register a second introer", escrow.ix_register(other.pub, "E2E-0002", "Someone else", "10000000"), other)
-must("update_introer", escrow.ix_update(introer.pub, "Founders and VCs in Lisbon", "100000000"), introer)
-check(introer_of(introer.pub).offer == "Founders and VCs in Lisbon", "offer updated")
-refused("bid below the min refused", escrow.ix_bid(INTRO, escrow.request_pda(INTRO, "0"), "Toly", "@r1",
-  "50000000"), req1, "BidTooLow")
-refused("bid on yourself refused", escrow.ix_bid(INTRO, escrow.request_pda(INTRO, "0"), "Toly", "@me",
-  "100000000"), introer, "SelfBid")
-refused("bid without Telegram refused", escrow.ix_bid(INTRO, escrow.request_pda(INTRO, "0"), "Toly", "",
-  "100000000"), req1, "BadText")
+-- Introers register.
+must("register_introer (Ana)", escrow.ix_register(ana.pub, "E2E-0001", "Ana"), ana)
+must("register_introer (Kai)", escrow.ix_register(kai.pub, "E2E-0002", "Kai"), kai)
+must("update_introer", escrow.ix_update(ana.pub, "E2E-0001", "Ana (Solana devs)"), ana)
+local x = introer_of(ana.pub)
+check(x and x.wallet == ana.pub and x.name == "Ana (Solana devs)" and x.badge_id == "E2E-0001" and x.jobs == 0,
+  "badge decodes the live introer")
 
--- Five bids fill the queue.
-local amounts = {"100000000", "200000000", "300000000", "400000000", "500000000"}
-for i, amount in ipairs(amounts) do
-  local id = introer_of(introer.pub).next_id
-  must("bid " .. i .. " (" .. sol.format(amount) .. " SOL)",
-    escrow.ix_bid(INTRO, escrow.request_pda(INTRO, id), "Target " .. i, "@req1", amount), req1)
+-- A requester posts jobs: the bid goes into the job's escrow.
+local nonce = 1000
+local function post(who, company, tg, bid, by)
+  nonce = nonce + 1
+  local pda = escrow.job_pda(by.pub, tostring(nonce))
+  return escrow.ix_post_job(pda, tostring(nonce), who, company, tg, bid), pda
 end
-x = introer_of(introer.pub)
-check(x.open == 5 and #x.slots == 5 and x.next_id == "5", "queue full: 5 open slots")
-local q = request_of(INTRO, "0")
-check(q and q.requester == req1.pub and q.bid == "100000000" and q.status == escrow.OPEN and q.target == "Target 1"
-  and q.telegram == "@req1" and q.introer == INTRO, "badge decodes the live request")
-
--- Outbid the lowest.
-local lo, need = escrow.lowest(x)
-check(lo.id == "0" and need == "110000000", "lowest is id 0, outbid needs 0.11 SOL")
-local low = {pda = escrow.request_pda(INTRO, lo.id), requester = req1.pub}
-refused("outbid under +10% refused", escrow.ix_bid(INTRO, escrow.request_pda(INTRO, "5"), "Vitalik", "@req2",
-  "109999999", low), req2, "BidTooLow")
-refused("bid on a full queue without the lowest refused", escrow.ix_bid(INTRO, escrow.request_pda(INTRO, "5"),
-  "Vitalik", "@req2", "200000000"), req2, "QueueFull")
+local ix, J1 = post("Toly", "Solana Labs", "@req1", "50000000", req1)
+refused("bid below 0.01 SOL refused", select(1, post("Toly", "Solana Labs", "@req1", "5000000", req1)), req1, "BidTooLow")
+refused("empty Telegram refused", select(1, post("Toly", "Solana Labs", "", "50000000", req1)), req1, "BadText")
+ix, J1 = post("Toly", "Solana Labs", "@req1", tostring(SOL // 2), req1)
 local r1 = balance(req1.pub)
-must("outbid at full queue", escrow.ix_bid(INTRO, escrow.request_pda(INTRO, "5"), "Vitalik", "@req2", need, low), req2)
-check(account(low.pda) == nil, "outbid request closed")
-check(diff(r1, balance(req1.pub)) > 100000000, "outbid requester refunded bid + rent")
-x = introer_of(introer.pub)
-check(x.open == 5 and x.next_id == "6", "still 5 open, next id 6")
+must("post_job", ix, req1)
+check(diff(r1, balance(req1.pub)) < -(SOL // 2), "bid held in the job")
+local j = job_at(J1)
+check(j and j.requester == req1.pub and j.who == "Toly" and j.company == "Solana Labs" and j.telegram == "@req1"
+  and j.bid == tostring(SOL // 2) and j.status == escrow.OPEN and j.offer_count == 0, "badge decodes the live job")
+local ok, rows = wait(function(cb) chain.many({J1}, cb, 5, escrow.JOB.LIST) end)
+check(ok and escrow.decode_job(rows[1]).who == "Toly", "board listing: 220-byte slice decodes")
+local board = escrow.decode_board(account(escrow.board_pda()))
+check(board and board[1] == J1, "badge decodes the live board: newest job first")
 
--- Accept, made, confirm: the introer is paid.
-local P1 = escrow.request_pda(INTRO, "1")
-must("accept", escrow.ix_accept(INTRO, P1), introer)
-check(request_of(INTRO, "1").status == escrow.ACCEPTED and introer_of(introer.pub).open == 4, "accepted, open 4")
-refused("accept by another registered introer refused", escrow.ix_accept(escrow.introer_pda(other.pub), P1), other, "ConstraintSeeds")
-must("mark_made", escrow.ix_made(INTRO, P1), introer)
-check(request_of(INTRO, "1").status == escrow.MADE, "made: waiting for confirm")
-refused("confirm by another requester refused", escrow.ix_confirm(INTRO, P1, introer.pub), req2, "WrongRequester")
-local before, ib = introer_of(introer.pub), balance(introer.pub)
-must("confirm", escrow.ix_confirm(INTRO, P1, introer.pub), req1)
-local after = introer_of(introer.pub)
-check(diff(ib, balance(introer.pub)) == 200000000, "introer paid exactly the bid (0.2 SOL)")
-check(after.jobs == before.jobs + 1 and after.earned == sol.add(before.earned, "200000000"), "jobs and earned rise")
-check(account(P1) == nil, "confirmed request closed")
-check(sol.cmp(sol.machine_value(after.earned, after.created_at, os.time()), "0") > 0, "machine value shows")
+-- Introers offer.
+refused("requester can't offer on their own job", escrow.ix_offer(req1.pub, J1, serial(J1)), req1, "AccountNotInitialized")
+local S1 = serial(J1)
+must("offer (Ana)", escrow.ix_offer(ana.pub, J1, serial(J1)), ana)
+must("offer (Kai)", escrow.ix_offer(kai.pub, J1, serial(J1)), kai)
+sh("sleep 6")  -- a new blockhash (the relay keeps one for 5 s), or it's the same transaction again
+refused("offer twice refused", escrow.ix_offer(kai.pub, J1, serial(J1)), kai, "already in use")
+j = job_at(J1)
+check(j.offer_count == 2 and j.offers[1] == kai.pub and j.offers[2] == ana.pub, "offer pool: newest first")
+local o = escrow.decode_offer(account(escrow.offer_pda(J1, S1, ana.pub)))
+check(o and o.job == J1 and o.introer == ana.pub and o.job_serial == j.serial, "badge decodes the live offer")
+local J0
+ix, J0 = post("Raj", "Solana Labs", "@ana", "50000000", ana)
+must("an introer can post a job too", ix, ana)
+refused("offer on your own job refused", escrow.ix_offer(ana.pub, J0, serial(J0)), ana, "SelfOffer")
+refused("cancel_job in the first hour refused", escrow.ix_cancel_job(J0), ana, "TooEarly")
+must("withdraw_offer (Kai)", escrow.ix_withdraw_offer(kai.pub, J1, serial(J1)), kai)
+check(account(escrow.offer_pda(J1, S1, kai.pub)) == nil, "offer withdrawn")
+j = job_at(J1)
+check(j.offer_count == 1 and #j.offers == 1 and j.offers[1] == ana.pub, "withdrawn offer leaves the ring")
 
--- Decline: the requester gets the bid back.
-local P2 = escrow.request_pda(INTRO, "2")
-r1 = balance(req1.pub)
-must("decline", escrow.ix_decline(INTRO, P2, req1.pub), introer)
-check(account(P2) == nil and diff(r1, balance(req1.pub)) > 300000000, "declined: bid + rent refunded")
+-- The requester approves Ana; she makes the intro; they confirm and she is paid.
+refused("approve by someone else refused", escrow.ix_approve(J1, serial(J1), ana.pub), req2, "ConstraintSeeds")
+must("approve (Ana)", escrow.ix_approve(J1, serial(J1), ana.pub), req1)
+check(job_at(J1).status == escrow.APPROVED and job_at(J1).approved == ana.pub, "approved")
+refused("mark_made by an introer not picked refused", escrow.ix_mark_made(J1), kai, "Unauthorized")
+refused("cancel after approving refused", escrow.ix_cancel_job(J1), req1, "BadStatus")
+must("mark_made", escrow.ix_mark_made(J1), ana)
+check(job_at(J1).status == escrow.MADE, "made: waiting for confirm")
+local before, ab = introer_of(ana.pub), balance(ana.pub)
+must("confirm", escrow.ix_confirm(J1, ana.pub), req1)
+local after = introer_of(ana.pub)
+check(diff(ab, balance(ana.pub)) == SOL // 2, "Ana paid exactly the bid (0.5 SOL)")
+check(after.jobs == before.jobs + 1 and after.earned == sol.add(before.earned, tostring(SOL // 2)), "jobs and earned rise")
+check(account(J1) == nil, "confirmed job closed")
+local kb = balance(ana.pub)
+must("close_offer (anyone, job closed)", escrow.ix_close_offer(J1, S1, ana.pub), req2)
+check(account(escrow.offer_pda(J1, S1, ana.pub)) == nil and diff(kb, balance(ana.pub)) > 0, "offer rent back to Ana")
 
--- Withdraw: not before 24h.
-local P3 = escrow.request_pda(INTRO, "3")
-refused("withdraw before 24h refused", escrow.ix_withdraw(INTRO, P3), req1, "TooEarly")
+-- Cancel an open job: the bid comes back.
+local J2
+ix, J2 = post("Mert", "Helius", "@req1", "200000000", req1)
+must("post_job 2", ix, req1)
+refused("cancel_job before 1h refused", escrow.ix_cancel_job(J2), req1, "TooEarly")
 
--- Requests for the timed paths: 4 accepted (work window), 5 made (confirm window).
-local P4, P5 = escrow.request_pda(INTRO, "4"), escrow.request_pda(INTRO, "5")
-must("accept id 4", escrow.ix_accept(INTRO, P4), introer)
-must("accept id 5", escrow.ix_accept(INTRO, P5), introer)
-must("mark_made id 5", escrow.ix_made(INTRO, P5), introer)
-refused("refund_unconfirmed before 72h refused", escrow.ix_refund("refund_unconfirmed", INTRO, P5, req2.pub), req1, "NotExpired")
-refused("refund_expired before 7 days refused", escrow.ix_refund("refund_expired", INTRO, P4, tx.WALLET), req1, "NotExpired")
+-- Jobs for the timed paths: J3 approved (work window), J4 made (confirm window).
+local J3, J4
+ix, J3 = post("Lily", "Solana Foundation", "@req2", "300000000", req2)
+must("post_job 3", ix, req2)
+ix, J4 = post("Meow", "Jupiter", "@req2", "400000000", req2)
+must("post_job 4", ix, req2)
+must("offer on 3", escrow.ix_offer(kai.pub, J3, serial(J3)), kai)
+must("offer on 4", escrow.ix_offer(kai.pub, J4, serial(J4)), kai)
+must("approve 3", escrow.ix_approve(J3, serial(J3), kai.pub), req2)
+must("approve 4", escrow.ix_approve(J4, serial(J4), kai.pub), req2)
+must("mark_made 4", escrow.ix_mark_made(J4), kai)
+refused("refund_unconfirmed before 72h refused", escrow.ix_refund("refund_unconfirmed", J4), req2, "NotExpired")
+refused("refund_expired before 7 days refused", escrow.ix_refund("refund_expired", J3), req2, "NotExpired")
 
 if not CAN_TIME then
-  skipped[#skipped + 1] = "withdraw after 24h, refund_unconfirmed after 72h, refund_expired after 7 days "
+  skipped[#skipped + 1] = "cancel_job after 1h, refund_unconfirmed after 72h, refund_expired after 7 days, mark_made deadline "
     .. "(this chain can't move its clock: run with surfpool)"
 else
-  time_travel(24 * 3600 + 60)
+  time_travel(3600 + 60)
   r1 = balance(req1.pub)
-  must("withdraw after 24h", escrow.ix_withdraw(INTRO, P3), req1)
-  check(account(P3) == nil and diff(r1, balance(req1.pub)) > 0, "withdrawn: refunded")
-
-  time_travel(72 * 3600 + 60)
+  must("cancel_job after 1h", escrow.ix_cancel_job(J2), req1)
+  check(account(J2) == nil and diff(r1, balance(req1.pub)) > 200000000, "cancelled: bid + rent back")
+  must("cancel_job after 1h (Ana's)", escrow.ix_cancel_job(J0), ana)
+  time_travel(71 * 3600)
+  refused("refund_unconfirmed by someone else at 72h refused", escrow.ix_refund("refund_unconfirmed", J4, req2.pub), req1, "NotExpired")
   local r2 = balance(req2.pub)
-  must("refund_unconfirmed after 72h (anyone)", escrow.ix_refund("refund_unconfirmed", INTRO, P5, req2.pub), req1)
-  check(account(P5) == nil and diff(r2, balance(req2.pub)) >= 110000000, "unconfirmed: requester refunded")
-
-  time_travel(7 * 24 * 3600 - 72 * 3600 - 24 * 3600)  -- about 7 days after accept
-  refused("mark_made after 7 days refused", escrow.ix_made(INTRO, P4), introer, "WorkExpired")
-  refused("refund_expired by someone else at 7 days refused", escrow.ix_refund("refund_expired", INTRO, P4, req1.pub), req2, "NotExpired")
-  r1 = balance(req1.pub)
-  -- As the badge builds it: the requester is the signer, so both are the placeholder.
-  must("refund_expired by the requester at 7 days", escrow.ix_refund("refund_expired", INTRO, P4, tx.WALLET), req1)
-  check(account(P4) == nil and diff(r1, balance(req1.pub)) > 0, "expired: requester refunded")
+  must("refund_unconfirmed by the requester after 72h", escrow.ix_refund("refund_unconfirmed", J4), req2)
+  check(account(J4) == nil and diff(r2, balance(req2.pub)) > 400000000 - 10000, "unconfirmed: refunded")
+  time_travel(4 * 24 * 3600)  -- 7 days after approving
+  refused("mark_made after 7 days refused", escrow.ix_mark_made(J3), kai, "WorkExpired")
+  refused("refund_expired by someone else at 7 days refused", escrow.ix_refund("refund_expired", J3, req2.pub), req1, "NotExpired")
+  time_travel(72 * 3600 + 60)
+  r2 = balance(req2.pub)
+  must("refund_expired by anyone 72h later", escrow.ix_refund("refund_expired", J3, req2.pub), req1)
+  check(account(J3) == nil and diff(r2, balance(req2.pub)) > 300000000, "expired: requester refunded")
 end
 
-x = introer_of(introer.pub)
-check(x.open == (CAN_TIME and 0 or 1) and x.jobs == 1 and x.earned == "200000000",
-  "end: open count right, 1 job, 0.2 SOL earned")
+x = introer_of(ana.pub)
+check(x.jobs == 1 and x.earned == tostring(SOL // 2), "end: Ana 1 job, 0.5 SOL earned")
 
 print(string.format("\n%d passed, %d failed", passes, fails))
 for _, s in ipairs(skipped) do print("not tested here: " .. s) end
