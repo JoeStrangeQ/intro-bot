@@ -625,6 +625,13 @@ CHAIN[b58e(NEWR)] = enc_request({introer = OI, requester = string.rep("\9", 32),
 advance(20000)
 list_select(1)
 check(W.lists[1].rows[1] == "Confirm + pay" and W.lists[1].rows[2] == "Refund (72h passed)", "made: confirm, refund")
+list_select(2)
+m = relay_reply(true)
+ix = m.ixs[1]
+check(ix.data == escrow.DISC.refund_unconfirmed and ix.accounts[1] == m.keys[1] and ix.accounts[4] == m.keys[1]
+  and #m.keys == 4 and m.w[m.keys[1]], "own refund: the requester is the placeholder signer, once")
+key("back")
+list_select(1)
 list_select(1); advance(30)
 m = relay_reply(true)
 ix = m.ixs[1]

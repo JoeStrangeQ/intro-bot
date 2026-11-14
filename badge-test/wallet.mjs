@@ -25,13 +25,15 @@ const load = (path) =>
   Keypair.fromSecretKey(Uint8Array.from(JSON.parse(readFileSync(path, 'utf8'))));
 const disc = (name) => createHash('sha256').update(`global:${name}`).digest().subarray(0, 8);
 
+// Confirm against the blockhash the transaction was signed with (a fresh one could
+// outlive it); a blockhash is good for 150 blocks.
 async function send(tx) {
+  const height = await connection.getBlockHeight('confirmed');
   const signature = await connection.sendRawTransaction(tx.serialize(), {
     preflightCommitment: 'confirmed',
   });
-  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
   const res = await connection.confirmTransaction(
-    { signature, blockhash, lastValidBlockHeight },
+    { signature, blockhash: tx.recentBlockhash, lastValidBlockHeight: height + 150 },
     'confirmed',
   );
   if (res.value.err) throw new Error(`tx failed: ${JSON.stringify(res.value.err)}`);

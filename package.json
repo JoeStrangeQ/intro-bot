@@ -8,7 +8,6 @@
     "e2e": "bash badge-test/e2e.sh"
   },
   "devDependencies": {
-    "@solana/web3.js": "1.98.4",
-    "bs58": "6.0.0"
+    "@solana/web3.js": "1.98.4"
   }
 }

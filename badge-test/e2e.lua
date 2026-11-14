@@ -42,8 +42,10 @@ end
 
 -- The badge server turns whole numbers past 32 bits into strings: do the same.
 local function decode(text)
-  text = text:gsub('([:,%[]%s*)(%d%d%d%d%d%d%d%d%d%d+)([,%]}])', function(a, n, b)
-    if tonumber(n) > 2147483647 then return a .. '"' .. n .. '"' .. b end
+  -- A whole number after : , or [ (never inside base64 or base58 text), ended by a frontier
+  -- so the next delimiter stays for the next number.
+  text = text:gsub('([:,%[]%s*)(%d%d%d%d%d%d%d%d%d%d+)%f[^%d]', function(a, n)
+    if tonumber(n) > 2147483647 then return a .. '"' .. n .. '"' end
   end)
   return host.json.decode_lua(text)
 end
@@ -140,10 +142,13 @@ local function time_travel(seconds)
 end
 
 -- The flow ----------------------------------------------------------------------------
-local admin, introer, req1, req2 = key("admin"), key("introer"), key("req1"), key("req2")
+local admin, introer, req1, req2, other = key("admin"), key("introer"), key("req1"), key("req2"), key("other")
 local INTRO = escrow.introer_pda(introer.pub)
 local SOL = 1000000000
 
+local big = decode('{"a":[12345678901,12345678902],"b":5,"c":"x12345678901"}')
+check(big.a[1] == "12345678901" and big.a[2] == "12345678902" and big.b == 5 and big.c == "x12345678901",
+  "big numbers become strings, side by side too")
 print("-- chain: " .. RPC_URL .. "   relay: " .. RELAY_URL .. (CAN_TIME and "   (time travel)" or ""))
 check(account(escrow.config_pda()) ~= nil, "config made by init_config (upgrade authority " .. b58e(admin.pub):sub(1, 6) .. "..)")
 
@@ -154,6 +159,7 @@ check(x and x.wallet == introer.pub and x.offer == "Founders in Lisbon" and x.mi
   and x.badge_id == "E2E-0001" and x.open == 0 and x.jobs == 0 and x.next_id == "0", "badge decodes the live introer")
 local dir = escrow.decode_directory(account(escrow.directory_pda()))
 check(dir and dir[1] == introer.pub, "badge decodes the live directory: introer listed")
+must("register a second introer", escrow.ix_register(other.pub, "E2E-0002", "Someone else", "10000000"), other)
 must("update_introer", escrow.ix_update(introer.pub, "Founders and VCs in Lisbon", "100000000"), introer)
 check(introer_of(introer.pub).offer == "Founders and VCs in Lisbon", "offer updated")
 refused("bid below the min refused", escrow.ix_bid(INTRO, escrow.request_pda(INTRO, "0"), "Toly", "@r1",
@@ -195,7 +201,7 @@ check(x.open == 5 and x.next_id == "6", "still 5 open, next id 6")
 local P1 = escrow.request_pda(INTRO, "1")
 must("accept", escrow.ix_accept(INTRO, P1), introer)
 check(request_of(INTRO, "1").status == escrow.ACCEPTED and introer_of(introer.pub).open == 4, "accepted, open 4")
-refused("accept by someone else refused", escrow.ix_accept(escrow.introer_pda(req2.pub), P1), req2, "AccountNotInitialized")
+refused("accept by another registered introer refused", escrow.ix_accept(escrow.introer_pda(other.pub), P1), other, "ConstraintSeeds")
 must("mark_made", escrow.ix_made(INTRO, P1), introer)
 check(request_of(INTRO, "1").status == escrow.MADE, "made: waiting for confirm")
 refused("confirm by another requester refused", escrow.ix_confirm(INTRO, P1, introer.pub), req2, "WrongRequester")
