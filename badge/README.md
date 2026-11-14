@@ -31,7 +31,9 @@ When your job count goes up, the badge plays "JOB DONE!" and flashes its lights.
 ## How it talks to the chain
 
 - Reads with `rpc` on devnet (`getAccountInfo`, `getMultipleAccounts`), every 20 s,
-  within 30 calls a minute.
+  within 30 calls a minute. The badge's `rpc` has no `getProgramAccounts`, so requests
+  are found by address (`["request", introer, id]` for recent ids) and introers by the
+  mesh, a typed wallet, or the program's list of the 32 latest introers.
 - Posts each transaction message to `https://relay.botbotcap.com/tx` and shows the
   `solana:` link it returns as a QR.
 - Watches the changed account until the step lands.
@@ -62,3 +64,5 @@ lua badge-test/sim.lua
 ```
 
 The test lives outside `badge/` so it isn't uploaded. It needs `python3` (`pda.py`).
+It also checks the badge's instructions and account decoding against the program's
+fixtures in `../intro-bot-program/tests/fixtures` (or set `FIXTURES=<dir>`).

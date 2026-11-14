@@ -91,7 +91,7 @@ function M.relay(message, cb)
     if res.status ~= 200 then return cb(false, "relay error " .. tostring(res.status)) end
     local t = json.decode(res.body or "")
     local url = type(t) == "table" and t.url
-    if type(url) ~= "string" or #url > 256 or url:sub(1, #M.RELAY + 7) ~= "solana:" .. M.RELAY then
+    if type(url) ~= "string" or #url > 256 or url:sub(1, #M.RELAY + 8) ~= "solana:" .. M.RELAY .. "/" then
       return cb(false, "bad relay answer")
     end
     cb(true, url)

@@ -51,7 +51,7 @@ local st = {
   me = nil,           -- my Introer account (decoded), false when not registered, nil unknown
   queue = nil,        -- requests to me
   rows = nil,         -- my requests, read from the chain
-  live = {},          -- ids of requests to me that were open last time
+  live = {},          -- [id] = true: requests to me that were live last time (kept)
   nearby = {},        -- [wallet] = {id, at}
   status = "starting", updated = nil, busy = nil, gen = 0,
   screen = nil, w = {}, row = nil, role = nil, pick = nil, sign = nil, anim = nil,
@@ -59,6 +59,9 @@ local st = {
 }
 while #st.spark > SPARK_N do table.remove(st.spark, 1) end
 while #st.mine > MAX_MINE do table.remove(st.mine, 1) end
+for _, id in ipairs(stored_list("live", function(v) return type(v) == "string" and v:find("^%d+$") and #v <= 9 end)) do
+  st.live[id] = true
+end
 
 local function now() return sys.time() end
 local function my_bytes() return st.wallet and solana.decode(st.wallet) end
@@ -104,6 +107,9 @@ local function modal(open, ...)
       local n = st.pending
       st.pending = nil
       job_done(n)
+    elseif st.dirty and not st.modal and not st.anim then
+      st.dirty = nil
+      show(st.screen)
     end
   end
   st.modal = true
@@ -206,6 +212,15 @@ end
 
 local show  -- forward
 
+-- From async callbacks: wait while the animation or a dialog has the screen.
+local function show_later(name)
+  if st.anim or st.modal then
+    st.screen, st.dirty = name, true
+  else
+    show(name)
+  end
+end
+
 local function build_rows(name, rows, role, empty, empty2)
   frame(name)
   local items = row_items(rows, role)
@@ -301,7 +316,7 @@ local function plan(action, r)
   if action == "bid" then
     local intro = escrow.introer_pda(solana.decode(r.w))
     r.pda = r.pda or escrow.request_pda(intro, r.id)
-    return {escrow.ix_bid(intro, r.pda, r.target, r.telegram, r.bid, r.lowest, r.others)}, r.pda, "exists"
+    return {escrow.ix_bid(intro, r.pda, r.target, r.telegram, r.bid, r.lowest, r.others)}, r.pda, "bid"
   end
   if action == "register_introer" then
     return {escrow.ix_register(me, r.badge_id, r.offer, r.min_bid)}, escrow.introer_pda(me), "exists"
@@ -309,9 +324,16 @@ local function plan(action, r)
   return {escrow.ix_update(me, r.offer, r.min_bid)}, escrow.introer_pda(me), "offer"
 end
 
+-- true when it landed, false and why when it can't any more, nil to keep waiting.
 local function landed(want, b, r)
   if want == "gone" then return b == nil end
   if want == "exists" then return b ~= nil end
+  if want == "bid" then
+    local q = b and escrow.decode_request(b)
+    if not q then return nil end
+    if q.target == r.target and q.telegram == r.telegram and q.bid == r.bid then return true end
+    return false, "Someone bid first."
+  end
   if want == "offer" then
     local i = b and escrow.decode_introer(b)
     return i and i.offer == r.offer and i.min_bid == r.min_bid
@@ -330,14 +352,14 @@ end
 
 local function sign_done(s)
   if s.action == "bid" and not st.mock then
-    st.mine[#st.mine + 1] = {w = s.row.w, id = s.row.id, at = now() or 0}
+    st.mine[#st.mine + 1] = {w = s.row.w, id = s.row.id, at = now() or 0}  -- 0: no clock yet
     while #st.mine > MAX_MINE do table.remove(st.mine, 1) end
     storage.set("mine", st.mine)
   end
   stop_sign()
   ui.toast(escrow.LABEL[s.action] .. ": done")
   poll(true)
-  show(s.back)
+  show_later(s.back)
 end
 
 local function sign_text(a, b, c)
@@ -356,7 +378,12 @@ local function watch()
   end
   chain.account(s.addr, function(ok, b)
     if st.sign ~= s or not ok then return end
-    if landed(s.want, b, s.row) then sign_done(s) end
+    local done, why = landed(s.want, b, s.row)
+    if done then sign_done(s)
+    elseif why then
+      stop_sign()
+      sign_text(why, "Nothing was paid.", "Try again.")
+    end
   end)
 end
 
@@ -398,8 +425,8 @@ function start_sign(action, r, back)
     return
   end
   show("sign")
-  -- Addresses cost instructions: build in a callback of its own.
-  timer.after(20, function()
+  -- Addresses cost instructions: work them out over a few callbacks, then build.
+  local function build()
     if st.sign ~= s then return end
     local ixs, addr, want = plan(action, r)
     s.addr, s.want = addr, want
@@ -411,9 +438,22 @@ function start_sign(action, r, back)
       else
         s.err = tostring(url)
       end
-      if st.screen == "sign" then show("sign") end
+      if st.screen == "sign" then show_later("sign") end
     end)
-  end)
+  end
+  local warm = {
+    function() escrow.config_pda() end,
+    function() if st.wallet then escrow.introer_pda(my_bytes()) end end,
+    function() if r.w then escrow.introer_pda(solana.decode(r.w)) end end,
+    function() if action == "register_introer" then escrow.directory_pda() end end,
+  }
+  local k = 0
+  local function step()
+    if st.sign ~= s then return end
+    k = k + 1
+    if warm[k] then warm[k]() timer.after(20, step) else build() end
+  end
+  timer.after(20, step)
 end
 
 -- Hire me ----------------------------------------------------------------
@@ -442,6 +482,8 @@ end
 
 -- Find -------------------------------------------------------------------
 
+local build_find  -- forward
+
 local function find_entries()
   local out, seen, names = {}, {}, {}
   local t = sys.millis()
@@ -465,7 +507,10 @@ local function find_entries()
   end
   for k = #st.recent, 1, -1 do
     local w = st.recent[k]
-    if not seen[w] then out[#out + 1] = {w = w, title = sol.short(w), sub = "seen before"} end
+    if not seen[w] then out[#out + 1] = {w = w, title = sol.short(w), sub = "seen before"}; seen[w] = true end
+  end
+  for _, w in ipairs(st.dir or {}) do
+    if not seen[w] and w ~= st.wallet then out[#out + 1] = {w = w, title = sol.short(w), sub = "on-chain list"} end
   end
   return out
 end
@@ -487,11 +532,32 @@ local function scan_nearby()
   ui.toast("Looking for badges nearby...")
 end
 
-local function build_find()
+-- The program keeps the 32 latest introers in one account.
+local function load_directory()
+  if st.mock then
+    st.dir = {}
+    ui.toast("Demo: nearby list only")
+    return
+  end
+  ui.toast("Reading the list...")
+  chain.account(escrow.directory_pda(), function(ok, b)
+    if not ok then ui.toast(tostring(b)) return end
+    local list = escrow.decode_directory(b)
+    if not list then ui.toast("No list on chain yet") return end
+    st.dir = {}
+    for k, w in ipairs(list) do st.dir[k] = solana.encode(w) end
+    if st.screen == "find" and not st.anim and not st.modal then build_find() end
+  end)
+end
+
+local FIND_TOP = 3
+
+function build_find()
   frame("find")
   local entries = find_entries()
   local items = {{title = "Enter a wallet", sub = "an introer's address"},
-    {title = "Look nearby", sub = "badges running Intro Bot"}}
+    {title = "Look nearby", sub = "badges running Intro Bot"},
+    {title = "On-chain list", sub = "the latest introers"}}
   for _, e in ipairs(entries) do items[#items + 1] = {title = e.title, sub = e.sub} end
   st.w.list = ui.list(6, 26, 308, 172, items, {on_select = function(i)
     if i == 1 then
@@ -503,8 +569,10 @@ local function build_find()
       end)
     elseif i == 2 then
       scan_nearby()
-    elseif entries[i - 2] then
-      open_introer(entries[i - 2].w)
+    elseif i == 3 then
+      load_directory()
+    elseif entries[i - FIND_TOP] then
+      open_introer(entries[i - FIND_TOP].w)
     end
   end})
   st.w.count = #items
@@ -512,7 +580,7 @@ local function build_find()
 end
 
 local function refresh_find()
-  if #find_entries() + 2 ~= st.w.count then build_find() end
+  if #find_entries() + FIND_TOP ~= st.w.count then build_find() end
 end
 
 -- An introer, and bidding ---------------------------------------------------
@@ -551,7 +619,7 @@ end
 local function load_open(p, intro)
   local next = tonumber(p.introer.next_id) or 0
   local ids = {}
-  for id = next - 1, math.max(0, next - 15), -1 do ids[#ids + 1] = tostring(id) end
+  for id = next - 1, math.max(0, next - 20), -1 do ids[#ids + 1] = tostring(id) end
   chain.request_pdas(intro, ids, function(pdas)
     chain.many(pdas, function(ok, data)
       if not ok or st.pick ~= p then return end
@@ -562,7 +630,10 @@ local function load_open(p, intro)
           open[#open + 1] = {pda = pdas[i], requester = q.requester, bid = q.bid}
         end
       end
-      if #open ~= p.introer.open then return end
+      if #open ~= p.introer.open then
+        if st.screen == "introer" and st.w.full then st.w.full:text("Full: can't find the lowest bid") end
+        return
+      end
       local lo = 1
       for k = 2, #open do if sol.cmp(open[k].bid, open[lo].bid) < 0 then lo = k end end
       p.lowest = table.remove(open, lo)
@@ -617,7 +688,7 @@ local function load_introer(p)
       p.introer = b and escrow.decode_introer(b) or false
       if p.introer and p.introer.open >= escrow.MAX_OPEN then load_open(p, intro) end
     end
-    if st.screen == "introer" then show("introer") end
+    if st.screen == "introer" then show_later("introer") end
   end)
 end
 
@@ -627,7 +698,7 @@ local restart_poll  -- forward
 
 local function forget()
   st.me, st.queue, st.rows, st.live, st.updated, st.spark, st.jobs = nil, nil, nil, {}, nil, {}, nil
-  storage.remove("spark") storage.remove("jobs")
+  storage.remove("spark") storage.remove("jobs") storage.remove("live")
 end
 
 local function set_wallet(w)
@@ -713,6 +784,7 @@ local BACK = {
 }
 
 function show(name)
+  st.dirty = nil
   if name == "introer" and st.screen ~= "introer" and st.pick and st.pick.introer == nil then
     load_introer(st.pick)
   end
@@ -798,27 +870,27 @@ local function read_mine(gen)
   local list = st.mine
   if #list == 0 then st.rows = {} return finish() end
   local pdas, k = {}, 1
-  local function step()  -- 2 addresses per callback
+  local function step()  -- one saved bid (two addresses) per callback
     if gen ~= st.gen then return end
-    local n = 0
-    while k <= #list and n < 2 do
+    if k <= #list then
       local m = list[k]
       pdas[k] = escrow.request_pda(escrow.introer_pda(solana.decode(m.w)), m.id)
-      k, n = k + 1, n + 1
+      k = k + 1
     end
     if k <= #list then timer.after(20, step) return end
     chain.many(pdas, function(ok, data)
       if gen ~= st.gen then return end
       if not ok then return fail(data) end
-      local rows, keep, t = {}, {}, now() or 0
+      local rows, keep, t = {}, {}, now()
       for i, m in ipairs(list) do
+        if m.at == 0 and t then m.at = t end
         local q = data[i] and escrow.decode_request(data[i])
         if q then
           q.pda, q.w = pdas[i], m.w
           rows[#rows + 1] = q
           m.seen = true
           keep[#keep + 1] = m
-        elseif not m.seen and t - m.at < 900 then
+        elseif not m.seen and (not t or m.at == 0 or t - m.at < 900) then
           keep[#keep + 1] = m  -- not landed yet
         end
       end
@@ -839,7 +911,7 @@ local function read_queue(gen, me)
     seen[ids[#ids]] = true
   end
   for id in pairs(st.live) do
-    if not seen[id] and #ids < QUEUE_SCAN + 5 then ids[#ids + 1] = id end
+    if not seen[id] and #ids < QUEUE_SCAN + 10 then ids[#ids + 1] = id end
   end
   chain.request_pdas(intro, ids, function(pdas)
     if gen ~= st.gen then return end
@@ -860,6 +932,9 @@ local function read_queue(gen, me)
         return #a.id > #b.id or (#a.id == #b.id and a.id > b.id)
       end)
       st.queue, st.live = rows, live
+      local keep = {}
+      for id in pairs(live) do if #keep < 20 then keep[#keep + 1] = id end end
+      storage.set("live", keep)
       read_mine(gen)
     end)
   end)
@@ -877,6 +952,7 @@ function poll(force)
     return finish()
   end
   if not st.wallet then st.status = "no wallet: open Setup" refresh() return end
+  if st.sign and st.sign.timer and not force then return end  -- the watch has the rpc budget
   if st.busy and sys.millis() - st.busy < 30000 and not force then return end
   if not rpc then return fail("needs the rpc permission") end
   st.gen = st.gen + 1
@@ -910,8 +986,10 @@ function on_mesh(from, msg)
   if type(msg) ~= "table" then return end
   if msg.k == "ib" and sol.is_wallet(msg.w) then
     local fresh = not st.nearby[msg.w]
-    local n = 0
-    for _ in pairs(st.nearby) do n = n + 1 end
+    local n, t = 0, sys.millis()
+    for w, x in pairs(st.nearby) do
+      if t - x.at >= NEARBY_FOR then st.nearby[w] = nil else n = n + 1 end
+    end
     if fresh and n >= 32 then return end
     st.nearby[msg.w] = {id = tostring(from), at = sys.millis()}
     if fresh and st.screen == "find" and not st.anim then refresh_find() end

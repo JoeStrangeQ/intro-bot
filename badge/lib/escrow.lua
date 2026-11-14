@@ -20,7 +20,7 @@ M.STATUS = {[0] = "Open", [1] = "Accepted", [2] = "Waiting for confirm"}
 
 -- Anchor discriminators: sha256("account:<Name>") / sha256("global:<ix>"), first 8 bytes.
 local D = {
-  Introer = "3e179abd0466ce44", Request = "7dac96a1a2732747",
+  Introer = "3e179abd0466ce44", Request = "7dac96a1a2732747", Directory = "9153a590b7d107af",
   register_introer = "7bdef1c58acb8cf2", update_introer = "69fe06de8958fa50",
   bid = "c738552692f3259e", withdraw = "b712469c946da122", accept = "419646d885066b04",
   decline = "18395aa25b5ef5b1", mark_made = "8aacbff25a16c159", confirm = "ae010fd503be8300",
@@ -80,8 +80,24 @@ function M.decode_request(b)
   }
 end
 
+-- Directory: head u8 | wallets [32 x 32], a ring of the latest introers. Newest first.
+function M.decode_directory(b)
+  if type(b) ~= "string" or #b < 9 + 32 * 32 or b:sub(1, 8) ~= M.DISC.Directory then return nil end
+  local head, out, zero = b:byte(9), {}, ("\0"):rep(32)
+  for k = 0, 31 do
+    local slot = (head - 1 - k) % 32
+    local w = b:sub(10 + slot * 32, 41 + slot * 32)
+    if w ~= zero then out[#out + 1] = w end
+  end
+  return out
+end
+
 -- Addresses (32 bytes). Each pda costs ~10k instructions: callers cache them.
-local CONFIG, INTROERS = nil, {}
+local CONFIG, DIRECTORY, INTROERS = nil, nil, {}
+function M.directory_pda()
+  DIRECTORY = DIRECTORY or (solana.pda({"directory"}, program()))
+  return DIRECTORY
+end
 function M.config_pda()
   CONFIG = CONFIG or (solana.pda({"config"}, program()))
   return CONFIG
@@ -94,31 +110,31 @@ function M.request_pda(introer, id)
   return (solana.pda({"request", introer, bytes.pack_u64(id)}, program()))
 end
 
--- Instructions. `wallet` is tx.WALLET, the signer the relay fills in.
+-- Instructions, accounts in the program's order (idl/intro_escrow.json).
+-- W is tx.WALLET, the signer the relay fills in.
 local function ix(name, accounts, args)
   return {program = program(), accounts = accounts, data = M.DISC[name] .. (args or "")}
 end
 local W = tx.WALLET
 
--- The signer's own introer PDA depends on its wallet, which the badge knows (public).
 function M.ix_register(my_wallet, badge_id, offer, min_bid)
   return ix("register_introer", {
-    {M.introer_pda(my_wallet), w = true}, {W, w = true}, {tx.SYSTEM},
+    {W, w = true}, {M.introer_pda(my_wallet), w = true}, {M.directory_pda(), w = true}, {tx.SYSTEM},
   }, bytes.fixed(badge_id, 8) .. bytes.fixed(offer, M.OFFER) .. bytes.pack_u64(min_bid))
 end
 
 function M.ix_update(my_wallet, offer, min_bid)
-  return ix("update_introer", {{M.introer_pda(my_wallet), w = true}, {W}},
+  return ix("update_introer", {{W}, {M.introer_pda(my_wallet), w = true}},
     bytes.fixed(offer, M.OFFER) .. bytes.pack_u64(min_bid))
 end
 
 -- lowest = {pda, requester} when the queue is full, others = the other open request pdas.
+-- A missing optional account is the program id.
 function M.ix_bid(introer, request, target, telegram, amount, lowest, others)
   local p = program()
   local acc = {
-    {M.config_pda(), w = true}, {introer, w = true}, {request, w = true}, {W, w = true},
+    {W, w = true}, {M.config_pda(), w = true}, {introer, w = true}, {request, w = true}, {tx.SYSTEM},
     lowest and {lowest.pda, w = true} or {p}, lowest and {lowest.requester, w = true} or {p},
-    {tx.SYSTEM},
   }
   for _, o in ipairs(others or {}) do acc[#acc + 1] = {o} end
   return ix("bid", acc, bytes.fixed(target, M.TARGET) .. bytes.fixed(telegram, M.TELEGRAM)
@@ -126,30 +142,30 @@ function M.ix_bid(introer, request, target, telegram, amount, lowest, others)
 end
 
 function M.ix_withdraw(introer, request)
-  return ix("withdraw", {{M.config_pda(), w = true}, {introer, w = true}, {request, w = true}, {W, w = true}})
+  return ix("withdraw", {{W, w = true}, {M.config_pda(), w = true}, {introer, w = true}, {request, w = true}})
 end
 
 function M.ix_accept(introer, request)
-  return ix("accept", {{introer, w = true}, {request, w = true}, {W}})
+  return ix("accept", {{W}, {introer, w = true}, {request, w = true}})
 end
 
 function M.ix_made(introer, request)
-  return ix("mark_made", {{introer, w = true}, {request, w = true}, {W}})
+  return ix("mark_made", {{W}, {introer, w = true}, {request, w = true}})
 end
 
 function M.ix_decline(introer, request, requester)
-  return ix("decline", {{M.config_pda(), w = true}, {introer, w = true}, {request, w = true}, {W},
+  return ix("decline", {{W}, {M.config_pda(), w = true}, {introer, w = true}, {request, w = true},
     {requester, w = true}})
 end
 
 function M.ix_confirm(introer, request, introer_wallet)
-  return ix("confirm", {{M.config_pda(), w = true}, {introer, w = true}, {request, w = true},
-    {introer_wallet, w = true}, {W, w = true}})
+  return ix("confirm", {{W, w = true}, {M.config_pda(), w = true}, {introer, w = true}, {request, w = true},
+    {introer_wallet, w = true}})
 end
 
 -- Anyone may send these; the signer only pays the fee.
 function M.ix_refund(name, introer, request, requester)
-  return ix(name, {{M.config_pda(), w = true}, {introer}, {request, w = true}, {requester, w = true}})
+  return ix(name, {{W}, {M.config_pda(), w = true}, {introer}, {request, w = true}, {requester, w = true}})
 end
 
 -- Which signed steps fit a request, for its introer or its requester, at unix time `now`.

@@ -389,6 +389,10 @@ local function advance(ms)
   end
 end
 local function relay_reply(ok, res)
+  for _ = 1, 20 do
+    if #W.posts > 0 then break end
+    advance(30)
+  end
   local p = table.remove(W.posts, 1)
   assert(p, "no relay post")
   local m = require("lib.bytes").unhex(p.body.message)
@@ -473,6 +477,70 @@ local dr = escrow.decode_request(rb)
 check(dr and dr.bid == "100000000000" and dr.status == 2 and dr.target == "Toly" and dr.telegram == "@joe"
   and dr.id == "7" and dr.made_at == NOW - 5, "decode request")
 
+-- The program's own instruction and account bytes (intro-bot-program tests/fixtures).
+local FIX = os.getenv("FIXTURES") or (HERE .. "/../../intro-bot-program/tests/fixtures")
+local function fixture(name)
+  local f = io.open(FIX .. "/" .. name .. ".json")
+  if not f then return nil end
+  local t = json.decode(f:read("a"))
+  f:close()
+  return t
+end
+if not fixture("bid") then
+  print("SKIP: no program fixtures at " .. FIX .. " (set FIXTURES)")
+else
+  _G.tx_lib = require("lib.tx")
+  local function same(name, built)
+    local f = fixture(name)
+    local signer = b58d(f.accounts[1].pubkey)
+    local ok = hex(built.data) == f.data_hex and b58e(built.program) == f.program_id and #built.accounts == #f.accounts
+    for k, a in ipairs(f.accounts) do
+      local mine = built.accounts[k]
+      local key = mine and (mine[1] == _G.tx_lib.WALLET and signer or mine[1])
+      ok = ok and mine and b58e(key) == a.pubkey and (a.signer == (mine[1] == _G.tx_lib.WALLET))
+        and (a.signer or (mine.w == true) == a.writable)
+    end
+    check(ok, "fixture " .. name)
+  end
+  local function acc(name, k) return b58d(fixture(name).accounts[k].pubkey) end
+  local function data(name) return require("lib.bytes").unhex(fixture(name).data_hex) end
+  local bytes2 = require("lib.bytes")
+  local wallet, requester = acc("register_introer", 1), acc("bid", 1)
+  local intro = acc("register_introer", 2)
+  check(escrow.introer_pda(wallet) == intro, "fixture introer pda")
+  check(escrow.config_pda() == acc("bid", 2) and escrow.directory_pda() == acc("register_introer", 3), "fixture config, directory pdas")
+  local d = data("register_introer")
+  same("register_introer", escrow.ix_register(wallet, bytes2.text(d, 9, 8), bytes2.text(d, 17, 64), bytes2.u64(d, 81)))
+  d = data("update_introer")
+  same("update_introer", escrow.ix_update(wallet, bytes2.text(d, 9, 64), bytes2.u64(d, 73)))
+  d = data("bid")
+  check(escrow.request_pda(intro, "0") == acc("bid", 4), "fixture request pda")
+  same("bid", escrow.ix_bid(intro, acc("bid", 4), bytes2.text(d, 9, 64), bytes2.text(d, 73, 32), bytes2.u64(d, 105)))
+  d = data("bid_outbid")
+  local ob = fixture("bid_outbid").accounts
+  same("bid_outbid", escrow.ix_bid(intro, acc("bid_outbid", 4), bytes2.text(d, 9, 64), bytes2.text(d, 73, 32),
+    bytes2.u64(d, 105), {pda = acc("bid_outbid", 6), requester = acc("bid_outbid", 7)},
+    {acc("bid_outbid", 8), acc("bid_outbid", 9), acc("bid_outbid", 10), acc("bid_outbid", 11)}))
+  check(#ob == 11, "fixture outbid has 4 others")
+  same("accept", escrow.ix_accept(intro, acc("accept", 3)))
+  same("mark_made", escrow.ix_made(intro, acc("mark_made", 3)))
+  same("decline", escrow.ix_decline(intro, acc("decline", 4), requester))
+  same("withdraw", escrow.ix_withdraw(intro, acc("withdraw", 4)))
+  same("confirm", escrow.ix_confirm(intro, acc("confirm", 4), wallet))
+  same("refund_unconfirmed", escrow.ix_refund("refund_unconfirmed", intro, acc("refund_unconfirmed", 4), requester))
+  same("refund_expired", escrow.ix_refund("refund_expired", intro, acc("refund_expired", 4), requester))
+  -- Account dumps.
+  local f = io.open(FIX .. "/accounts.json")
+  local dumps = json.decode(f:read("a"))
+  f:close()
+  local di2 = escrow.decode_introer(bytes2.unhex(dumps.introer.data_hex))
+  check(di2 and di2.wallet == wallet and di2.badge_id == "BP26-001" and di2.offer ~= "", "fixture introer decodes")
+  local dr2 = escrow.decode_request(bytes2.unhex(dumps.request.data_hex))
+  check(dr2 and dr2.introer == intro and escrow.STATUS[dr2.status] and dr2.target ~= "", "fixture request decodes")
+  local dd = escrow.decode_directory(bytes2.unhex(dumps.directory.data_hex))
+  check(dd and dd[1] == wallet, "fixture directory decodes")
+end
+
 -- App: introer --------------------------------------------------------------------
 local ME = b58d(WALLET)
 local CHAIN = {}
@@ -497,7 +565,8 @@ check(m.keys[1] == string.rep("\1", 32), "fee payer placeholder")
 check(m.blockhash == string.rep("\0", 32), "blockhash left for the relay")
 local ix = m.ixs[1]
 check(b58e(ix.program) == PROGRAM, "register: program")
-check(ix.accounts[1] == MYI and ix.accounts[2] == m.keys[1] and ix.accounts[3] == string.rep("\0", 32), "register: accounts")
+check(ix.accounts[1] == m.keys[1] and ix.accounts[2] == MYI and ix.accounts[3] == escrow.directory_pda()
+  and ix.accounts[4] == string.rep("\0", 32), "register: accounts")
 check(m.w[MYI] and m.w[m.keys[1]] and not m.w[string.rep("\0", 32)], "register: writable flags")
 check(ix.data == escrow.DISC.register_introer .. fixed("7K2Q9M", 8) .. fixed("Solana devs", 64) .. u64(50000000), "register: data")
 check(W.qr and W.qr.t == "solana:https://relay.botbotcap.com/tx/abc123", "register QR")
@@ -538,8 +607,8 @@ check(#W.lists[1].rows == 2, "open: accept, decline")
 list_select(1); advance(30)
 m = relay_reply(true)
 ix = m.ixs[1]
-check(ix.data == escrow.DISC.accept and ix.accounts[1] == MYI and ix.accounts[2] == REQ[0]
-  and ix.accounts[3] == m.keys[1], "accept: accounts")
+check(ix.data == escrow.DISC.accept and ix.accounts[1] == m.keys[1] and ix.accounts[2] == MYI
+  and ix.accounts[3] == REQ[0], "accept: accounts")
 check(m.w[MYI] and m.w[REQ[0]], "accept: writable")
 put_req(0, {requester = RQ, bid = "200000000", status = 1, accepted_at = NOW, target = "Mert", telegram = "@a"})
 advance(6000)
@@ -599,7 +668,7 @@ callback(on_mesh, "BADGE2", {k = "ib", w = "Demo1ntroer1111111111111111111111111
 callback(on_mesh, "BADGE3", {k = "ib", w = "nope"})
 callback(on_mesh, "BADGE3", "junk")
 go("Find an introer")
-check(W.lists[1].rows[3] and W.lists[1].rows[3].title == "@ana" and not W.lists[1].rows[4], "nearby introer listed")
+check(W.lists[1].rows[4] and W.lists[1].rows[4].title == "@ana" and not W.lists[1].rows[5], "nearby introer listed")
 local sent = #W.mesh_sent
 callback(on_mesh, "BADGE3", {k = "ib?"})
 check(#W.mesh_sent == sent + 1 and W.mesh_sent[#W.mesh_sent].w == WALLET, "beacon answers a scan")
@@ -625,9 +694,9 @@ ix = m.ixs[1]
 local NEWR = escrow.request_pda(OI, "9")
 local P = b58d(PROGRAM)
 check(ix.data == escrow.DISC.bid .. fixed("Toly", 64) .. fixed("@joe", 32) .. u64(12500000000), "bid: data (12.5 SOL)")
-check(ix.accounts[1] == escrow.config_pda() and ix.accounts[2] == OI and ix.accounts[3] == NEWR
-  and ix.accounts[4] == m.keys[1] and ix.accounts[5] == P and ix.accounts[6] == P
-  and ix.accounts[7] == string.rep("\0", 32) and #ix.accounts == 7, "bid: accounts, None as program id")
+check(ix.accounts[1] == m.keys[1] and ix.accounts[2] == escrow.config_pda() and ix.accounts[3] == OI
+  and ix.accounts[4] == NEWR and ix.accounts[5] == string.rep("\0", 32) and ix.accounts[6] == P
+  and ix.accounts[7] == P and #ix.accounts == 7, "bid: accounts, None as program id")
 check(m.w[escrow.config_pda()] and m.w[OI] and m.w[NEWR] and not m.w[P], "bid: writable")
 CHAIN[b58e(NEWR)] = enc_request({introer = OI, requester = string.rep("\9", 32), id = 9, bid = "12500000000",
   status = 0, target = "Toly", telegram = "@joe"})
@@ -647,12 +716,40 @@ check(W.lists[1].rows[1] == "Confirm + pay" and W.lists[1].rows[2] == "Refund (7
 list_select(1); advance(30)
 m = relay_reply(true)
 ix = m.ixs[1]
-check(ix.data == escrow.DISC.confirm and ix.accounts[4] == OB and ix.accounts[5] == m.keys[1] and m.w[OB], "confirm: pays introer wallet")
+check(ix.data == escrow.DISC.confirm and ix.accounts[1] == m.keys[1] and ix.accounts[5] == OB and m.w[OB], "confirm: pays introer wallet")
 CHAIN[b58e(NEWR)] = nil
 advance(6000)
 check(last_toast() == "Confirm + pay: done", "confirm landed")
 advance(20000)
 check(has("No requests yet") and json.decode(W.store.mine)[1] == nil, "closed request dropped")
+
+-- Someone else takes the request id first.
+go("Find an introer")
+list_select(1); type_in(OTHER); flush()
+list_select(1); type_in("Vitalik"); type_in("me"); type_in("0.2")
+advance(30); relay_reply(true)
+CHAIN[b58e(escrow.request_pda(OI, "9"))] = enc_request({introer = OI, requester = RQ, id = 9, bid = "500000000",
+  status = 0, target = "Someone else", telegram = ""})
+CHAIN[b58e(NEWR)] = CHAIN[b58e(escrow.request_pda(OI, "9"))]
+advance(6000)
+check(has("Someone bid first."), "someone bid first: not ours")
+check(#json.decode(W.store.mine) == 0, "their request not saved as mine")
+key("back")
+CHAIN[b58e(NEWR)] = nil
+
+-- The on-chain list of introers.
+local DIR = escrow.directory_pda()
+local ring = {}
+for k = 1, 32 do ring[k] = string.rep("\0", 32) end
+ring[1], ring[2], ring[3] = string.rep("\5", 32), OB, ME
+CHAIN[b58e(DIR)] = disc("Directory") .. string.char(3) .. table.concat(ring)
+go("Find an introer")
+list_select(3); flush()
+local found = {}
+for _, r in ipairs(W.lists[1].rows) do found[r.sub] = (found[r.sub] or 0) + 1 end
+check(found["on-chain list"] == 1, "directory: new introers listed, me and seen ones not twice")
+local dl = escrow.decode_directory(CHAIN[b58e(DIR)])
+check(#dl == 3 and dl[1] == ME and dl[2] == OB, "directory newest first")
 
 -- Full queue: name the lowest and the other open ones.
 local FULL = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T"
@@ -673,7 +770,7 @@ list_select(1); type_in("Toly"); type_in(""); type_in("0.06")
 advance(30)
 m = relay_reply(true)
 ix = m.ixs[1]
-check(ix.accounts[5] == REQ[3] and ix.accounts[6] == string.rep("\3", 32) and #ix.accounts == 11, "bid: lowest + 4 others")
+check(ix.accounts[6] == REQ[3] and ix.accounts[7] == string.rep("\3", 32) and #ix.accounts == 11, "bid: lowest + 4 others")
 check(m.w[REQ[3]] and m.w[string.rep("\3", 32)] and not m.w[REQ[1]], "bid: lowest writable, others read")
 check(ix.data:sub(-8) == u64(60000000) and ix.data:sub(9 + 64, 9 + 64) == "\0", "bid: empty telegram")
 key("back")
@@ -701,8 +798,8 @@ check(W.qr and W.qr.t:find("^solana:https://relay.botbotcap.com/tx/"), "demo QR"
 advance(4100)
 check(last_toast() == "Accept: done", "demo accept")
 go("Find an introer")
-check(W.lists[1].rows[3].title == "@ana", "demo nearby")
-list_select(4)
+check(W.lists[1].rows[4].title == "@ana", "demo nearby")
+list_select(5)
 check(has("Full: beat 0.15 SOL"), "demo full introer")
 list_select(1); type_in("Toly"); type_in("joe"); type_in("0.2")
 advance(4100)
