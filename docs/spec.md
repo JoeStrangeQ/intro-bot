@@ -27,14 +27,15 @@ Native SOL only. All amounts in lamports (u64).
 - `MAX_OPEN` = 5 open (not yet accepted) requests per introer.
 - `CONFIRM_WINDOW` = 72 h after `mark_made`. `WORK_WINDOW` = 7 days after `accept`.
 - `WITHDRAW_DELAY` = 24 h after the bid. `OUTBID_PERCENT` = 10.
-- Text: `target` ≤ 64 bytes, `telegram` ≤ 32 bytes (`@handle`), `offer` ≤ 64 bytes, `badge_id` 8 bytes.
+- Text: `target` 1–64 bytes, `telegram` 1–32 bytes (`@handle`), `offer` ≤ 64 bytes, `badge_id` 8 bytes.
 
 ### Accounts
 Fixed size; text is zero-padded UTF-8 byte arrays. Exact byte offsets: "Program details" below.
-- `Config` PDA `["config"]`: `admin: Pubkey`, `paused: bool`, `total_held: u64` (sum of live
-  bids), `bump`. Created once by `init_config`, which only the program's upgrade authority can
-  call (check the ProgramData account). Admin can later `set_admin` and `set_paused`. These keep
-  working after the program is made immutable. No global cap.
+- `Config` PDA `["config"]`: `admin: Pubkey`, `pending_admin: Pubkey`, `paused: bool`, `bump`.
+  Created once by `init_config`, which only the program's upgrade authority can call (check the
+  ProgramData account). Admin can later `propose_admin` (the new key then calls `accept_admin`)
+  and `set_paused`. These keep working after the program is made immutable. No global cap and
+  no running total: only `bid` reads Config (for `paused`).
 - `Directory` PDA `["directory"]`: ring of the last 32 registered introer wallets.
 - `Introer` PDA `["introer", wallet]`: `wallet`, `min_bid: u64`, `next_id: u64`,
   `jobs_done: u32`, `earned: u64`, `created_at: i64`, `open_count: u8`, `bump`,
@@ -51,19 +52,26 @@ status); events record the outcome.
 | Ix | Signer | Rule |
 | --- | --- | --- |
 | `register_introer(badge_id, offer, min_bid)` | wallet | `min_bid ≥ MIN_BID_FLOOR`. `update_introer` can change offer/min_bid. |
-| `bid(target, telegram, amount)` | requester | not paused; requester ≠ introer wallet; `min_bid ≤ amount ≤ MAX_BID`. If `open_count == MAX_OPEN`, the caller passes the lowest open request (lowest bid in `introer.open`, oldest on a tie) + its requester; the new bid must be ≥ 110% of it, and that one is refunded and closed in the same tx (`Outbid`). |
+| `bid(target, telegram, amount)` | requester | not paused; requester ≠ introer wallet; `min_bid ≤ amount ≤ MAX_BID`. If `open_count == MAX_OPEN`, the caller passes the lowest open request (lowest bid in `introer.open`, oldest on a tie) + its requester; the new bid must be ≥ `min(ceil(110% of it), MAX_BID)` and above it, and that one is refunded and closed in the same tx (`Outbid`). |
 | `withdraw` | requester | Open only, and `now ≥ created_at + WITHDRAW_DELAY`: refund + close. |
 | `accept` | introer | Open → Accepted. |
 | `decline` | introer | Open → refund + close. |
 | `mark_made` | introer | Accepted and `now ≤ accepted_at + WORK_WINDOW` → Made, `made_at = now`. |
 | `confirm` | requester | Made or Accepted → pay the introer, close. Receipt. |
 | `refund_unconfirmed` | anyone | Made and `now > made_at + CONFIRM_WINDOW` → refund the requester, close. The introer is paid only if the requester confirms. |
-| `refund_expired` | anyone | Accepted and `now > accepted_at + WORK_WINDOW` → refund, close. |
+| `refund_expired` | requester, or anyone later | Accepted and `now > accepted_at + WORK_WINDOW` (requester) or `+ WORK_WINDOW + CONFIRM_WINDOW` (anyone else, so a late confirm can't be sniped) → refund, close. |
 | admin setters | admin | as above. |
 
 Payouts never depend on `paused`. Refunds go to the stored `requester`, payouts to
 `introer.wallet` (checked against stored keys, never caller-chosen).
-On every payout: `jobs_done += 1`, `earned += bid`, `total_held -= bid`.
+On every payout: `jobs_done += 1`, `earned += bid`.
+
+Known limits (accepted):
+- Request ids come from `introer.next_id`, so two bids racing for the same introer collide:
+  the second fails. Clients re-read `next_id` (and the lowest open request) right before
+  sending and offer a quick retry.
+- `bid` rejects requester = introer wallet, but an introer can still bid from a second wallet
+  and confirm to raise their own stats. That is why machine value is labelled "demo value".
 
 ### Events
 `IntroerRegistered`, `BidPlaced{request, introer, requester, bid}`, `Outbid`, `Withdrawn`,
@@ -75,14 +83,14 @@ On every payout: `jobs_done += 1`, `earned += bid`, `total_held -= bid`.
 All accounts are fixed size. Text is UTF-8, zero-padded (nothing but zeros after the first
 zero byte). Integers are little-endian. Offsets include the 8-byte Anchor discriminator.
 
-`Config` PDA `["config"]`, 50 bytes:
+`Config` PDA `["config"]`, 74 bytes:
 
 | Offset | Field | Type |
 | --- | --- | --- |
 | 8 | admin | Pubkey |
-| 40 | paused | u8 (0/1) |
-| 41 | total_held | u64 |
-| 49 | bump | u8 |
+| 40 | pending_admin | Pubkey (zeros when none) |
+| 72 | paused | u8 (0/1) |
+| 73 | bump | u8 |
 
 `Directory` PDA `["directory"]`, 1034 bytes. Created by `init_config`. A ring of the last 32
 registered introer wallets; `register_introer` writes at `head` and advances it. Empty slots
@@ -135,29 +143,31 @@ in no particular order, the rest are zero.
 Instruction args (Borsh, after the 8-byte discriminator; text args are fixed arrays):
 `init_config()`, `register_introer(badge_id [u8;8], offer [u8;64], min_bid u64)`,
 `update_introer(offer [u8;64], min_bid u64)`, `bid(target [u8;64], telegram [u8;32], amount u64)`,
-`set_admin(Pubkey)`, `set_paused(bool)`. Others take no args.
+`propose_admin(Pubkey)`, `set_paused(bool)`. Others take no args.
 
 Account order (s = signer, w = writable):
 
 | Ix | Accounts |
 | --- | --- |
 | `init_config` | authority (s,w), config (w), directory (w), program, program_data, system_program |
-| `set_admin` / `set_paused` | admin (s), config (w) |
+| `propose_admin` / `set_paused` | admin (s), config (w) |
+| `accept_admin` | pending_admin (s), config (w) |
 | `register_introer` | wallet (s,w), introer (w), directory (w), system_program |
 | `update_introer` | wallet (s), introer (w) |
-| `bid` | requester (s,w), config (w), introer (w), request (w), system_program, lowest (w, optional), lowest_requester (w, optional) |
-| `withdraw` | requester (s,w), config (w), introer (w), request (w) |
-| `accept` / `mark_made` | wallet (s), introer (w), request (w) |
-| `decline` | wallet (s), config (w), introer (w), request (w), requester (w) |
-| `confirm` | requester (s,w), config (w), introer (w), request (w), wallet (w, = introer.wallet) |
-| `refund_unconfirmed` / `refund_expired` | caller (s), config (w), introer, request (w), requester (w) |
+| `bid` | requester (s,w), config, introer (w), request (w), system_program, lowest (w, optional), lowest_requester (w, optional) |
+| `withdraw` | requester (s,w), introer (w), request (w) |
+| `accept` | wallet (s), introer (w), request (w) |
+| `mark_made` | wallet (s), introer, request (w) |
+| `decline` | wallet (s), introer (w), request (w), requester (w) |
+| `confirm` | requester (s,w), introer (w), request (w), wallet (w, = introer.wallet) |
+| `refund_unconfirmed` / `refund_expired` | caller (s), introer, request (w), requester (w) |
 
 - `init_config`: the signer must be the upgrade authority and becomes `admin`.
 - `bid`: `request` is the PDA for `introer.next_id`. Optional accounts not used: pass the program
   id. They are ignored unless the queue is full.
 - Full queue: pass `lowest` (the request whose id is the lowest bid in `introer.open`, oldest id
   on a tie) and `lowest_requester`. No other accounts.
-- `min_bid` must also be ≤ `MAX_BID`.
+- `min_bid` must also be ≤ `MAX_BID`. `target` and `telegram` must not be empty.
 - Event fields: `IntroerRegistered{introer, wallet, badge_id, min_bid}`,
   `Outbid{request, requester, bid, new_bid}` (request = the refunded one), `Withdrawn{request}`,
   `Accepted{request}`, `Declined{request}`, `Made{request, made_at}`.

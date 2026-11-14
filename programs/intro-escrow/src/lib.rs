@@ -43,8 +43,8 @@ pub mod intro_escrow {
     pub fn init_config(ctx: Context<InitConfig>) -> Result<()> {
         ctx.accounts.config.set_inner(Config {
             admin: ctx.accounts.authority.key(),
+            pending_admin: Pubkey::default(),
             paused: false,
-            total_held: 0,
             bump: ctx.bumps.config,
         });
         ctx.accounts.directory.set_inner(Directory {
@@ -55,8 +55,18 @@ pub mod intro_escrow {
         Ok(())
     }
 
-    pub fn set_admin(ctx: Context<AdminOnly>, admin: Pubkey) -> Result<()> {
-        ctx.accounts.config.admin = admin;
+    /// Step 1 of an admin change: names the next admin, who must accept.
+    pub fn propose_admin(ctx: Context<AdminOnly>, admin: Pubkey) -> Result<()> {
+        require_keys_neq!(admin, Pubkey::default(), EscrowError::Unauthorized);
+        ctx.accounts.config.pending_admin = admin;
+        Ok(())
+    }
+
+    /// Step 2: the proposed admin signs to take over.
+    pub fn accept_admin(ctx: Context<AcceptAdmin>) -> Result<()> {
+        let config = &mut ctx.accounts.config;
+        config.admin = config.pending_admin;
+        config.pending_admin = Pubkey::default();
         Ok(())
     }
 
@@ -121,14 +131,11 @@ pub mod intro_escrow {
         let a = ctx.accounts;
         require!(!a.config.paused, EscrowError::Paused);
         require_keys_neq!(a.requester.key(), a.introer.wallet, EscrowError::SelfBid);
-        require!(target[0] != 0, EscrowError::BadText);
+        require!(target[0] != 0 && telegram[0] != 0, EscrowError::BadText);
         check_text(&target)?;
         check_text(&telegram)?;
         require!(amount <= MAX_BID, EscrowError::BidTooHigh);
-        require!(
-            amount >= a.introer.min_bid && amount >= MIN_BID_FLOOR,
-            EscrowError::BidTooLow
-        );
+        require!(amount >= a.introer.min_bid, EscrowError::BidTooLow);
 
         // Move the bid in before any eviction: a CPI after closing an
         // account the requester also appears as fails the balance check.
@@ -145,7 +152,6 @@ pub mod intro_escrow {
 
         if a.introer.open_count >= MAX_OPEN {
             evict_lowest(
-                &mut a.config,
                 &mut a.introer,
                 a.lowest.as_ref(),
                 a.lowest_requester.as_ref(),
@@ -153,11 +159,6 @@ pub mod intro_escrow {
             )?;
         }
 
-        a.config.total_held = a
-            .config
-            .total_held
-            .checked_add(amount)
-            .ok_or(EscrowError::Overflow)?;
         let introer = &mut a.introer;
         let id = introer.next_id;
         introer.next_id = id.checked_add(1).ok_or(EscrowError::Overflow)?;
@@ -194,7 +195,7 @@ pub mod intro_escrow {
             .checked_add(WITHDRAW_DELAY)
             .ok_or(EscrowError::Overflow)?;
         require!(Clock::get()?.unix_timestamp >= ready, EscrowError::TooEarly);
-        close_open(&mut a.config, &mut a.introer, &a.request)?;
+        close_open(&mut a.introer, &a.request)?;
         emit!(Withdrawn {
             request: a.request.key()
         });
@@ -202,7 +203,7 @@ pub mod intro_escrow {
         Ok(())
     }
 
-    pub fn accept(ctx: Context<IntroerStep>) -> Result<()> {
+    pub fn accept(ctx: Context<Accept>) -> Result<()> {
         let a = ctx.accounts;
         require!(a.request.status == STATUS_OPEN, EscrowError::BadStatus);
         a.introer.remove_open(a.request.id)?;
@@ -218,7 +219,7 @@ pub mod intro_escrow {
     pub fn decline(ctx: Context<Decline>) -> Result<()> {
         let a = ctx.accounts;
         require!(a.request.status == STATUS_OPEN, EscrowError::BadStatus);
-        close_open(&mut a.config, &mut a.introer, &a.request)?;
+        close_open(&mut a.introer, &a.request)?;
         emit!(Declined {
             request: a.request.key()
         });
@@ -227,7 +228,7 @@ pub mod intro_escrow {
     }
 
     /// Introer marks the intro made, within `WORK_WINDOW` of accepting.
-    pub fn mark_made(ctx: Context<IntroerStep>) -> Result<()> {
+    pub fn mark_made(ctx: Context<MarkMade>) -> Result<()> {
         let a = ctx.accounts;
         require!(a.request.status == STATUS_ACCEPTED, EscrowError::BadStatus);
         let now = Clock::get()?.unix_timestamp;
@@ -254,7 +255,6 @@ pub mod intro_escrow {
             EscrowError::BadStatus
         );
         let bid = a.request.bid;
-        release_held(&mut a.config, bid)?;
         a.request.sub_lamports(bid)?;
         a.wallet.add_lamports(bid)?;
         let introer = &mut a.introer;
@@ -291,25 +291,30 @@ pub mod intro_escrow {
             Clock::get()?.unix_timestamp > deadline,
             EscrowError::NotExpired
         );
-        release_held(&mut a.config, a.request.bid)?;
         emit_refund(&a.request, REFUND_UNCONFIRMED);
         Ok(())
     }
 
-    /// Anyone: refunds an accepted request the introer never marked made.
+    /// Refunds an accepted request the introer never marked made. The
+    /// requester can call it after `WORK_WINDOW`; anyone else must wait
+    /// `CONFIRM_WINDOW` more, so a late confirm can't be sniped.
     pub fn refund_expired(ctx: Context<RefundExpired>) -> Result<()> {
         let a = ctx.accounts;
         require!(a.request.status == STATUS_ACCEPTED, EscrowError::BadStatus);
+        let wait = if a.caller.key() == a.request.requester {
+            WORK_WINDOW
+        } else {
+            WORK_WINDOW + CONFIRM_WINDOW
+        };
         let deadline = a
             .request
             .accepted_at
-            .checked_add(WORK_WINDOW)
+            .checked_add(wait)
             .ok_or(EscrowError::Overflow)?;
         require!(
             Clock::get()?.unix_timestamp > deadline,
             EscrowError::NotExpired
         );
-        release_held(&mut a.config, a.request.bid)?;
         emit_refund(&a.request, REFUND_EXPIRED);
         Ok(())
     }
@@ -331,18 +336,9 @@ fn check_terms(offer: &[u8], min_bid: u64) -> Result<()> {
     Ok(())
 }
 
-fn release_held(config: &mut Config, bid: u64) -> Result<()> {
-    config.total_held = config
-        .total_held
-        .checked_sub(bid)
-        .ok_or(EscrowError::Overflow)?;
-    Ok(())
-}
-
 /// Book-keeping for closing an open request (the account itself is closed
 /// by the `close` constraint, returning bid and rent to the requester).
-fn close_open(config: &mut Config, introer: &mut Introer, request: &Request) -> Result<()> {
-    release_held(config, request.bid)?;
+fn close_open(introer: &mut Introer, request: &Request) -> Result<()> {
     introer.remove_open(request.id)
 }
 
@@ -356,7 +352,6 @@ fn emit_refund(request: &Account<Request>, reason: u8) {
 /// Refunds and closes the lowest open request so a higher bid can take its
 /// slot. The program picks the lowest from `introer.open`.
 fn evict_lowest<'info>(
-    config: &mut Config,
     introer: &mut Account<'info, Introer>,
     lowest: Option<&Account<'info, Request>>,
     lowest_requester: Option<&UncheckedAccount<'info>>,
@@ -368,19 +363,21 @@ fn evict_lowest<'info>(
     let slot = introer.lowest_open().ok_or(EscrowError::QueueFull)?;
     require_keys_eq!(lowest.introer, introer.key(), EscrowError::WrongRequest);
     require!(lowest.id == slot.id, EscrowError::NotLowest);
-    require!(lowest.status == STATUS_OPEN, EscrowError::BadStatus);
     require_keys_eq!(
         lowest_requester.key(),
         lowest.requester,
         EscrowError::WrongRequester
     );
-    // amount >= bid × (100 + OUTBID_PERCENT) / 100, without rounding down.
+    // Must beat the lowest by OUTBID_PERCENT (rounded up), capped at
+    // MAX_BID so a queue near the max can still be outbid.
+    let required = (u128::from(lowest.bid) * u128::from(100 + OUTBID_PERCENT)).div_ceil(100);
+    let required = u64::try_from(required).unwrap_or(MAX_BID).min(MAX_BID);
     require!(
-        u128::from(amount) * 100 >= u128::from(lowest.bid) * u128::from(100 + OUTBID_PERCENT),
+        amount >= required && amount > lowest.bid,
         EscrowError::BidTooLow
     );
 
-    close_open(config, introer, lowest)?;
+    close_open(introer, lowest)?;
     lowest.close(lowest_requester.to_account_info())?;
     emit!(Outbid {
         request: lowest.key(),
@@ -396,9 +393,9 @@ fn evict_lowest<'info>(
 #[derive(InitSpace)]
 pub struct Config {
     pub admin: Pubkey,
+    /// Proposed next admin until it accepts; default when none.
+    pub pending_admin: Pubkey,
     pub paused: bool,
-    /// Sum of the bids of all live requests.
-    pub total_held: u64,
     pub bump: u8,
 }
 
@@ -435,7 +432,7 @@ impl Introer {
         let slot = self
             .open
             .get_mut(usize::from(self.open_count))
-            .ok_or(EscrowError::QueueFull)?;
+            .ok_or(EscrowError::Invariant)?;
         *slot = OpenSlot { id, bid };
         self.open_count = self
             .open_count
@@ -447,12 +444,12 @@ impl Introer {
     /// Removes `id`, moving the last entry into its place.
     fn remove_open(&mut self, id: u64) -> Result<()> {
         let count = usize::from(self.open_count);
-        let used = self.open.get(..count).ok_or(EscrowError::Overflow)?;
+        let used = self.open.get(..count).ok_or(EscrowError::Invariant)?;
         let index = used
             .iter()
             .position(|slot| slot.id == id)
-            .ok_or(EscrowError::WrongRequest)?;
-        let last = count.checked_sub(1).ok_or(EscrowError::Overflow)?;
+            .ok_or(EscrowError::Invariant)?;
+        let last = count.checked_sub(1).ok_or(EscrowError::Invariant)?;
         self.open.swap(index, last);
         if let Some(slot) = self.open.get_mut(last) {
             *slot = OpenSlot::default();
@@ -460,7 +457,7 @@ impl Introer {
         self.open_count = self
             .open_count
             .checked_sub(1)
-            .ok_or(EscrowError::Overflow)?;
+            .ok_or(EscrowError::Invariant)?;
         Ok(())
     }
 
@@ -542,6 +539,13 @@ pub struct AdminOnly<'info> {
 }
 
 #[derive(Accounts)]
+pub struct AcceptAdmin<'info> {
+    pub pending_admin: Signer<'info>,
+    #[account(mut, seeds = [b"config"], bump = config.bump, has_one = pending_admin @ EscrowError::Unauthorized)]
+    pub config: Account<'info, Config>,
+}
+
+#[derive(Accounts)]
 pub struct RegisterIntroer<'info> {
     #[account(mut)]
     pub wallet: Signer<'info>,
@@ -563,7 +567,7 @@ pub struct UpdateIntroer<'info> {
 pub struct Bid<'info> {
     #[account(mut)]
     pub requester: Signer<'info>,
-    #[account(mut, seeds = [b"config"], bump = config.bump)]
+    #[account(seeds = [b"config"], bump = config.bump)]
     pub config: Account<'info, Config>,
     #[account(mut, seeds = [b"introer", introer.wallet.as_ref()], bump = introer.bump)]
     pub introer: Account<'info, Introer>,
@@ -588,8 +592,6 @@ pub struct Bid<'info> {
 pub struct Withdraw<'info> {
     #[account(mut)]
     pub requester: Signer<'info>,
-    #[account(mut, seeds = [b"config"], bump = config.bump)]
-    pub config: Account<'info, Config>,
     #[account(mut, seeds = [b"introer", introer.wallet.as_ref()], bump = introer.bump)]
     pub introer: Account<'info, Introer>,
     #[account(
@@ -604,7 +606,7 @@ pub struct Withdraw<'info> {
 }
 
 #[derive(Accounts)]
-pub struct IntroerStep<'info> {
+pub struct Accept<'info> {
     pub wallet: Signer<'info>,
     #[account(mut, seeds = [b"introer", wallet.key().as_ref()], bump = introer.bump, has_one = wallet @ EscrowError::Unauthorized)]
     pub introer: Account<'info, Introer>,
@@ -618,10 +620,22 @@ pub struct IntroerStep<'info> {
 }
 
 #[derive(Accounts)]
+pub struct MarkMade<'info> {
+    pub wallet: Signer<'info>,
+    #[account(seeds = [b"introer", wallet.key().as_ref()], bump = introer.bump, has_one = wallet @ EscrowError::Unauthorized)]
+    pub introer: Account<'info, Introer>,
+    #[account(
+        mut,
+        seeds = [b"request", introer.key().as_ref(), &request.id.to_le_bytes()],
+        bump = request.bump,
+        has_one = introer @ EscrowError::WrongRequest
+    )]
+    pub request: Account<'info, Request>,
+}
+
+#[derive(Accounts)]
 pub struct Decline<'info> {
     pub wallet: Signer<'info>,
-    #[account(mut, seeds = [b"config"], bump = config.bump)]
-    pub config: Account<'info, Config>,
     #[account(mut, seeds = [b"introer", wallet.key().as_ref()], bump = introer.bump, has_one = wallet @ EscrowError::Unauthorized)]
     pub introer: Account<'info, Introer>,
     #[account(
@@ -642,8 +656,6 @@ pub struct Decline<'info> {
 pub struct Confirm<'info> {
     #[account(mut)]
     pub requester: Signer<'info>,
-    #[account(mut, seeds = [b"config"], bump = config.bump)]
-    pub config: Account<'info, Config>,
     #[account(mut, seeds = [b"introer", introer.wallet.as_ref()], bump = introer.bump)]
     pub introer: Account<'info, Introer>,
     #[account(
@@ -660,12 +672,11 @@ pub struct Confirm<'info> {
     pub wallet: UncheckedAccount<'info>,
 }
 
-/// `refund_unconfirmed` and `refund_expired`: anyone can call.
+/// `refund_unconfirmed` and `refund_expired`: anyone can call (see the
+/// timing rule in `refund_expired`).
 #[derive(Accounts)]
 pub struct RefundExpired<'info> {
     pub caller: Signer<'info>,
-    #[account(mut, seeds = [b"config"], bump = config.bump)]
-    pub config: Account<'info, Config>,
     #[account(seeds = [b"introer", introer.wallet.as_ref()], bump = introer.bump)]
     pub introer: Account<'info, Introer>,
     #[account(
@@ -781,4 +792,6 @@ pub enum EscrowError {
     NotExpired,
     #[msg("Math overflow")]
     Overflow,
+    #[msg("Stored state is inconsistent")]
+    Invariant,
 }

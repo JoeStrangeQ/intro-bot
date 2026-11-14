@@ -3,7 +3,7 @@
   "program_id": "GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC",
   "accounts": [
     { "pubkey": "GyGKxMyg1p9SsHfm15MkNUu1u9TN2JtTspcdmrtGUdse", "signer": true, "writable": true },
-    { "pubkey": "oXmMGdwAxABJH3h21nEhPBiBS6JoYe2dVMUevoKCF46", "signer": false, "writable": true },
+    { "pubkey": "oXmMGdwAxABJH3h21nEhPBiBS6JoYe2dVMUevoKCF46", "signer": false, "writable": false },
     { "pubkey": "6g5rwR7LZrodAm8aFtmx1B4iTnDBKUj14FNZ35vcCoC1", "signer": false, "writable": true },
     { "pubkey": "CXVKcVfwu9NNCymgnzzaZbvTM7mSWcwNrvNT8omzmse3", "signer": false, "writable": true },
     { "pubkey": "11111111111111111111111111111111", "signer": false, "writable": false },

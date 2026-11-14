@@ -1,5 +1,9 @@
 //! LiteSVM tests for the intro escrow program. Build first: `cargo build-sbf`.
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+#![allow(
+    clippy::unused_self,
+    reason = "builders stay methods for one call style"
+)]
 
 use anchor_lang::{
     prelude::Pubkey,
@@ -27,7 +31,7 @@ struct T {
     svm: LiteSVM,
     admin: Keypair,
     config: Pubkey,
-    /// Live requests, checked against `total_held` and their lamports.
+    /// Live requests, checked against their lamports and the open lists.
     live: Vec<Pubkey>,
 }
 
@@ -72,7 +76,32 @@ fn build(accounts: impl ToAccountMetas, data: impl InstructionData) -> Instructi
 
 /// Fresh chain with the program loaded and `authority` (if any) as the
 /// upgrade authority in ProgramData.
+/// Fails if the built program is older than its source, so tests never run
+/// a stale `.so`. Rebuild with `cargo build-sbf` (or `anchor build`).
+fn check_fresh_build() {
+    static CHECKED: std::sync::Once = std::sync::Once::new();
+    CHECKED.call_once(|| {
+        let modified =
+            |path: &std::path::Path| std::fs::metadata(path).and_then(|m| m.modified()).unwrap();
+        let built = modified(std::path::Path::new(PROGRAM));
+        let mut sources = vec![std::path::PathBuf::from(
+            "../programs/intro-escrow/Cargo.toml",
+        )];
+        for entry in std::fs::read_dir("../programs/intro-escrow/src").unwrap() {
+            sources.push(entry.unwrap().path());
+        }
+        for source in sources {
+            assert!(
+                modified(&source) <= built,
+                "{PROGRAM} is older than {}: run `cargo build-sbf`",
+                source.display()
+            );
+        }
+    });
+}
+
 fn chain(authority: Option<Pubkey>) -> LiteSVM {
+    check_fresh_build();
     let mut svm = LiteSVM::new();
     svm.add_program(intro_escrow::ID, &std::fs::read(PROGRAM).unwrap())
         .unwrap();
@@ -209,17 +238,25 @@ impl T {
         self.svm.set_sysvar(&clock);
     }
 
+    /// Lamports held for bids: the sum of live bids.
+    fn held(&self) -> u64 {
+        self.live
+            .iter()
+            .filter(|k| !self.gone(k))
+            .map(|k| self.request(k).bid)
+            .sum()
+    }
+
     fn now(&self) -> i64 {
         self.svm.get_sysvar::<Clock>().unix_timestamp
     }
 
-    /// `total_held` equals the sum of live bids, and each live request holds
-    /// exactly rent + bid.
+    /// Each live request holds exactly rent + bid, and each introer's open
+    /// list matches its open requests.
     fn check_books(&mut self) {
         let svm = &self.svm;
         self.live
             .retain(|key| svm.get_account(key).is_some_and(|a| a.lamports > 0));
-        let mut sum = 0;
         for key in &self.live {
             let account = self.svm.get_account(key).unwrap();
             let request = self.request(key);
@@ -227,9 +264,7 @@ impl T {
                 .svm
                 .minimum_balance_for_rent_exemption(account.data.len());
             assert_eq!(account.lamports, rent + request.bid, "request lamports");
-            sum += request.bid;
         }
-        assert_eq!(self.config().total_held, sum, "total_held");
         // Each introer's open list matches its open requests.
         let mut introers: Vec<Pubkey> = vec![];
         for key in &self.live {
@@ -329,15 +364,25 @@ impl T {
     }
 
     fn step_ix(accept: bool, wallet: Pubkey, request: Pubkey) -> Instruction {
-        let accounts = acc::IntroerStep {
-            wallet,
-            introer: introer_key(&wallet),
-            request,
-        };
+        let introer = introer_key(&wallet);
         if accept {
-            build(accounts, ix::Accept {})
+            build(
+                acc::Accept {
+                    wallet,
+                    introer,
+                    request,
+                },
+                ix::Accept {},
+            )
         } else {
-            build(accounts, ix::MarkMade {})
+            build(
+                acc::MarkMade {
+                    wallet,
+                    introer,
+                    request,
+                },
+                ix::MarkMade {},
+            )
         }
     }
 
@@ -353,7 +398,6 @@ impl T {
         build(
             acc::Withdraw {
                 requester,
-                config: self.config,
                 introer: introer_key(wallet),
                 request,
             },
@@ -377,7 +421,6 @@ impl T {
         build(
             acc::Decline {
                 wallet,
-                config: self.config,
                 introer: introer_key(&wallet),
                 request,
                 requester,
@@ -406,7 +449,6 @@ impl T {
         build(
             acc::Confirm {
                 requester,
-                config: self.config,
                 introer,
                 request,
                 wallet,
@@ -435,7 +477,6 @@ impl T {
     ) -> Instruction {
         let accounts = acc::RefundExpired {
             caller,
-            config: self.config,
             introer,
             request,
             requester,
@@ -515,7 +556,6 @@ fn init_config_sets_upgrade_authority_as_admin() {
     let t = T::new();
     let config = t.config();
     assert_eq!(config.admin, t.admin.pubkey());
-    assert_eq!(config.total_held, 0);
     assert!(!config.paused);
     let directory = t.directory();
     assert_eq!(directory.head, 0);
@@ -573,33 +613,63 @@ fn admin_setters_work_and_reject_others() {
     let admin = t.admin.insecure_clone();
     let stranger = t.user(1);
     let new_admin = t.user(1);
+    let accept_ix = |config: Pubkey, signer: Pubkey| {
+        build(
+            acc::AcceptAdmin {
+                pending_admin: signer,
+                config,
+            },
+            ix::AcceptAdmin {},
+        )
+    };
 
     for ix in [
         t.admin_ix(stranger.pubkey(), ix::SetPaused { paused: true }),
         t.admin_ix(
             stranger.pubkey(),
-            ix::SetAdmin {
+            ix::ProposeAdmin {
                 admin: stranger.pubkey(),
             },
         ),
     ] {
         fails(t.run(&stranger, ix), "Unauthorized");
     }
+    // Nobody pending: accept fails for everyone.
+    fails(
+        t.run(&stranger, accept_ix(t.config, stranger.pubkey())),
+        "Unauthorized",
+    );
+    // The default key can't be proposed.
+    let ix = t.admin_ix(
+        admin.pubkey(),
+        ix::ProposeAdmin {
+            admin: Pubkey::default(),
+        },
+    );
+    fails(t.run(&admin, ix), "Unauthorized");
 
-    for ix in [
-        t.admin_ix(admin.pubkey(), ix::SetPaused { paused: true }),
-        t.admin_ix(
-            admin.pubkey(),
-            ix::SetAdmin {
-                admin: new_admin.pubkey(),
-            },
-        ),
-    ] {
-        t.run(&admin, ix).unwrap();
-    }
+    let ix = t.admin_ix(admin.pubkey(), ix::SetPaused { paused: true });
+    t.run(&admin, ix).unwrap();
+    assert!(t.config().paused);
+    let ix = t.admin_ix(
+        admin.pubkey(),
+        ix::ProposeAdmin {
+            admin: new_admin.pubkey(),
+        },
+    );
+    t.run(&admin, ix).unwrap();
+    // Proposing alone changes nothing; only the proposed key can accept.
+    assert_eq!(t.config().admin, admin.pubkey());
+    assert_eq!(t.config().pending_admin, new_admin.pubkey());
+    fails(
+        t.run(&stranger, accept_ix(t.config, stranger.pubkey())),
+        "Unauthorized",
+    );
+    t.run(&new_admin, accept_ix(t.config, new_admin.pubkey()))
+        .unwrap();
     let config = t.config();
-    assert!(config.paused);
     assert_eq!(config.admin, new_admin.pubkey());
+    assert_eq!(config.pending_admin, Pubkey::default());
 
     // The old admin is out, the new one is in.
     let ix = t.admin_ix(admin.pubkey(), ix::SetPaused { paused: false });
@@ -736,7 +806,7 @@ fn happy_path_pays_introer_and_returns_rent() {
     assert_eq!(stored.created_at, t.now());
     assert_eq!(t.introer(&wallet.pubkey()).open_count, 1);
     assert_eq!(t.introer(&wallet.pubkey()).next_id, 1);
-    assert_eq!(t.config().total_held, bid);
+    assert_eq!(t.held(), bid);
 
     t.warp(100);
     t.accept(&wallet, request).unwrap();
@@ -760,7 +830,7 @@ fn happy_path_pays_introer_and_returns_rent() {
     let introer = t.introer(&wallet.pubkey());
     assert_eq!(introer.jobs_done, 1);
     assert_eq!(introer.earned, bid);
-    assert_eq!(t.config().total_held, 0);
+    assert_eq!(t.held(), 0);
 
     // A second job adds up.
     let request = t.bid(&requester, &wallet.pubkey(), SOL);
@@ -819,8 +889,11 @@ fn bid_enforces_min_max_and_text() {
     telegram[1] = 0xc3;
     let ix = text_bid(&t, pad("Toly"), telegram);
     fails(t.run(&requester, ix), "BadText");
-    // Full-length text and an empty handle are fine.
-    let ix = text_bid(&t, [b'x'; MAX_TARGET], [0; MAX_TELEGRAM]);
+    // Empty handle.
+    let ix = text_bid(&t, pad("Toly"), [0; MAX_TELEGRAM]);
+    fails(t.run(&requester, ix), "BadText");
+    // Full-length text is fine.
+    let ix = text_bid(&t, [b'x'; MAX_TARGET], [b'y'; MAX_TELEGRAM]);
     t.live.push(request_key(&introer_key(&w), 1));
     t.run(&requester, ix).unwrap();
 }
@@ -869,8 +942,8 @@ fn paused_blocks_bids_but_not_payouts_or_refunds() {
     t.warp(WORK_WINDOW + 1);
     let anyone = t.user(1);
     t.refund_unconfirmed(&anyone, w, unconfirmed, r).unwrap();
-    t.refund_expired(&anyone, w, expired, r).unwrap();
-    assert_eq!(t.config().total_held, 0);
+    t.refund_expired(&requester, w, expired, r).unwrap();
+    assert_eq!(t.held(), 0);
     assert_eq!(t.introer(&w).jobs_done, 1);
 
     t.set_paused(false);
@@ -914,7 +987,7 @@ fn full_queue_needs_the_lowest_request() {
     fails_bid(t.try_bid(&newcomer, &w, 9 * SOL, swapped), "WrongRequester");
     // Nothing moved.
     assert_eq!(t.introer(&w).open_count, MAX_OPEN);
-    assert_eq!(t.config().total_held, 15 * SOL);
+    assert_eq!(t.held(), 15 * SOL);
     // Exactly +10% is enough.
     t.try_bid(&newcomer, &w, SOL + SOL / 10, lowest).unwrap();
 }
@@ -935,7 +1008,7 @@ fn outbid_refunds_and_closes_the_lowest() {
     assert_eq!(t.lamports(&loser.pubkey()), loser_before + lowest_lamports);
     assert_eq!(t.request(&request).bid, 2 * SOL);
     assert_eq!(t.introer(&w).open_count, MAX_OPEN);
-    assert_eq!(t.config().total_held, 16 * SOL);
+    assert_eq!(t.held(), 16 * SOL);
     // The next lowest is now the oldest 2 SOL bid (a tie goes to the oldest).
     let next = t.introer(&w).lowest_open().unwrap();
     assert_eq!(next.id, t.request(&open[0].1).id);
@@ -993,6 +1066,50 @@ fn requester_can_outbid_their_own_lowest_request() {
         t.lamports(&requester.pubkey()),
         before + refund - 6 * SOL - rent - FEE
     );
+}
+
+#[test]
+fn queue_near_max_bid_can_still_be_outbid() {
+    let mut t = T::new();
+    let wallet = t.introer_with(MIN_BID_FLOOR);
+    let w = wallet.pubkey();
+    let requester = t.user(600);
+    let mut open = vec![];
+    for sol in 91..=95 {
+        open.push(t.bid(&requester, &w, sol * SOL));
+    }
+    // 110% of 91 SOL is above MAX_BID, so MAX_BID is enough.
+    let lowest = Some((open[0], requester.pubkey()));
+    fails_bid(t.try_bid(&requester, &w, MAX_BID - 1, lowest), "BidTooLow");
+    t.try_bid(&requester, &w, MAX_BID, lowest).unwrap();
+    // A full queue of MAX_BID bids can't be beaten.
+    let wallet = t.introer_with(MIN_BID_FLOOR);
+    let w = wallet.pubkey();
+    let rich = t.user(600);
+    let mut open = vec![];
+    for _ in 0..MAX_OPEN {
+        open.push(t.bid(&rich, &w, MAX_BID));
+    }
+    fails_bid(
+        t.try_bid(&requester, &w, MAX_BID, Some((open[0], rich.pubkey()))),
+        "BidTooLow",
+    );
+}
+
+#[test]
+fn outbid_rounds_the_ten_percent_up() {
+    let mut t = T::new();
+    let wallet = t.introer_with(MIN_BID_FLOOR);
+    let w = wallet.pubkey();
+    let requester = t.user(30);
+    // Lowest 0.010000001 SOL: 110% is 0.0110000011, rounded up to 11_000_002.
+    let mut open = vec![t.bid(&requester, &w, MIN_BID_FLOOR + 1)];
+    for _ in 1..MAX_OPEN {
+        open.push(t.bid(&requester, &w, SOL));
+    }
+    let lowest = Some((open[0], requester.pubkey()));
+    fails_bid(t.try_bid(&requester, &w, 11_000_001, lowest), "BidTooLow");
+    t.try_bid(&requester, &w, 11_000_002, lowest).unwrap();
 }
 
 #[test]
@@ -1242,21 +1359,48 @@ fn refund_expired_waits_for_the_work_window() {
     let r = requester.pubkey();
     let anyone = t.user(1);
     let request = t.bid(&requester, &w, SOL);
-    fails(t.refund_expired(&anyone, w, request, r), "BadStatus");
+    fails(t.refund_expired(&requester, w, request, r), "BadStatus");
     t.accept(&wallet, request).unwrap();
     t.warp(WORK_WINDOW);
-    fails(t.refund_expired(&anyone, w, request, r), "NotExpired");
+    fails(t.refund_expired(&requester, w, request, r), "NotExpired");
     t.warp(1);
+    // Only the requester may refund right after the work window.
+    fails(t.refund_expired(&anyone, w, request, r), "NotExpired");
     fails(
         t.refund_expired(&anyone, w, request, anyone.pubkey()),
         "WrongRequester",
     );
     let before = t.lamports(&r);
     let held = t.lamports(&request);
+    t.refund_expired(&requester, w, request, r).unwrap();
+    assert_eq!(t.lamports(&r), before + held - FEE);
+    assert_eq!(t.introer(&w).jobs_done, 0);
+    assert!(t.refund_expired(&requester, w, request, r).is_err());
+}
+
+#[test]
+fn others_refund_expired_only_after_the_confirm_grace() {
+    let mut t = T::new();
+    let wallet = t.introer_with(MIN_BID_FLOOR);
+    let w = wallet.pubkey();
+    let requester = t.user(10);
+    let r = requester.pubkey();
+    let anyone = t.user(1);
+    let request = t.bid(&requester, &w, SOL);
+    t.accept(&wallet, request).unwrap();
+    t.warp(WORK_WINDOW + CONFIRM_WINDOW);
+    fails(t.refund_expired(&anyone, w, request, r), "NotExpired");
+    // Meanwhile a late confirm still pays the introer.
+    let late = t.bid(&requester, &w, SOL);
+    t.accept(&wallet, late).unwrap();
+    t.warp(1);
+    let before = t.lamports(&r);
+    let held = t.lamports(&request);
     t.refund_expired(&anyone, w, request, r).unwrap();
     assert_eq!(t.lamports(&r), before + held);
-    assert_eq!(t.introer(&w).jobs_done, 0);
-    assert!(t.refund_expired(&anyone, w, request, r).is_err());
+    t.warp(WORK_WINDOW * 3);
+    t.confirm(&requester, w, late).unwrap();
+    assert_eq!(t.introer(&w).jobs_done, 1);
 }
 
 #[test]
@@ -1264,9 +1408,8 @@ fn refund_expired_does_not_apply_once_made() {
     let mut t = T::new();
     let (wallet, requester, request) = t.made_request(SOL);
     t.warp(WORK_WINDOW * 2);
-    let anyone = t.user(1);
     fails(
-        t.refund_expired(&anyone, wallet.pubkey(), request, requester.pubkey()),
+        t.refund_expired(&requester, wallet.pubkey(), request, requester.pubkey()),
         "BadStatus",
     );
 }
@@ -1291,7 +1434,7 @@ fn extra_lamports_sent_to_a_request_go_back_to_requester() {
     // The introer gets exactly the bid; the rest goes back to the requester.
     assert_eq!(t.lamports(&w), wallet_before + SOL);
     assert_eq!(t.lamports(&r), requester_before + held - SOL - FEE);
-    assert_eq!(t.config().total_held, 0);
+    assert_eq!(t.held(), 0);
 }
 
 #[test]
@@ -1305,7 +1448,7 @@ fn many_requests_keep_books_balanced() {
     let r2 = t.bid(&requester, &b.pubkey(), 2 * SOL);
     let r3 = t.bid(&requester, &a.pubkey(), 3 * SOL);
     let r4 = t.bid(&requester, &b.pubkey(), 4 * SOL);
-    assert_eq!(t.config().total_held, 10 * SOL);
+    assert_eq!(t.held(), 10 * SOL);
     // Requests of one introer can't be driven through the other.
     assert!(t.accept(&b, r1).is_err());
     assert!(t.decline(&a, r2, r).is_err());
@@ -1318,7 +1461,7 @@ fn many_requests_keep_books_balanced() {
     t.warp(CONFIRM_WINDOW + 1);
     let anyone = t.user(1);
     t.refund_unconfirmed(&anyone, b.pubkey(), r4, r).unwrap();
-    assert_eq!(t.config().total_held, 0);
+    assert_eq!(t.held(), 0);
     assert_eq!(t.introer(&a.pubkey()).earned, SOL);
     assert_eq!(t.introer(&b.pubkey()).earned, 0);
     assert_eq!(t.introer(&a.pubkey()).open_count, 0);
@@ -1365,11 +1508,11 @@ fn account_layouts_have_fixed_offsets() {
     t.accept(&wallet, request).unwrap();
 
     let data = t.svm.get_account(&config_key()).unwrap().data;
-    assert_eq!(data.len(), 50);
+    assert_eq!(data.len(), 74);
     assert_eq!(&data[8..40], t.admin.pubkey().as_ref());
-    assert_eq!(data[40], 0);
-    assert_eq!(u64_at(&data, 41), 2 * SOL);
-    assert_eq!(data[49], t.config().bump);
+    assert!(data[40..72].iter().all(|b| *b == 0)); // pending_admin
+    assert_eq!(data[72], 0); // paused
+    assert_eq!(data[73], t.config().bump);
 
     let data = t.svm.get_account(&introer_key(&w)).unwrap().data;
     assert_eq!(data.len(), 230);
@@ -1501,8 +1644,8 @@ fn write_instruction_fixtures() {
     t.warp(WORK_WINDOW + 1);
     let ix = t.refund_ix(true, w, introer, req(3), r);
     go(&mut t, "refund_unconfirmed", &wallet, ix);
-    let ix = t.refund_ix(false, w, introer, req(4), r);
-    go(&mut t, "refund_expired", &wallet, ix);
+    let ix = t.refund_ix(false, r, introer, req(4), r);
+    go(&mut t, "refund_expired", &requester, ix);
     // Full queue: bids 1..=5 SOL (ids 5..=9); outbid the 1 SOL one.
     for sol in 1..=5 {
         bid_more(&mut t, sol);
@@ -1512,6 +1655,16 @@ fn write_instruction_fixtures() {
     go(&mut t, "bid_outbid", &requester, ix);
     let ix = t.admin_ix(admin.pubkey(), ix::SetPaused { paused: false });
     go(&mut t, "set_paused", &admin, ix);
+    let ix = t.admin_ix(admin.pubkey(), ix::ProposeAdmin { admin: w });
+    go(&mut t, "propose_admin", &admin, ix);
+    let ix = build(
+        acc::AcceptAdmin {
+            pending_admin: w,
+            config: config_key(),
+        },
+        ix::AcceptAdmin {},
+    );
+    go(&mut t, "accept_admin", &wallet, ix);
 
     let dir = std::path::Path::new("fixtures");
     std::fs::create_dir_all(dir).unwrap();

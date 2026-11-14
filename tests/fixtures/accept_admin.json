@@ -1,0 +1,9 @@
+{
+  "name": "accept_admin",
+  "program_id": "GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC",
+  "accounts": [
+    { "pubkey": "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu", "signer": true, "writable": false },
+    { "pubkey": "oXmMGdwAxABJH3h21nEhPBiBS6JoYe2dVMUevoKCF46", "signer": false, "writable": true }
+  ],
+  "data_hex": "702a2d5a74b50daa"
+}
