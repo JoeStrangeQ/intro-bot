@@ -157,6 +157,8 @@ Account order (s = signer, w = writable):
   `Refunded{request, reason}` is emitted on every refund: `0` withdrawn, `1` declined,
   `2` outbid, `3` expired (no work), `4` unconfirmed.
 - Errors: see `EscrowError` in the IDL.
+- Every instruction works alone in a tx (no System or ComputeBudget ix) within the default
+  200k CU. Measured max: ~23k CU (`bid` at a full queue). Tests fail above 100k.
 - Test vectors: `tests/fixtures/*.json` (one instruction each: accounts in order + data hex) and
   `tests/fixtures/accounts.json` (raw account bytes). Rewritten by `cargo test`.
 

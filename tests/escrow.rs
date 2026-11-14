@@ -23,6 +23,8 @@ use solana_transaction::Transaction;
 const PROGRAM: &str = "../target/deploy/intro_escrow.so";
 const CAP: u64 = 1_000 * SOL;
 const FEE: u64 = 5_000;
+/// Half the default per-instruction budget of 200k CU.
+const CU_LIMIT: u64 = 100_000;
 
 struct T {
     svm: LiteSVM,
@@ -96,7 +98,15 @@ fn send(svm: &mut LiteSVM, payer: &Keypair, ix: Instruction) -> Result<(), Strin
         svm.latest_blockhash(),
     );
     svm.send_transaction(tx)
-        .map(|_| ())
+        .map(|meta| {
+            // The relay sends each action as one bare instruction, so it must
+            // fit the default 200k CU budget with room to spare.
+            assert!(
+                meta.compute_units_consumed <= CU_LIMIT,
+                "used {} CU",
+                meta.compute_units_consumed
+            );
+        })
         .map_err(|e| format!("{:?} {}", e.err, e.meta.logs.join("\n")))
 }
 
