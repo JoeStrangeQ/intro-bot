@@ -103,7 +103,7 @@ local function modal(open, ...)
   args[args.n] = function(v)
     st.modal = nil
     cb(v)
-    if st.pending and not st.modal then
+    if st.pending and not st.modal and st.screen == "home" then
       local n = st.pending
       st.pending = nil
       job_done(n)
@@ -236,7 +236,7 @@ local function build_rows(name, rows, role, empty, empty2)
       end
     end})
   end
-  st.w.count = #items
+  st.w.count, st.w.rows = #items, rows
   ui.hint(#items > 0 and "SELECT open   LEFT/RIGHT screens" or TABHINT)
 end
 
@@ -259,9 +259,12 @@ end
 local function refresh_rows(rows, role, rebuild)
   local items = row_items(rows, role)
   if st.w.list and #items > 0 then
-    local sel = st.w.list:selected() or 1
+    local old = st.w.rows and st.w.rows[st.w.list:selected() or 1]
+    local sel = 1
+    for k, r in ipairs(rows) do if old and r.pda == old.pda then sel = k end end
     st.w.list:items(items)
-    st.w.list:select(math.min(sel, #items))
+    st.w.list:select(sel)
+    st.w.rows = rows
   elseif #items ~= st.w.count or not st.w.list then
     rebuild()
   end
@@ -594,6 +597,7 @@ local function ask_bid(p)
       tg = tg:gsub("%s", "")
       if tg ~= "" and tg:sub(1, 1) ~= "@" then tg = "@" .. tg end
       input("Bid in SOL (min " .. sol.format(x.min_bid, 3) .. ")", 12, function(amount)
+        if not amount then return end
         local lam = sol.to_lamports(amount)
         if not lam then ui.toast("Use a number like 0.1") return end
         if sol.cmp(lam, x.min_bid) < 0 or sol.cmp(lam, escrow.MIN_BID_FLOOR) < 0 then
@@ -696,7 +700,8 @@ end
 
 local restart_poll  -- forward
 
-local function forget()
+-- Clears what came from the chain (or the demo), in memory and in storage.
+local function reset_data()
   st.me, st.queue, st.rows, st.live, st.updated, st.spark, st.jobs = nil, nil, nil, {}, nil, {}, nil
   storage.remove("spark") storage.remove("jobs") storage.remove("live")
 end
@@ -706,7 +711,7 @@ local function set_wallet(w)
   if w then storage.set("wallet", w) else storage.remove("wallet") end
   st.mine = {}
   storage.remove("mine")
-  forget()
+  reset_data()
   restart_poll()
 end
 
@@ -724,6 +729,7 @@ local function ask_offer()
   input("What can you intro?", escrow.OFFER, function(offer)
     if not offer or offer:gsub("%s", "") == "" then return end
     input("Min bid in SOL", 12, function(min)
+      if not min then return end
       local lam = sol.to_lamports(min)
       if not lam or sol.cmp(lam, escrow.MIN_BID_FLOOR) < 0 then ui.toast("At least 0.01 SOL") return end
       if sol.cmp(lam, escrow.MAX_BID) > 0 then ui.toast("At most 100 SOL") return end
@@ -751,7 +757,7 @@ local function build_setup()
     elseif i == 3 then
       st.mock = not st.mock
       storage.set("mock", st.mock)
-      forget()
+      reset_data()
       restart_poll()
       list:items(setup_items())
       list:select(3)
@@ -785,6 +791,12 @@ local BACK = {
 
 function show(name)
   st.dirty = nil
+  if name == "home" and st.pending and not st.modal and not st.anim then
+    st.screen = name
+    local n = st.pending
+    st.pending = nil
+    return job_done(n)
+  end
   if name == "introer" and st.screen ~= "introer" and st.pick and st.pick.introer == nil then
     load_introer(st.pick)
   end
@@ -798,7 +810,7 @@ local ANIM_MS = 2600
 
 function job_done(n)
   if st.anim then return end
-  if st.modal then st.pending = (st.pending or 0) + n return end
+  if st.modal or st.screen ~= "home" then st.pending = (st.pending or 0) + n return end
   ui.clear()
   st.w = {}
   ui.bg(C.brand)
@@ -850,7 +862,8 @@ local function got_me(me)
   while #st.spark > SPARK_N do table.remove(st.spark, 1) end
   local before = st.jobs
   st.jobs = me.jobs
-  storage.set("spark", st.spark) storage.set("jobs", me.jobs)
+  storage.set("spark", st.spark)
+  if before ~= me.jobs then storage.set("jobs", me.jobs) end
   if before and me.jobs > before then job_done(me.jobs - before) end
 end
 
@@ -934,7 +947,9 @@ local function read_queue(gen, me)
       st.queue, st.live = rows, live
       local keep = {}
       for id in pairs(live) do if #keep < 20 then keep[#keep + 1] = id end end
-      storage.set("live", keep)
+      table.sort(keep)
+      local was = storage.get("live")
+      if type(was) ~= "table" or table.concat(was, ",") ~= table.concat(keep, ",") then storage.set("live", keep) end
       read_mine(gen)
     end)
   end)

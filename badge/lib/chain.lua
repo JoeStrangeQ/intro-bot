@@ -1,6 +1,7 @@
 -- lib/chain.lua: reads the chain with `rpc` within its budget, and posts messages to the relay.
 local bytes = require("lib.bytes")
 local escrow = require("lib.escrow")
+local sol = require("lib.sol")
 
 local M = {}
 
@@ -94,6 +95,8 @@ function M.relay(message, cb)
     if type(url) ~= "string" or #url > 256 or url:sub(1, #M.RELAY + 8) ~= "solana:" .. M.RELAY .. "/" then
       return cb(false, "bad relay answer")
     end
+    -- Solana Pay: a link with a query must be percent-encoded after "solana:".
+    if url:find("?", 1, true) then url = "solana:" .. sol.urlencode(url:sub(8)) end
     cb(true, url)
   end)
 end

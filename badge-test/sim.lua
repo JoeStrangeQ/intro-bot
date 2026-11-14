@@ -420,6 +420,7 @@ local function type_in(text)
 end
 local function go(title)
   for _ = 1, 7 do
+    if has("JOB DONE!") then advance(3000) end
     if W.labels[1] and W.labels[1].t == title then return end
     key("right")
   end
@@ -620,6 +621,16 @@ advance(20000)
 go("My queue")
 check(W.lists[1].rows[1].title == "Vitalik" and W.lists[1].rows[2].title == "Anza"
   and W.lists[1].rows[3].title == "Mert" and W.lists[1].rows[4].title == "Done", "queue order: open first, newest")
+W.lists[1].sel = 2
+put_req(5, {requester = RQ, bid = "90000000", status = 0, target = "Newer", telegram = ""})
+CHAIN[b58e(MYI)] = enc_introer({wallet = ME, min_bid = "50000000", next_id = 6, jobs = 4, earned = "30000000000",
+  created_at = NOW - 86400 * 2, open = 2, offer = "Solana devs"})
+advance(20000)
+check(W.lists[1].rows[W.lists[1].sel].title == "Anza" and W.lists[1].rows[1].title == "Newer", "selection follows the request, not the row")
+CHAIN[b58e(REQ[5])] = nil
+CHAIN[b58e(MYI)] = enc_introer({wallet = ME, min_bid = "50000000", next_id = 4, jobs = 4, earned = "30000000000",
+  created_at = NOW - 86400 * 2, open = 1, offer = "Solana devs"})
+advance(20000)
 list_select(1); list_select(2); advance(30)
 m = relay_reply(true)
 check(m.ixs[1].data == escrow.DISC.decline and m.ixs[1].accounts[5] == RQ and m.w[RQ], "decline: requester refunded")
@@ -633,6 +644,14 @@ check(has("The requester confirms to pay you."), "made: nothing to sign for the 
 key("back")
 
 -- Relay failure, offline.
+list_select(1); list_select(1)
+relay_reply(true, {status = 200, body = json.encode({url = "solana:https://relay.botbotcap.com/tx?id=a&b=1"})})
+check(W.qr and W.qr.t == "solana:https%3A%2F%2Frelay.botbotcap.com%2Ftx%3Fid%3Da%26b%3D1", "query link percent-encoded")
+key("back"); key("back")
+list_select(1); list_select(1)
+relay_reply(true, {status = 200, body = json.encode({url = "solana:https://relay.botbotcap.com.evil.io/tx/1"})})
+check(has("bad relay answer"), "relay host checked")
+key("back"); key("back")
 list_select(1); list_select(1); advance(30)
 relay_reply(true, {status = 500, body = ""})
 check(has("Could not sign:") and has("relay error 500"), "relay error shown")
@@ -662,6 +681,16 @@ check(#W.led > 0 and W.led_off and has("Ask me about BotBot"), "LEDs, back to Ho
 -- Hire me.
 go("Hire me")
 check(has("Paid only when you confirm.") and has("We trust you to keep your word."), "hire me copy")
+CHAIN[b58e(MYI)] = enc_introer({wallet = ME, min_bid = "50000000", next_id = 4, jobs = 6, earned = "30200000000",
+  created_at = NOW - 86400 * 2, open = 1, offer = "Solana devs"})
+advance(21000)
+check(not has("JOB DONE!") and has("Paid only when you confirm."), "job done waits off Home")
+key("left"); key("left")
+check(has("JOB DONE!"), "job done plays on Home")
+advance(3000)
+go("Setup"); list_select(2); type_in("Solana devs"); local n_t = #W.toasts; type_in(nil)
+check(#W.toasts == n_t and not has("Sign on phone"), "cancelled min bid: no toast")
+go("Hire me")
 
 -- Mesh: a nearby introer, and a beacon on request.
 callback(on_mesh, "BADGE2", {k = "ib", w = "Demo1ntroer1111111111111111111111111111111"})
