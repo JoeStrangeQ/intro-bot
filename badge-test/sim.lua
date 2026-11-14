@@ -495,7 +495,7 @@ local do_ = escrow.decode_offer(enc_offer(RQ, ME))
 check(do_ and do_.job == RQ and do_.introer == ME, "decode offer")
 local db = escrow.decode_board(enc_board({OTHER, THIRD}))
 check(db and #db == 2 and db[1] == THIRD and db[2] == OTHER, "decode board: newest first")
-check(#escrow.actions({status = 0}, "requester", nil, NOW) == 1, "open job: cancel")
+check(#escrow.actions({status = 0, created_at = NOW - 3600}, "requester", nil, NOW) == 1 and #escrow.actions({status = 0, created_at = NOW - 60}, "requester", nil, NOW) == 0, "open job: cancel after 1h")
 check(escrow.actions({status = 2, made_at = NOW - 73 * 3600}, "requester", nil, NOW)[2] == "refund_unconfirmed", "made 72h: refund")
 check(escrow.actions({status = 1, approved_at = NOW - 8 * 86400}, "requester", nil, NOW)[2] == "refund_expired", "approved 7d: refund")
 check(escrow.actions({status = 1, approved = ME, approved_at = NOW}, "introer", ME, NOW)[1] == "mark_made", "picked: mark made")
@@ -541,11 +541,19 @@ else
   same_ix("post_job", escrow.ix_post_job(job, nonce, bytes.text(d, 17, 32), bytes.text(d, 49, 32),
     bytes.text(d, 81, 32), bytes.u64(d, 113)))
   same_ix("cancel_job", escrow.ix_cancel_job(acc("cancel_job", 2)))
-  check(escrow.offer_pda(acc("offer", 4), wallet) == acc("offer", 5), "fixture offer pda")
-  same_ix("offer", escrow.ix_offer(wallet, acc("offer", 4)))
-  same_ix("withdraw_offer", escrow.ix_withdraw_offer(wallet, acc("withdraw_offer", 3)))
-  same_ix("close_offer", escrow.ix_close_offer(acc("close_offer", 4), acc("close_offer", 3)))
-  same_ix("approve", escrow.ix_approve(acc("approve", 2), data("approve"):sub(9, 40)))
+  -- Offers are ["offer", job, serial, wallet]: find each fixture's job serial.
+  local function serial_of(job, w, offer)
+    for n = 0, 20 do if escrow.offer_pda(job, tostring(n), w) == offer then return tostring(n) end end
+  end
+  local s1 = serial_of(acc("offer", 4), wallet, acc("offer", 5))
+  check(s1, "fixture offer pda: [offer, job, serial, wallet]")
+  same_ix("offer", escrow.ix_offer(wallet, acc("offer", 4), s1))
+  local s2 = serial_of(acc("withdraw_offer", 3), wallet, acc("withdraw_offer", 2))
+  same_ix("withdraw_offer", escrow.ix_withdraw_offer(wallet, acc("withdraw_offer", 3), s2))
+  local s3 = serial_of(acc("close_offer", 4), acc("close_offer", 3), acc("close_offer", 2))
+  same_ix("close_offer", escrow.ix_close_offer(acc("close_offer", 4), s3, acc("close_offer", 3)))
+  local s4 = serial_of(acc("approve", 2), wallet, acc("approve", 3))
+  same_ix("approve", escrow.ix_approve(acc("approve", 2), s4, wallet))
   same_ix("mark_made", escrow.ix_mark_made(acc("mark_made", 2)))
   same_ix("confirm", escrow.ix_confirm(acc("confirm", 2), acc("confirm", 4)))
   same_ix("refund_expired", escrow.ix_refund("refund_expired", acc("refund_expired", 2)))
@@ -670,7 +678,7 @@ go("Intro board")
 list_select(1); list_select(1)
 m = relay_reply(true)
 ix = m.ixs[1]
-local MYOFFER = escrow.offer_pda(JOB2, ME)
+local MYOFFER = escrow.offer_pda(JOB2, "1", ME)
 check(same(ix.accounts, {m.keys[1], CONFIG, MYI, JOB2, MYOFFER, SYS}) and ix.data == escrow.DISC.offer, "offer: accounts")
 check(m.w[JOB2] and m.w[MYOFFER] and not m.w[MYI], "offer: writable")
 CHAIN[b58e(MYOFFER)] = enc_offer(JOB2, ME)
@@ -687,6 +695,12 @@ key("back")
 -- Someone offers on my job; I approve them.
 put_job({requester = ME, nonce = nonce, bid = "12500000000", who = "Toly", company = "Solana Labs",
   telegram = "@joe", offers = {OTHER, THIRD}})
+go("My jobs"); advance(20000)
+list_select(1); advance(200)
+check(not W.lists[1].rows[3] and has("Cancel available in"), "cancel hidden for the first hour")
+key("back")
+put_job({requester = ME, nonce = nonce, bid = "12500000000", who = "Toly", company = "Solana Labs",
+  telegram = "@joe", offers = {OTHER, THIRD}, created_at = NOW - 3600})
 CHAIN[b58e(escrow.introer_pda(OTHER))] = enc_introer({wallet = OTHER, name = "Ana", jobs = 7, earned = "2400000000"})
 go("My jobs"); advance(20000)
 list_select(1); advance(200)
@@ -697,8 +711,8 @@ check(pool[1].title:find("Approve", 1, true) and pool[2].title == "Approve Ana" 
 list_select(2)
 m = relay_reply(true)
 ix = m.ixs[1]
-check(same(ix.accounts, {m.keys[1], MYJOB, escrow.offer_pda(MYJOB, OTHER)}) and ix.data == escrow.DISC.approve .. OTHER
-  and m.w[MYJOB], "approve: accounts and introer arg")
+check(same(ix.accounts, {m.keys[1], MYJOB, escrow.offer_pda(MYJOB, "1", OTHER)}) and ix.data == escrow.DISC.approve
+  and m.w[MYJOB], "approve: accounts, no args")
 put_job({requester = ME, nonce = nonce, bid = "12500000000", status = 1, approved = OTHER, approved_at = NOW,
   who = "Toly", company = "Solana Labs", telegram = "@joe", offers = {OTHER, THIRD}})
 advance(6000)

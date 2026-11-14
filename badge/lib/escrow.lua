@@ -10,6 +10,7 @@ M.CLUSTER = "devnet"
 
 M.WORK_WINDOW = 7 * 24 * 3600     -- approved -> mark made
 M.CONFIRM_WINDOW = 72 * 3600      -- made -> confirm
+M.CANCEL_DELAY = 3600             -- posted -> cancel
 M.WHO, M.COMPANY, M.TELEGRAM, M.NAME = 32, 32, 32, 32
 M.OFFERS, M.BOARD = 16, 64
 M.MIN_BID = "10000000"
@@ -132,7 +133,8 @@ function M.config_pda() return pda("config") end
 function M.board_pda() return pda("board") end
 function M.introer_pda(wallet) return pda("introer", wallet) end
 function M.job_pda(requester, nonce) return pda("job", requester, bytes.pack_u64(nonce)) end
-function M.offer_pda(job, introer_wallet) return pda("offer", job, introer_wallet) end
+-- Offers are per job serial, so offers on a closed job never count for a re-post.
+function M.offer_pda(job, serial, introer_wallet) return pda("offer", job, bytes.pack_u64(serial), introer_wallet) end
 
 -- Instructions, signer first. W is tx.WALLET, the signer the relay fills in.
 local function ix(name, accounts, args)
@@ -159,22 +161,24 @@ function M.ix_cancel_job(job)
   return ix("cancel_job", {{W, w = true}, {job, w = true}})
 end
 
-function M.ix_offer(me, job)
+function M.ix_offer(me, job, serial)
   return ix("offer", {{W, w = true}, {M.config_pda()}, {M.introer_pda(me)}, {job, w = true},
-    {M.offer_pda(job, me), w = true}, {tx.SYSTEM}})
+    {M.offer_pda(job, serial, me), w = true}, {tx.SYSTEM}})
 end
 
-function M.ix_withdraw_offer(me, job)
-  return ix("withdraw_offer", {{W, w = true}, {M.offer_pda(job, me), w = true}, {job}})
+function M.ix_withdraw_offer(me, job, serial)
+  return ix("withdraw_offer", {{W, w = true}, {M.offer_pda(job, serial, me), w = true}, {job, w = true}})
 end
 
 -- Anyone, once the job is closed: the rent goes back to the introer.
-function M.ix_close_offer(job, introer_wallet)
-  return ix("close_offer", {{W}, {M.offer_pda(job, introer_wallet), w = true}, {introer_wallet, w = true}, {job}})
+function M.ix_close_offer(job, serial, introer_wallet)
+  return ix("close_offer", {{W}, {M.offer_pda(job, serial, introer_wallet), w = true}, {introer_wallet, w = true},
+    {job}})
 end
 
-function M.ix_approve(job, introer_wallet)
-  return ix("approve", {{W}, {job, w = true}, {M.offer_pda(job, introer_wallet)}}, introer_wallet)
+-- Approves the offer's introer.
+function M.ix_approve(job, serial, introer_wallet)
+  return ix("approve", {{W}, {job, w = true}, {M.offer_pda(job, serial, introer_wallet)}})
 end
 
 function M.ix_mark_made(job)
@@ -192,11 +196,19 @@ function M.ix_refund(name, job, requester)
   return ix(name, {{W}, {job, w = true}, {requester or W, w = true}})
 end
 
+-- A line about what can't be done yet, or nil.
+function M.note(j, role, now)
+  if role == "requester" and j.status == M.OPEN and now then
+    local left = j.created_at + M.CANCEL_DELAY - now
+    if left > 0 then return "Cancel available in " .. math.max(1, (left + 59) // 60) .. " min" end
+  end
+end
+
 -- Signed steps a job allows, for its requester or for an introer `me` (32 bytes), at `now`.
 function M.actions(j, role, me, now)
   local out = {}
   if role == "requester" then
-    if j.status == M.OPEN then out[1] = "cancel_job" end
+    if j.status == M.OPEN and now and now >= j.created_at + M.CANCEL_DELAY then out[1] = "cancel_job" end
     if j.status == M.APPROVED or j.status == M.MADE then out[#out + 1] = "confirm" end
     if now and j.status == M.APPROVED and now > j.approved_at + M.WORK_WINDOW then
       out[#out + 1] = "refund_expired"

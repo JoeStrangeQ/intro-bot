@@ -55,7 +55,7 @@ local st = {
   end, MAX_MINE),
   -- Jobs I offered on: {j = job address (base58), at}.
   offered = stored_list("offered", function(o)
-    return type(o) == "table" and sol.is_wallet(o.j) and type(o.at) == "number"
+    return type(o) == "table" and sol.is_wallet(o.j) and digits(o.s, 20) and type(o.at) == "number"
   end, MAX_OFFERED),
   me = nil,            -- my Introer account, false when not registered, nil unknown
   board = nil,         -- jobs on the board, newest first
@@ -163,13 +163,13 @@ local function plan(action, r)
   elseif action == "cancel_job" then
     return escrow.ix_cancel_job(r.pda), r.pda, "gone"
   elseif action == "offer" then
-    return escrow.ix_offer(me, r.pda), escrow.offer_pda(r.pda, me), "exists"
+    return escrow.ix_offer(me, r.pda, r.serial), escrow.offer_pda(r.pda, r.serial, me), "exists"
   elseif action == "withdraw_offer" then
-    return escrow.ix_withdraw_offer(me, r.pda), escrow.offer_pda(r.pda, me), "gone"
+    return escrow.ix_withdraw_offer(me, r.pda, r.serial), escrow.offer_pda(r.pda, r.serial, me), "gone"
   elseif action == "close_offer" then
-    return escrow.ix_close_offer(r.pda, me), escrow.offer_pda(r.pda, me), "gone"
+    return escrow.ix_close_offer(r.pda, r.serial, me), escrow.offer_pda(r.pda, r.serial, me), "gone"
   elseif action == "approve" then
-    return escrow.ix_approve(r.pda, r.introer), r.pda, escrow.APPROVED
+    return escrow.ix_approve(r.pda, r.serial, r.introer), r.pda, escrow.APPROVED
   elseif action == "mark_made" then
     return escrow.ix_mark_made(r.pda), r.pda, escrow.MADE
   elseif action == "confirm" then
@@ -218,7 +218,7 @@ local function sign_done(s)
       while #st.mine > MAX_MINE do table.remove(st.mine, 1) end
       storage.set("mine", st.mine)
     elseif a == "offer" then
-      st.offered[#st.offered + 1] = {j = solana.encode(r.pda), at = now() or 0}
+      st.offered[#st.offered + 1] = {j = solana.encode(r.pda), s = r.serial, at = now() or 0}
       while #st.offered > MAX_OFFERED do table.remove(st.offered, 1) end
       storage.set("offered", st.offered)
     end
@@ -316,7 +316,7 @@ function start_sign(action, r, back)
     function() if action == "post_job" then escrow.board_pda() end end,
     function() if action == "post_job" then r.pda = r.pda or escrow.job_pda(me, r.nonce) end end,
     function() if r.approved then escrow.introer_pda(r.approved) end end,
-    function() if r.introer and r.pda then escrow.offer_pda(r.pda, r.introer) end end,
+    function() if r.introer and r.pda then escrow.offer_pda(r.pda, r.serial, r.introer) end end,
   }
   local k = 0
   local function step()
@@ -494,8 +494,11 @@ local function build_job()
 end
 
 local function load_names(j)
+  if st.names_job == j then return end  -- once per copy of the job
+  st.names_job = j
   local want = {}
-  for _, w in ipairs(j.offers or {}) do if st.names[w] == nil then want[#want + 1] = w end end
+  -- Not registered yet (false) is asked again: they may have registered since.
+  for _, w in ipairs(j.offers or {}) do if not st.names[w] then want[#want + 1] = w end end
   if #want == 0 then return end
   if st.mock then
     for _, w in ipairs(want) do st.names[w] = demo.introer(w) or false end
@@ -535,7 +538,7 @@ local function build_myjob()
       local a = act[i]
       if not a then return end
       if a[1] == "approve" then
-        start_sign("approve", {pda = j.pda, introer = a[2]}, "myjobs")
+        start_sign("approve", {pda = j.pda, serial = j.serial, introer = a[2]}, "myjobs")
       elseif a[1] == "cancel_job" then
         confirm("Cancel and get your bid back?", function(yes) if yes then start_sign("cancel_job", j, "myjobs") end end)
       else
@@ -544,6 +547,8 @@ local function build_myjob()
     end})
   end
   if j.status == escrow.MADE then line(178, "Made? Confirm to pay. 72h, then refund.", C.orange) end
+  local note = escrow.note(j, "requester", now())
+  if note then line(178, note, C.orange) end
   ui.hint("SELECT sign   CANCEL back")
   load_names(j)
 end
@@ -825,7 +830,7 @@ local function read_offers(gen)
   read_jobs(gen, pdas, function(rows, missing)
     rows = newest_first(rows)
     for i = 1, #pdas do
-      if missing[i] then rows[#rows + 1] = {closed = true, pda = pdas[i]} end
+      if missing[i] then rows[#rows + 1] = {closed = true, pda = pdas[i], serial = st.offered[i].s} end
     end
     st.my_offers = rows
     st.read_at.myoffers.t = sys.millis()
