@@ -10,7 +10,10 @@ KEYS=~/.config/intro-bot
 DEPLOYER=$KEYS/deployer.json
 PROGRAM_KEY=$KEYS/intro_escrow-keypair.json
 PROGRAM=GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC
-RPC_URL=${RPC_URL:-https://api.mainnet-beta.solana.com}
+# Your mainnet RPC (e.g. Helius) lives in this file, never in the repo.
+RPC_FILE=$KEYS/rpc-url
+RPC_URL=${RPC_URL:-$(cat "$RPC_FILE" 2>/dev/null || true)}
+[ -n "$RPC_URL" ] || { echo "put your mainnet RPC URL in $RPC_FILE"; exit 1; }
 SO=target/deploy/intro_escrow.so
 NEED_SOL=5.4
 
@@ -47,11 +50,11 @@ say "init_config (deployer becomes admin)"
 RPC_URL=$RPC_URL node badge-test/wallet.mjs init-config "$DEPLOYER" \
   || echo "init_config failed (already done? check the Config account)"
 
-say "Relay (relay.botbotcap.com, mainnet rpc)"
+say "Relay (intro-bot-relay-production.nav-keeper.workers.dev, mainnet rpc)"
 ( cd services/relay
   printf '%s' "$RPC_URL" | npx -y wrangler@4 secret put RPC_URL --env production
   npx -y wrangler@4 deploy --env production )
-curl -fsS -X POST https://relay.botbotcap.com/connect -H 'content-type: application/json' -d '{}' >/dev/null \
+curl -fsS -X POST https://intro-bot-relay-production.nav-keeper.workers.dev/connect -H 'content-type: application/json' -d '{}' >/dev/null \
   && echo "relay is up" || echo "relay check failed"
 
 say "Done"

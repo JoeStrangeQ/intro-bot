@@ -23,7 +23,8 @@ simple = { limit = 60, period = 60 }
 RPC_URL = "https://api.devnet.solana.com"
 
 [env.production]
-routes = [{ pattern = "relay.botbotcap.com", custom_domain = true }]
+# Served on workers.dev (botbotcap.com DNS is not on Cloudflare).
+workers_dev = true
 # RPC_URL comes from `wrangler secret put RPC_URL --env production`.
 vars = {}
 durable_objects.bindings = [{ name = "TX", class_name = "TxStore" }]

@@ -30,7 +30,7 @@ When a job you made is confirmed, the badge plays "JOB DONE!" and flashes its li
 - Reads with `rpc` (`getAccountInfo`, `getMultipleAccounts`), every 20 s, within 30 calls
   a minute: the Board account (a ring of the newest jobs), your jobs by nonce, and the jobs
   you offered on. A job is ~700 bytes, so 3 are read per call.
-- Posts each transaction message to `https://relay.botbotcap.com/tx` and shows the
+- Posts each transaction message to `https://intro-bot-relay-production.nav-keeper.workers.dev/tx` and shows the
   `solana:` link it returns as a QR, then watches the changed account. If a step doesn't
   land, SELECT retries it.
 - Program id and cluster are at the top of `lib/escrow.lua`.
@@ -48,7 +48,7 @@ later (the `solana` module).
 ## Publish
 
 Link X at `/profile`, then press **Publish**. Permissions: `rpc`, `http` (host
-`relay.botbotcap.com`), `led`. Storage is always allowed.
+`intro-bot-relay-production.nav-keeper.workers.dev`), `led`. Storage is always allowed.
 
 ## Local checks
 
