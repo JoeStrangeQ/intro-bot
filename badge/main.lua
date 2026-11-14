@@ -282,6 +282,8 @@ local function build_action()
     {size = 12, color = C.dim, w = 292})
   ui.label(14, 68, "status: " .. status_text(r), {size = 12, color = C.dim, w = 292})
   local keys = escrow.actions(r, st.role, now())
+  local note = escrow.note(r, st.role, now())
+  if note then ui.label(14, 176, note, {size = 12, color = C.orange, w = 292}) end
   if #keys == 0 then
     ui.label(14, 110, r.status == escrow.MADE and "The requester confirms to pay you."
       or "Nothing to sign yet.", {size = 14, color = C.ink, w = 292})
@@ -319,7 +321,7 @@ local function plan(action, r)
   if action == "bid" then
     local intro = escrow.introer_pda(solana.decode(r.w))
     r.pda = r.pda or escrow.request_pda(intro, r.id)
-    return {escrow.ix_bid(intro, r.pda, r.target, r.telegram, r.bid, r.lowest, r.others)}, r.pda, "bid"
+    return {escrow.ix_bid(intro, r.pda, r.target, r.telegram, r.bid, r.lowest)}, r.pda, "bid"
   end
   if action == "register_introer" then
     return {escrow.ix_register(me, r.badge_id, r.offer, r.min_bid)}, escrow.introer_pda(me), "exists"
@@ -590,6 +592,7 @@ end
 
 local function ask_bid(p)
   local x = p.introer
+  if p.w == st.wallet then ui.toast("You can't bid on yourself") return end
   input("Who do you want to meet?", escrow.TARGET, function(target)
     if not target or target:gsub("%s", "") == "" then return end
     input("Your Telegram @handle", escrow.TELEGRAM - 1, function(tg)
@@ -606,12 +609,12 @@ local function ask_bid(p)
         if sol.cmp(lam, escrow.MAX_BID) > 0 then ui.toast("Max bid is 100 SOL") return end
         if x.open >= escrow.MAX_OPEN then
           if not p.lowest then ui.toast("Queue is full: try again") return end
-          if sol.cmp(lam, p.lowest.bid) <= 0 then
-            ui.toast("Beat " .. sol.format(p.lowest.bid, 3) .. " SOL") return
+          if sol.cmp(lam, p.need) < 0 then
+            ui.toast("Bid at least " .. sol.format(p.need, 4) .. " SOL") return
           end
         end
         local r = {w = p.w, id = x.next_id, target = target, telegram = tg, bid = lam,
-          lowest = p.lowest, others = p.others}
+          lowest = p.lowest}
         if st.mock then r.pda = "demo-bid" end
         start_sign("bid", r, "mine")
       end)
@@ -619,32 +622,20 @@ local function ask_bid(p)
   end)
 end
 
--- With 5 open, a bid must name the lowest open one and pass the other open ones.
-local function load_open(p, intro)
-  local next = tonumber(p.introer.next_id) or 0
-  local ids = {}
-  for id = next - 1, math.max(0, next - 20), -1 do ids[#ids + 1] = tostring(id) end
-  chain.request_pdas(intro, ids, function(pdas)
-    chain.many(pdas, function(ok, data)
-      if not ok or st.pick ~= p then return end
-      local open = {}
-      for i = 1, #pdas do
-        local q = data[i] and escrow.decode_request(data[i])
-        if q and q.status == escrow.OPEN then
-          open[#open + 1] = {pda = pdas[i], requester = q.requester, bid = q.bid}
-        end
+-- With 5 open, a bid names the lowest open one (it is refunded) and its requester.
+local function load_lowest(p, intro)
+  local lo, need = escrow.lowest(p.introer)
+  if not lo then return end
+  chain.request_pdas(intro, {lo.id}, function(pdas)
+    chain.account(pdas[1], function(ok, b)
+      if st.pick ~= p then return end
+      local q = ok and b and escrow.decode_request(b)
+      if q and q.status == escrow.OPEN then
+        p.lowest, p.need = {pda = pdas[1], requester = q.requester, bid = q.bid}, need
       end
-      if #open ~= p.introer.open then
-        if st.screen == "introer" and st.w.full then st.w.full:text("Full: can't find the lowest bid") end
-        return
-      end
-      local lo = 1
-      for k = 2, #open do if sol.cmp(open[k].bid, open[lo].bid) < 0 then lo = k end end
-      p.lowest = table.remove(open, lo)
-      p.others = {}
-      for k, o in ipairs(open) do p.others[k] = o.pda end
       if st.screen == "introer" and st.w.full then
-        st.w.full:text("Full: beat " .. sol.format(p.lowest.bid, 3) .. " SOL")
+        st.w.full:text(p.lowest and ("Full: bid at least " .. sol.format(need, 4) .. " SOL")
+          or "Full: can't read the lowest bid")
       end
     end)
   end)
@@ -667,7 +658,7 @@ local function build_introer()
   ui.label(14, 88, "machine value " .. sol.format(value_of(x), 3) .. " SOL (demo value)",
     {size = 12, color = C.dim, w = 292})
   local full = x.open >= escrow.MAX_OPEN
-  st.w.full = ui.label(14, 104, not full and "" or p.lowest and ("Full: beat " .. sol.format(p.lowest.bid, 3)
+  st.w.full = ui.label(14, 104, not full and "" or p.lowest and ("Full: bid at least " .. sol.format(p.need, 4)
     .. " SOL") or "Full: reading the queue...", {size = 12, color = C.orange, w = 292})
   ui.list(6, 122, 308, 36, {{title = "Bid for an intro", sub = "you sign on your phone"}},
     {on_select = function() ask_bid(p) end})
@@ -680,7 +671,7 @@ local function load_introer(p)
   if st.mock then
     p.introer = demo.introer(p.w) or false
     if p.introer and p.introer.open >= escrow.MAX_OPEN then
-      p.lowest, p.others = {pda = "demo-low", requester = "", bid = "150000000"}, {}
+      p.lowest, p.need = {pda = "demo-low", requester = "", bid = "150000000"}, "165000000"
     end
     return
   end
@@ -690,7 +681,7 @@ local function load_introer(p)
     if not ok then p.err = tostring(b)
     else
       p.introer = b and escrow.decode_introer(b) or false
-      if p.introer and p.introer.open >= escrow.MAX_OPEN then load_open(p, intro) end
+      if p.introer and p.introer.open >= escrow.MAX_OPEN then load_lowest(p, intro) end
     end
     if st.screen == "introer" then show_later("introer") end
   end)

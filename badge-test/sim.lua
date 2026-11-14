@@ -176,10 +176,19 @@ local function u64(n) return string.pack("<I8", math.tointeger(tonumber(n))) end
 local function fixed(s, n) return s .. string.rep("\0", n - #s) end
 local function disc(name) return require("lib.bytes").unhex(sha256("account:" .. name):sub(1, 16)) end
 
+-- open [5 x {id, bid}]: t.slots, or made-up ones for t.open entries.
+local function slots(t)
+  local out = {}
+  for k = 1, 5 do
+    local sl = t.slots and t.slots[k] or (not t.slots and k <= t.open and {100 + k, 10000000})
+    out[k] = sl and (u64(sl[1]) .. u64(sl[2])) or string.rep("\0", 16)
+  end
+  return table.concat(out)
+end
 local function enc_introer(t)
   return disc("Introer") .. t.wallet .. u64(t.min_bid) .. u64(t.next_id) .. string.pack("<I4", t.jobs)
     .. u64(t.earned) .. string.pack("<i8", t.created_at) .. string.char(t.open, 254)
-    .. fixed(t.badge_id or "", 8) .. fixed(t.offer, 64)
+    .. fixed(t.badge_id or "", 8) .. fixed(t.offer, 64) .. slots(t)
 end
 local function enc_request(t)
   return disc("Request") .. t.introer .. t.requester .. u64(t.id) .. u64(t.bid) .. string.char(t.status)
@@ -520,9 +529,8 @@ else
   d = data("bid_outbid")
   local ob = fixture("bid_outbid").accounts
   same("bid_outbid", escrow.ix_bid(intro, acc("bid_outbid", 4), bytes2.text(d, 9, 64), bytes2.text(d, 73, 32),
-    bytes2.u64(d, 105), {pda = acc("bid_outbid", 6), requester = acc("bid_outbid", 7)},
-    {acc("bid_outbid", 8), acc("bid_outbid", 9), acc("bid_outbid", 10), acc("bid_outbid", 11)}))
-  check(#ob == 11, "fixture outbid has 4 others")
+    bytes2.u64(d, 105), {pda = acc("bid_outbid", 6), requester = acc("bid_outbid", 7)}))
+  check(#ob == 7, "fixture outbid: lowest and its requester only")
   same("accept", escrow.ix_accept(intro, acc("accept", 3)))
   same("mark_made", escrow.ix_made(intro, acc("mark_made", 3)))
   same("decline", escrow.ix_decline(intro, acc("decline", 4), requester))
@@ -536,11 +544,19 @@ else
   f:close()
   local di2 = escrow.decode_introer(bytes2.unhex(dumps.introer.data_hex))
   check(di2 and di2.wallet == wallet and di2.badge_id == "BP26-001" and di2.offer ~= "", "fixture introer decodes")
+  check(#di2.slots == di2.open, "fixture introer open slots")
   local dr2 = escrow.decode_request(bytes2.unhex(dumps.request.data_hex))
   check(dr2 and dr2.introer == intro and escrow.STATUS[dr2.status] and dr2.target ~= "", "fixture request decodes")
   local dd = escrow.decode_directory(bytes2.unhex(dumps.directory.data_hex))
   check(dd and dd[1] == wallet, "fixture directory decodes")
 end
+
+local acc_r = {status = 1, accepted_at = NOW - escrow.WORK_WINDOW - 1, created_at = NOW, made_at = 0}
+check(#escrow.actions(acc_r, "introer", NOW) == 0 and escrow.note(acc_r, "introer", NOW):find("Too late"), "mark made deadline")
+check(escrow.actions(acc_r, "requester", NOW)[2] == "refund_expired", "refund after the work window")
+local lo, need = escrow.lowest({slots = {{id = "4", bid = "100"}, {id = "2", bid = "100"}, {id = "1", bid = "900"}}})
+check(lo.id == "2" and need == "110", "lowest: oldest on a tie, +10%")
+check(escrow.lowest({slots = {}}) == nil, "no lowest when empty")
 
 -- App: introer --------------------------------------------------------------------
 local ME = b58d(WALLET)
@@ -734,7 +750,14 @@ check(last_toast() == "Bid: done" and has("My requests"), "bid landed, My reques
 flush()
 check(W.lists[1] and W.lists[1].rows[1].right == "Open", "my request listed")
 list_select(1)
-check(W.lists[1].rows[1] == "Withdraw", "open: withdraw")
+check(not W.lists[1] and has("Withdraw available in 24h"), "open: withdraw after 24h")
+key("back")
+advance(20000)
+CHAIN[b58e(NEWR)] = enc_request({introer = OI, requester = string.rep("\9", 32), id = 9, bid = "12500000000",
+  status = 0, created_at = NOW - 86400, target = "Toly", telegram = "@joe"})
+advance(20000)
+list_select(1)
+check(W.lists[1] and W.lists[1].rows[1] == "Withdraw", "open: withdraw once 24h passed")
 key("back")
 -- Introer accepts and marks made long ago: confirm or refund.
 CHAIN[b58e(NEWR)] = enc_request({introer = OI, requester = string.rep("\9", 32), id = 9, bid = "12500000000",
@@ -771,7 +794,7 @@ local DIR = escrow.directory_pda()
 local ring = {}
 for k = 1, 32 do ring[k] = string.rep("\0", 32) end
 ring[1], ring[2], ring[3] = string.rep("\5", 32), OB, ME
-CHAIN[b58e(DIR)] = disc("Directory") .. string.char(3) .. table.concat(ring)
+CHAIN[b58e(DIR)] = disc("Directory") .. string.char(3, 254) .. table.concat(ring)
 go("Find an introer")
 list_select(3); flush()
 local found = {}
@@ -780,28 +803,36 @@ check(found["on-chain list"] == 1, "directory: new introers listed, me and seen 
 local dl = escrow.decode_directory(CHAIN[b58e(DIR)])
 check(#dl == 3 and dl[1] == ME and dl[2] == OB, "directory newest first")
 
--- Full queue: name the lowest and the other open ones.
+-- No bids on yourself.
+CHAIN[b58e(MYI)] = enc_introer({wallet = ME, min_bid = "50000000", next_id = 4, jobs = 6, earned = "30200000000",
+  created_at = NOW - 86400 * 2, open = 1, offer = "Solana devs"})
+go("Find an introer")
+list_select(1); type_in(WALLET); flush()
+list_select(1)
+check(last_toast() == "You can't bid on yourself" and not W.input, "no self-bid")
+key("back")
+
+-- Full queue: name the lowest open one (oldest on a tie) and beat it by 10%.
 local FULL = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T"
 local FB = b58d(FULL)
 local FI = escrow.introer_pda(FB)
-CHAIN[b58e(FI)] = enc_introer({wallet = FB, min_bid = "10000000", next_id = 6, jobs = 0, earned = "0",
-  created_at = NOW, open = 5, offer = "Full"})
-local bids = {"300000000", "200000000", "50000000", "400000000", "500000000"}
-for k = 1, 5 do put_req(k, {introer = FI, requester = string.rep(string.char(k), 32), bid = bids[k], status = 0, target = "x", telegram = ""}) end
-put_req(0, {introer = FI, requester = RQ, bid = "1", status = 1, target = "acc", telegram = ""})
+CHAIN[b58e(FI)] = enc_introer({wallet = FB, min_bid = "10000000", next_id = 9, jobs = 0, earned = "0",
+  created_at = NOW, open = 5, offer = "Full",
+  slots = {{8, 300000000}, {7, 55555555}, {3, 55555555}, {6, 400000000}, {5, 500000000}}})
+put_req(3, {introer = FI, requester = string.rep("\3", 32), bid = "55555555", status = 0, target = "x", telegram = ""})
 go("Find an introer")
 list_select(1); type_in(FULL)
 flush(); advance(100)
-check(has("Full: beat 0.05 SOL"), "full queue: lowest found")
-list_select(1); type_in("Toly"); type_in(""); type_in("0.05")
-check(last_toast() == "Beat 0.05 SOL", "must beat lowest")
-list_select(1); type_in("Toly"); type_in(""); type_in("0.06")
-advance(30)
+check(has("Full: bid at least 0.0611 SOL"), "full queue: lowest + 10%, rounded up")
+list_select(1); type_in("Toly"); type_in(""); type_in("0.06111111")
+check(last_toast() == "Bid at least 0.0611 SOL", "must beat lowest by 10%")
+list_select(1); type_in("Toly"); type_in(""); type_in("0.061111111")
 m = relay_reply(true)
 ix = m.ixs[1]
-check(ix.accounts[6] == REQ[3] and ix.accounts[7] == string.rep("\3", 32) and #ix.accounts == 11, "bid: lowest + 4 others")
-check(m.w[REQ[3]] and m.w[string.rep("\3", 32)] and not m.w[REQ[1]], "bid: lowest writable, others read")
-check(ix.data:sub(-8) == u64(60000000) and ix.data:sub(9 + 64, 9 + 64) == "\0", "bid: empty telegram")
+check(ix.accounts[6] == REQ[3] and ix.accounts[7] == string.rep("\3", 32) and #ix.accounts == 7, "bid: lowest (oldest on tie) and its requester")
+check(m.w[REQ[3]] and m.w[string.rep("\3", 32)], "bid: lowest writable")
+check(#m.ixs == 1 and #m.keys == 8, "one intro_escrow instruction only")
+check(ix.data:sub(-8) == u64(61111111) and ix.data:sub(9 + 64, 9 + 64) == "\0", "bid: empty telegram")
 key("back")
 check(has("My requests") or has("Find an introer"), "back from signing")
 
@@ -829,7 +860,7 @@ check(last_toast() == "Accept: done", "demo accept")
 go("Find an introer")
 check(W.lists[1].rows[4].title == "@ana", "demo nearby")
 list_select(5)
-check(has("Full: beat 0.15 SOL"), "demo full introer")
+check(has("Full: bid at least 0.165 SOL"), "demo full introer")
 list_select(1); type_in("Toly"); type_in("joe"); type_in("0.2")
 advance(4100)
 check(last_toast() == "Bid: done", "demo bid")

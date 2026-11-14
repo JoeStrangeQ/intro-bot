@@ -2,6 +2,8 @@
 -- Layouts keep fixed-size fields first and text as zero-padded byte arrays (docs/spec.md).
 local bytes = require("lib.bytes")
 local tx = require("lib.tx")
+local sol = require("lib.sol")
+local sol_cmp, sol_add, sol_mul_div = sol.cmp, sol.add, sol.mul_div
 
 local M = {}
 
@@ -10,7 +12,9 @@ M.CLUSTER = "devnet"
 
 M.MAX_OPEN = 5
 M.CONFIRM_WINDOW = 72 * 3600
-M.WORK_WINDOW = 7 * 24 * 3600
+M.WORK_WINDOW = 7 * 24 * 3600     -- also the deadline to mark made
+M.WITHDRAW_DELAY = 24 * 3600
+M.OUTBID_PERCENT = 10
 M.TARGET, M.TELEGRAM, M.OFFER = 64, 32, 64
 M.MIN_BID_FLOOR = "10000000"
 M.MAX_BID = "100000000000"
@@ -31,9 +35,10 @@ for k, v in pairs(D) do M.DISC[k] = bytes.unhex(v) end
 
 -- Byte offsets (1-based for string.sub/byte), after the 8-byte discriminator.
 -- Introer: wallet 32 | min_bid u64 | next_id u64 | jobs_done u32 | earned u64 |
---          created_at i64 | open_count u8 | bump u8 | badge_id [8] | offer [64]
+--          created_at i64 | open_count u8 | bump u8 | badge_id [8] | offer [64] |
+--          open [5 x {id u64, bid u64}] (the first open_count used)
 M.INTROER = {wallet = 9, min_bid = 41, next_id = 49, jobs_done = 57, earned = 61,
-  created_at = 69, open_count = 77, bump = 78, badge_id = 79, offer = 87, size = 150}
+  created_at = 69, open_count = 77, bump = 78, badge_id = 79, offer = 87, open = 151, size = 230}
 -- Request: introer 32 | requester 32 | id u64 | bid u64 | status u8 | created_at i64 |
 --          accepted_at i64 | made_at i64 | bump u8 | target [64] | telegram [32]
 M.REQUEST = {introer = 9, requester = 41, id = 73, bid = 81, status = 89, created_at = 90,
@@ -48,6 +53,12 @@ end
 function M.decode_introer(b)
   local L = M.INTROER
   if type(b) ~= "string" or #b < L.size or b:sub(1, 8) ~= M.DISC.Introer then return nil end
+  local open = bytes.u8(b, L.open_count)
+  if open > M.MAX_OPEN then return nil end
+  local slots = {}
+  for k = 0, open - 1 do
+    slots[k + 1] = {id = bytes.u64(b, L.open + 16 * k), bid = bytes.u64(b, L.open + 8 + 16 * k)}
+  end
   return {
     wallet = b:sub(L.wallet, L.wallet + 31),
     min_bid = bytes.u64(b, L.min_bid),
@@ -58,6 +69,7 @@ function M.decode_introer(b)
     open = bytes.u8(b, L.open_count),
     badge_id = bytes.text(b, L.badge_id, 8),
     offer = bytes.text(b, L.offer, M.OFFER),
+    slots = slots,
   }
 end
 
@@ -80,13 +92,13 @@ function M.decode_request(b)
   }
 end
 
--- Directory: head u8 | wallets [32 x 32], a ring of the latest introers. Newest first.
+-- Directory: head u8 | bump u8 | wallets [32 x 32], a ring of the latest introers. Newest first.
 function M.decode_directory(b)
-  if type(b) ~= "string" or #b < 9 + 32 * 32 or b:sub(1, 8) ~= M.DISC.Directory then return nil end
+  if type(b) ~= "string" or #b < 10 + 32 * 32 or b:sub(1, 8) ~= M.DISC.Directory then return nil end
   local head, out, zero = b:byte(9), {}, ("\0"):rep(32)
   for k = 0, 31 do
     local slot = (head - 1 - k) % 32
-    local w = b:sub(10 + slot * 32, 41 + slot * 32)
+    local w = b:sub(11 + slot * 32, 42 + slot * 32)
     if w ~= zero then out[#out + 1] = w end
   end
   return out
@@ -128,15 +140,14 @@ function M.ix_update(my_wallet, offer, min_bid)
     bytes.fixed(offer, M.OFFER) .. bytes.pack_u64(min_bid))
 end
 
--- lowest = {pda, requester} when the queue is full, others = the other open request pdas.
+-- lowest = {pda, requester} when the queue is full: it is refunded.
 -- A missing optional account is the program id.
-function M.ix_bid(introer, request, target, telegram, amount, lowest, others)
+function M.ix_bid(introer, request, target, telegram, amount, lowest)
   local p = program()
   local acc = {
     {W, w = true}, {M.config_pda(), w = true}, {introer, w = true}, {request, w = true}, {tx.SYSTEM},
     lowest and {lowest.pda, w = true} or {p}, lowest and {lowest.requester, w = true} or {p},
   }
-  for _, o in ipairs(others or {}) do acc[#acc + 1] = {o} end
   return ix("bid", acc, bytes.fixed(target, M.TARGET) .. bytes.fixed(telegram, M.TELEGRAM)
     .. bytes.pack_u64(amount))
 end
@@ -172,11 +183,11 @@ end
 function M.actions(r, role, now)
   if role == "introer" then
     if r.status == M.OPEN then return {"accept", "decline"} end
-    if r.status == M.ACCEPTED then return {"mark_made"} end
+    if r.status == M.ACCEPTED and not (now and now > r.accepted_at + M.WORK_WINDOW) then return {"mark_made"} end
     return {}
   end
   local out = {}
-  if r.status == M.OPEN then out[1] = "withdraw" end
+  if r.status == M.OPEN and now and now >= r.created_at + M.WITHDRAW_DELAY then out[1] = "withdraw" end
   if r.status == M.ACCEPTED or r.status == M.MADE then out[#out + 1] = "confirm" end
   if now and r.status == M.MADE and now > r.made_at + M.CONFIRM_WINDOW then
     out[#out + 1] = "refund_unconfirmed"
@@ -185,6 +196,30 @@ function M.actions(r, role, now)
     out[#out + 1] = "refund_expired"
   end
   return out
+end
+
+-- A line about what can't be done yet, or nil.
+function M.note(r, role, now)
+  if not now then return nil end
+  if role == "requester" and r.status == M.OPEN then
+    local left = r.created_at + M.WITHDRAW_DELAY - now
+    if left > 0 then return "Withdraw available in " .. math.max(1, (left + 3599) // 3600) .. "h" end
+  end
+  if role == "introer" and r.status == M.ACCEPTED and now > r.accepted_at + M.WORK_WINDOW then
+    return "Too late to mark made: the requester can get a refund."
+  end
+end
+
+-- Lowest open bid (oldest id on a tie) and the least a new bid must be (+10%, rounded up).
+function M.lowest(introer)
+  local lo
+  for _, s in ipairs(introer.slots or {}) do
+    local c = lo and sol_cmp(s.bid, lo.bid)
+    if not lo or c < 0 or (c == 0 and sol_cmp(s.id, lo.id) < 0) then lo = s end
+  end
+  if not lo then return nil end
+  local need = sol_mul_div(sol_add(sol_mul_div(lo.bid, 100 + M.OUTBID_PERCENT, 1), "99"), 1, 100)
+  return lo, need
 end
 
 M.LABEL = {
