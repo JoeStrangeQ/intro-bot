@@ -269,6 +269,51 @@
       ]
     },
     {
+      "name": "cancel_admin_proposal",
+      "docs": [
+        "Admin withdraws a pending proposal."
+      ],
+      "discriminator": [
+        68,
+        6,
+        145,
+        131,
+        16,
+        73,
+        182,
+        229
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "confirm",
       "docs": [
         "Requester confirms the intro; the introer is paid."
@@ -547,6 +592,7 @@
         },
         {
           "name": "introer",
+          "writable": true,
           "pda": {
             "seeds": [
               {
@@ -1184,6 +1230,45 @@
       ]
     },
     {
+      "name": "AdminAccepted",
+      "discriminator": [
+        174,
+        12,
+        76,
+        139,
+        158,
+        99,
+        110,
+        254
+      ]
+    },
+    {
+      "name": "AdminProposalCancelled",
+      "discriminator": [
+        158,
+        7,
+        69,
+        243,
+        15,
+        126,
+        0,
+        184
+      ]
+    },
+    {
+      "name": "AdminProposed",
+      "discriminator": [
+        129,
+        249,
+        226,
+        227,
+        199,
+        82,
+        110,
+        243
+      ]
+    },
+    {
       "name": "BidPlaced",
       "discriminator": [
         135,
@@ -1378,6 +1463,11 @@
       "code": 6017,
       "name": "Invariant",
       "msg": "Stored state is inconsistent"
+    },
+    {
+      "code": 6018,
+      "name": "NoAdmin",
+      "msg": "Admin can't be the default key"
     }
   ],
   "types": [
@@ -1388,6 +1478,45 @@
         "fields": [
           {
             "name": "request",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AdminAccepted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AdminProposalCancelled",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "docs": [
+              "The proposal that was cleared (default if none)."
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AdminProposed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
             "type": "pubkey"
           }
         ]

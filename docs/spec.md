@@ -33,8 +33,8 @@ Native SOL only. All amounts in lamports (u64).
 Fixed size; text is zero-padded UTF-8 byte arrays. Exact byte offsets: "Program details" below.
 - `Config` PDA `["config"]`: `admin: Pubkey`, `pending_admin: Pubkey`, `paused: bool`, `bump`.
   Created once by `init_config`, which only the program's upgrade authority can call (check the
-  ProgramData account). Admin can later `propose_admin` (the new key then calls `accept_admin`)
-  and `set_paused`. These keep working after the program is made immutable. No global cap and
+  ProgramData account). Admin can later `propose_admin` (the new key then calls `accept_admin`;
+  `cancel_admin_proposal` withdraws it) and `set_paused`. These keep working after the program is made immutable. No global cap and
   no running total: only `bid` reads Config (for `paused`).
 - `Directory` PDA `["directory"]`: ring of the last 32 registered introer wallets.
 - `Introer` PDA `["introer", wallet]`: `wallet`, `min_bid: u64`, `next_id: u64`,
@@ -143,21 +143,20 @@ in no particular order, the rest are zero.
 Instruction args (Borsh, after the 8-byte discriminator; text args are fixed arrays):
 `init_config()`, `register_introer(badge_id [u8;8], offer [u8;64], min_bid u64)`,
 `update_introer(offer [u8;64], min_bid u64)`, `bid(target [u8;64], telegram [u8;32], amount u64)`,
-`propose_admin(Pubkey)`, `set_paused(bool)`. Others take no args.
+`propose_admin(Pubkey)` (not the default key), `set_paused(bool)`. Others take no args.
 
 Account order (s = signer, w = writable):
 
 | Ix | Accounts |
 | --- | --- |
 | `init_config` | authority (s,w), config (w), directory (w), program, program_data, system_program |
-| `propose_admin` / `set_paused` | admin (s), config (w) |
+| `propose_admin` / `cancel_admin_proposal` / `set_paused` | admin (s), config (w) |
 | `accept_admin` | pending_admin (s), config (w) |
 | `register_introer` | wallet (s,w), introer (w), directory (w), system_program |
 | `update_introer` | wallet (s), introer (w) |
 | `bid` | requester (s,w), config, introer (w), request (w), system_program, lowest (w, optional), lowest_requester (w, optional) |
 | `withdraw` | requester (s,w), introer (w), request (w) |
-| `accept` | wallet (s), introer (w), request (w) |
-| `mark_made` | wallet (s), introer, request (w) |
+| `accept` / `mark_made` | wallet (s), introer (w), request (w) |
 | `decline` | wallet (s), introer (w), request (w), requester (w) |
 | `confirm` | requester (s,w), introer (w), request (w), wallet (w, = introer.wallet) |
 | `refund_unconfirmed` / `refund_expired` | caller (s), introer, request (w), requester (w) |
@@ -170,7 +169,8 @@ Account order (s = signer, w = writable):
 - `min_bid` must also be ≤ `MAX_BID`. `target` and `telegram` must not be empty.
 - Event fields: `IntroerRegistered{introer, wallet, badge_id, min_bid}`,
   `Outbid{request, requester, bid, new_bid}` (request = the refunded one), `Withdrawn{request}`,
-  `Accepted{request}`, `Declined{request}`, `Made{request, made_at}`.
+  `Accepted{request}`, `Declined{request}`, `Made{request, made_at}`,
+  `AdminProposed{admin}`, `AdminAccepted{admin}`, `AdminProposalCancelled{admin}`.
   `Refunded{request, reason}` is emitted on every refund: `0` withdrawn, `1` declined,
   `2` outbid, `3` expired (no work), `4` unconfirmed.
 - Errors: see `EscrowError` in the IDL.

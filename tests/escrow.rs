@@ -74,21 +74,27 @@ fn build(accounts: impl ToAccountMetas, data: impl InstructionData) -> Instructi
     }
 }
 
-/// Fresh chain with the program loaded and `authority` (if any) as the
-/// upgrade authority in ProgramData.
 /// Fails if the built program is older than its source, so tests never run
 /// a stale `.so`. Rebuild with `cargo build-sbf` (or `anchor build`).
 fn check_fresh_build() {
     static CHECKED: std::sync::Once = std::sync::Once::new();
     CHECKED.call_once(|| {
         let modified =
-            |path: &std::path::Path| std::fs::metadata(path).and_then(|m| m.modified()).unwrap();
+            |path: &std::path::Path| std::fs::metadata(path).unwrap().modified().unwrap();
         let built = modified(std::path::Path::new(PROGRAM));
-        let mut sources = vec![std::path::PathBuf::from(
+        let mut sources: Vec<std::path::PathBuf> = [
+            "../Cargo.toml",
+            "../Cargo.lock",
             "../programs/intro-escrow/Cargo.toml",
-        )];
+        ]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
         for entry in std::fs::read_dir("../programs/intro-escrow/src").unwrap() {
-            sources.push(entry.unwrap().path());
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                sources.push(path);
+            }
         }
         for source in sources {
             assert!(
@@ -100,6 +106,8 @@ fn check_fresh_build() {
     });
 }
 
+/// Fresh chain with the program loaded and `authority` (if any) as the
+/// upgrade authority in ProgramData.
 fn chain(authority: Option<Pubkey>) -> LiteSVM {
     check_fresh_build();
     let mut svm = LiteSVM::new();
@@ -364,25 +372,15 @@ impl T {
     }
 
     fn step_ix(accept: bool, wallet: Pubkey, request: Pubkey) -> Instruction {
-        let introer = introer_key(&wallet);
+        let accounts = acc::IntroerStep {
+            wallet,
+            introer: introer_key(&wallet),
+            request,
+        };
         if accept {
-            build(
-                acc::Accept {
-                    wallet,
-                    introer,
-                    request,
-                },
-                ix::Accept {},
-            )
+            build(accounts, ix::Accept {})
         } else {
-            build(
-                acc::MarkMade {
-                    wallet,
-                    introer,
-                    request,
-                },
-                ix::MarkMade {},
-            )
+            build(accounts, ix::MarkMade {})
         }
     }
 
@@ -646,11 +644,36 @@ fn admin_setters_work_and_reject_others() {
             admin: Pubkey::default(),
         },
     );
-    fails(t.run(&admin, ix), "Unauthorized");
+    fails(t.run(&admin, ix), "NoAdmin");
 
     let ix = t.admin_ix(admin.pubkey(), ix::SetPaused { paused: true });
     t.run(&admin, ix).unwrap();
     assert!(t.config().paused);
+    let ix = t.admin_ix(
+        admin.pubkey(),
+        ix::ProposeAdmin {
+            admin: new_admin.pubkey(),
+        },
+    );
+    t.run(&admin, ix).unwrap();
+    // Admin can cancel a proposal; then nobody can accept it.
+    fails(
+        t.run(
+            &stranger,
+            t.admin_ix(stranger.pubkey(), ix::CancelAdminProposal {}),
+        ),
+        "Unauthorized",
+    );
+    t.run(
+        &admin,
+        t.admin_ix(admin.pubkey(), ix::CancelAdminProposal {}),
+    )
+    .unwrap();
+    assert_eq!(t.config().pending_admin, Pubkey::default());
+    fails(
+        t.run(&new_admin, accept_ix(t.config, new_admin.pubkey())),
+        "Unauthorized",
+    );
     let ix = t.admin_ix(
         admin.pubkey(),
         ix::ProposeAdmin {
@@ -1379,7 +1402,27 @@ fn refund_expired_waits_for_the_work_window() {
 }
 
 #[test]
-fn others_refund_expired_only_after_the_confirm_grace() {
+fn late_confirm_beats_a_refund_by_others() {
+    let mut t = T::new();
+    let wallet = t.introer_with(MIN_BID_FLOOR);
+    let w = wallet.pubkey();
+    let requester = t.user(10);
+    let r = requester.pubkey();
+    let anyone = t.user(1);
+    let request = t.bid(&requester, &w, SOL);
+    t.accept(&wallet, request).unwrap();
+    // Past the work window, inside the grace: others can't refund yet...
+    t.warp(WORK_WINDOW + CONFIRM_WINDOW);
+    fails(t.refund_expired(&anyone, w, request, r), "NotExpired");
+    // ...so the requester can still confirm the original request.
+    let before = t.lamports(&w);
+    t.confirm(&requester, w, request).unwrap();
+    assert_eq!(t.lamports(&w), before + SOL);
+    assert_eq!(t.introer(&w).jobs_done, 1);
+}
+
+#[test]
+fn others_refund_expired_after_the_grace() {
     let mut t = T::new();
     let wallet = t.introer_with(MIN_BID_FLOOR);
     let w = wallet.pubkey();
@@ -1390,17 +1433,12 @@ fn others_refund_expired_only_after_the_confirm_grace() {
     t.accept(&wallet, request).unwrap();
     t.warp(WORK_WINDOW + CONFIRM_WINDOW);
     fails(t.refund_expired(&anyone, w, request, r), "NotExpired");
-    // Meanwhile a late confirm still pays the introer.
-    let late = t.bid(&requester, &w, SOL);
-    t.accept(&wallet, late).unwrap();
     t.warp(1);
     let before = t.lamports(&r);
     let held = t.lamports(&request);
     t.refund_expired(&anyone, w, request, r).unwrap();
     assert_eq!(t.lamports(&r), before + held);
-    t.warp(WORK_WINDOW * 3);
-    t.confirm(&requester, w, late).unwrap();
-    assert_eq!(t.introer(&w).jobs_done, 1);
+    assert_eq!(t.introer(&w).jobs_done, 0);
 }
 
 #[test]
