@@ -7,85 +7,6 @@
   },
   "instructions": [
     {
-      "name": "accept",
-      "discriminator": [
-        65,
-        150,
-        70,
-        216,
-        133,
-        6,
-        107,
-        4
-      ],
-      "accounts": [
-        {
-          "name": "wallet",
-          "signer": true,
-          "relations": [
-            "introer"
-          ]
-        },
-        {
-          "name": "introer",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  105,
-                  110,
-                  116,
-                  114,
-                  111,
-                  101,
-                  114
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "wallet"
-              }
-            ]
-          },
-          "relations": [
-            "request"
-          ]
-        },
-        {
-          "name": "request",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  114,
-                  101,
-                  113,
-                  117,
-                  101,
-                  115,
-                  116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "introer"
-              },
-              {
-                "kind": "account",
-                "path": "request.id",
-                "account": "Request"
-              }
-            ]
-          }
-        }
-      ],
-      "args": []
-    },
-    {
       "name": "accept_admin",
       "docs": [
         "Step 2: the proposed admin signs to take over."
@@ -131,140 +52,83 @@
       "args": []
     },
     {
-      "name": "bid",
+      "name": "approve",
       "docs": [
-        "Posts a request with `amount` lamports held in the request account.",
-        "With `MAX_OPEN` open requests, `lowest` must be the lowest of them",
-        "(as tracked in `introer.open`); it is refunded and closed."
+        "Requester picks one offer."
       ],
       "discriminator": [
-        199,
-        56,
-        85,
-        38,
-        146,
-        243,
-        37,
-        158
+        69,
+        74,
+        217,
+        36,
+        115,
+        117,
+        97,
+        76
       ],
       "accounts": [
         {
           "name": "requester",
-          "writable": true,
-          "signer": true
+          "signer": true,
+          "relations": [
+            "job"
+          ]
         },
         {
-          "name": "config",
+          "name": "job",
+          "writable": true,
           "pda": {
             "seeds": [
               {
                 "kind": "const",
                 "value": [
-                  99,
+                  106,
                   111,
-                  110,
-                  102,
-                  105,
-                  103
+                  98
                 ]
+              },
+              {
+                "kind": "account",
+                "path": "requester"
+              },
+              {
+                "kind": "account",
+                "path": "job.nonce",
+                "account": "Job"
               }
             ]
           }
         },
         {
-          "name": "introer",
-          "writable": true,
+          "name": "offer",
           "pda": {
             "seeds": [
               {
                 "kind": "const",
                 "value": [
-                  105,
-                  110,
-                  116,
-                  114,
                   111,
+                  102,
+                  102,
                   101,
                   114
                 ]
               },
               {
                 "kind": "account",
-                "path": "introer.wallet",
-                "account": "Introer"
+                "path": "job"
+              },
+              {
+                "kind": "arg",
+                "path": "introer_wallet"
               }
             ]
           }
-        },
-        {
-          "name": "request",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  114,
-                  101,
-                  113,
-                  117,
-                  101,
-                  115,
-                  116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "introer"
-              },
-              {
-                "kind": "account",
-                "path": "introer.next_id",
-                "account": "Introer"
-              }
-            ]
-          }
-        },
-        {
-          "name": "system_program",
-          "address": "11111111111111111111111111111111"
-        },
-        {
-          "name": "lowest",
-          "docs": [
-            "Lowest open request, only needed when the queue is full."
-          ],
-          "writable": true,
-          "optional": true
-        },
-        {
-          "name": "lowest_requester",
-          "writable": true,
-          "optional": true
         }
       ],
       "args": [
         {
-          "name": "target",
-          "type": {
-            "array": [
-              "u8",
-              64
-            ]
-          }
-        },
-        {
-          "name": "telegram",
-          "type": {
-            "array": [
-              "u8",
-              32
-            ]
-          }
-        },
-        {
-          "name": "amount",
-          "type": "u64"
+          "name": "introer_wallet",
+          "type": "pubkey"
         }
       ]
     },
@@ -314,9 +178,119 @@
       "args": []
     },
     {
+      "name": "cancel_job",
+      "docs": [
+        "Requester takes back an open job: bid and rent come back."
+      ],
+      "discriminator": [
+        126,
+        241,
+        155,
+        241,
+        50,
+        236,
+        83,
+        118
+      ],
+      "accounts": [
+        {
+          "name": "requester",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "job"
+          ]
+        },
+        {
+          "name": "job",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  106,
+                  111,
+                  98
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "requester"
+              },
+              {
+                "kind": "account",
+                "path": "job.nonce",
+                "account": "Job"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "close_offer",
+      "docs": [
+        "Anyone: closes an offer whose job is gone, rent to the introer."
+      ],
+      "discriminator": [
+        191,
+        72,
+        67,
+        35,
+        239,
+        209,
+        97,
+        132
+      ],
+      "accounts": [
+        {
+          "name": "caller",
+          "signer": true
+        },
+        {
+          "name": "offer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "offer.job",
+                "account": "Offer"
+              },
+              {
+                "kind": "account",
+                "path": "offer.introer",
+                "account": "Offer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "wallet",
+          "writable": true
+        },
+        {
+          "name": "job"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "confirm",
       "docs": [
-        "Requester confirms the intro; the introer is paid."
+        "Requester confirms; the approved introer is paid. The receipt."
       ],
       "discriminator": [
         174,
@@ -334,8 +308,33 @@
           "writable": true,
           "signer": true,
           "relations": [
-            "request"
+            "job"
           ]
+        },
+        {
+          "name": "job",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  106,
+                  111,
+                  98
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "requester"
+              },
+              {
+                "kind": "account",
+                "path": "job.nonce",
+                "account": "Job"
+              }
+            ]
+          }
         },
         {
           "name": "introer",
@@ -356,40 +355,8 @@
               },
               {
                 "kind": "account",
-                "path": "introer.wallet",
-                "account": "Introer"
-              }
-            ]
-          },
-          "relations": [
-            "request"
-          ]
-        },
-        {
-          "name": "request",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  114,
-                  101,
-                  113,
-                  117,
-                  101,
-                  115,
-                  116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "introer"
-              },
-              {
-                "kind": "account",
-                "path": "request.id",
-                "account": "Request"
+                "path": "job.approved",
+                "account": "Job"
               }
             ]
           }
@@ -402,98 +369,9 @@
       "args": []
     },
     {
-      "name": "decline",
-      "docs": [
-        "Introer turns down an open request; it is refunded."
-      ],
-      "discriminator": [
-        24,
-        57,
-        90,
-        162,
-        91,
-        94,
-        245,
-        177
-      ],
-      "accounts": [
-        {
-          "name": "wallet",
-          "signer": true,
-          "relations": [
-            "introer"
-          ]
-        },
-        {
-          "name": "introer",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  105,
-                  110,
-                  116,
-                  114,
-                  111,
-                  101,
-                  114
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "wallet"
-              }
-            ]
-          },
-          "relations": [
-            "request"
-          ]
-        },
-        {
-          "name": "request",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  114,
-                  101,
-                  113,
-                  117,
-                  101,
-                  115,
-                  116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "introer"
-              },
-              {
-                "kind": "account",
-                "path": "request.id",
-                "account": "Request"
-              }
-            ]
-          }
-        },
-        {
-          "name": "requester",
-          "writable": true,
-          "relations": [
-            "request"
-          ]
-        }
-      ],
-      "args": []
-    },
-    {
       "name": "init_config",
       "docs": [
-        "Creates the config and directory. Only the program's upgrade",
+        "Creates the config and the board. Only the program's upgrade",
         "authority can call it; the signer becomes the admin."
       ],
       "discriminator": [
@@ -532,22 +410,18 @@
           }
         },
         {
-          "name": "directory",
+          "name": "board",
           "writable": true,
           "pda": {
             "seeds": [
               {
                 "kind": "const",
                 "value": [
-                  100,
-                  105,
-                  114,
-                  101,
-                  99,
-                  116,
+                  98,
                   111,
+                  97,
                   114,
-                  121
+                  100
                 ]
               }
             ]
@@ -570,7 +444,7 @@
     {
       "name": "mark_made",
       "docs": [
-        "Introer marks the intro made, within `WORK_WINDOW` of accepting."
+        "The approved introer marks the intro made, within `WORK_WINDOW`."
       ],
       "discriminator": [
         138,
@@ -585,14 +459,81 @@
       "accounts": [
         {
           "name": "wallet",
-          "signer": true,
-          "relations": [
-            "introer"
-          ]
+          "signer": true
+        },
+        {
+          "name": "job",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  106,
+                  111,
+                  98
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "job.requester",
+                "account": "Job"
+              },
+              {
+                "kind": "account",
+                "path": "job.nonce",
+                "account": "Job"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "offer",
+      "docs": [
+        "A registered introer offers to make the intro."
+      ],
+      "discriminator": [
+        53,
+        204,
+        36,
+        90,
+        151,
+        6,
+        54,
+        231
+      ],
+      "accounts": [
+        {
+          "name": "wallet",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
         },
         {
           "name": "introer",
-          "writable": true,
+          "docs": [
+            "Proves the wallet is a registered introer."
+          ],
           "pda": {
             "seeds": [
               {
@@ -612,42 +553,191 @@
                 "path": "wallet"
               }
             ]
-          },
-          "relations": [
-            "request"
-          ]
+          }
         },
         {
-          "name": "request",
+          "name": "job",
           "writable": true,
           "pda": {
             "seeds": [
               {
                 "kind": "const",
                 "value": [
-                  114,
-                  101,
-                  113,
-                  117,
-                  101,
-                  115,
-                  116
+                  106,
+                  111,
+                  98
                 ]
               },
               {
                 "kind": "account",
-                "path": "introer"
+                "path": "job.requester",
+                "account": "Job"
               },
               {
                 "kind": "account",
-                "path": "request.id",
-                "account": "Request"
+                "path": "job.nonce",
+                "account": "Job"
               }
             ]
           }
+        },
+        {
+          "name": "offer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "job"
+              },
+              {
+                "kind": "account",
+                "path": "wallet"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
         }
       ],
       "args": []
+    },
+    {
+      "name": "post_job",
+      "docs": [
+        "Posts a job with `bid` lamports held in the job account, and lists",
+        "it on the board."
+      ],
+      "discriminator": [
+        34,
+        208,
+        58,
+        248,
+        129,
+        234,
+        179,
+        211
+      ],
+      "accounts": [
+        {
+          "name": "requester",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "board",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  111,
+                  97,
+                  114,
+                  100
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "job",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  106,
+                  111,
+                  98
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "requester"
+              },
+              {
+                "kind": "arg",
+                "path": "nonce"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "nonce",
+          "type": "u64"
+        },
+        {
+          "name": "who",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "company",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "telegram",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "bid",
+          "type": "u64"
+        }
+      ]
     },
     {
       "name": "propose_admin",
@@ -702,9 +792,8 @@
     {
       "name": "refund_expired",
       "docs": [
-        "Refunds an accepted request the introer never marked made. The",
-        "requester can call it after `WORK_WINDOW`; anyone else must wait",
-        "`CONFIRM_WINDOW` more, so a late confirm can't be sniped."
+        "Refunds an approved job never marked made: the requester after",
+        "`WORK_WINDOW`, anyone else `CONFIRM_WINDOW` later."
       ],
       "discriminator": [
         118,
@@ -722,57 +811,26 @@
           "signer": true
         },
         {
-          "name": "introer",
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  105,
-                  110,
-                  116,
-                  114,
-                  111,
-                  101,
-                  114
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "introer.wallet",
-                "account": "Introer"
-              }
-            ]
-          },
-          "relations": [
-            "request"
-          ]
-        },
-        {
-          "name": "request",
+          "name": "job",
           "writable": true,
           "pda": {
             "seeds": [
               {
                 "kind": "const",
                 "value": [
-                  114,
-                  101,
-                  113,
-                  117,
-                  101,
-                  115,
-                  116
+                  106,
+                  111,
+                  98
                 ]
               },
               {
                 "kind": "account",
-                "path": "introer"
+                "path": "requester"
               },
               {
                 "kind": "account",
-                "path": "request.id",
-                "account": "Request"
+                "path": "job.nonce",
+                "account": "Job"
               }
             ]
           }
@@ -781,7 +839,7 @@
           "name": "requester",
           "writable": true,
           "relations": [
-            "request"
+            "job"
           ]
         }
       ],
@@ -790,8 +848,8 @@
     {
       "name": "refund_unconfirmed",
       "docs": [
-        "Anyone: refunds a made request the requester never confirmed. The",
-        "introer is paid only by `confirm`."
+        "Refunds a made job never confirmed: the requester after",
+        "`CONFIRM_WINDOW`, anyone else `CONFIRM_WINDOW` later."
       ],
       "discriminator": [
         243,
@@ -809,57 +867,26 @@
           "signer": true
         },
         {
-          "name": "introer",
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  105,
-                  110,
-                  116,
-                  114,
-                  111,
-                  101,
-                  114
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "introer.wallet",
-                "account": "Introer"
-              }
-            ]
-          },
-          "relations": [
-            "request"
-          ]
-        },
-        {
-          "name": "request",
+          "name": "job",
           "writable": true,
           "pda": {
             "seeds": [
               {
                 "kind": "const",
                 "value": [
-                  114,
-                  101,
-                  113,
-                  117,
-                  101,
-                  115,
-                  116
+                  106,
+                  111,
+                  98
                 ]
               },
               {
                 "kind": "account",
-                "path": "introer"
+                "path": "requester"
               },
               {
                 "kind": "account",
-                "path": "request.id",
-                "account": "Request"
+                "path": "job.nonce",
+                "account": "Job"
               }
             ]
           }
@@ -868,7 +895,7 @@
           "name": "requester",
           "writable": true,
           "relations": [
-            "request"
+            "job"
           ]
         }
       ],
@@ -917,28 +944,6 @@
           }
         },
         {
-          "name": "directory",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  100,
-                  105,
-                  114,
-                  101,
-                  99,
-                  116,
-                  111,
-                  114,
-                  121
-                ]
-              }
-            ]
-          }
-        },
-        {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
         }
@@ -954,22 +959,21 @@
           }
         },
         {
-          "name": "offer",
+          "name": "name",
           "type": {
             "array": [
               "u8",
-              64
+              32
             ]
           }
-        },
-        {
-          "name": "min_bid",
-          "type": "u64"
         }
       ]
     },
     {
       "name": "set_paused",
+      "docs": [
+        "Blocks new jobs and offers. Never blocks payouts or refunds."
+      ],
       "discriminator": [
         91,
         60,
@@ -1062,106 +1066,95 @@
       ],
       "args": [
         {
-          "name": "offer",
+          "name": "badge_id",
           "type": {
             "array": [
               "u8",
-              64
+              8
             ]
           }
         },
         {
-          "name": "min_bid",
-          "type": "u64"
+          "name": "name",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
         }
       ]
     },
     {
-      "name": "withdraw",
+      "name": "withdraw_offer",
       "docs": [
-        "Requester takes back an open request, once `WITHDRAW_DELAY` passed."
+        "Introer takes back their offer and its rent. Refused for the",
+        "approved offer while its job is live."
       ],
       "discriminator": [
-        183,
-        18,
-        70,
-        156,
-        148,
-        109,
-        161,
-        34
+        203,
+        38,
+        131,
+        234,
+        204,
+        122,
+        53,
+        150
       ],
       "accounts": [
         {
-          "name": "requester",
+          "name": "wallet",
           "writable": true,
-          "signer": true,
-          "relations": [
-            "request"
-          ]
+          "signer": true
         },
         {
-          "name": "introer",
+          "name": "offer",
           "writable": true,
           "pda": {
             "seeds": [
               {
                 "kind": "const",
                 "value": [
-                  105,
-                  110,
-                  116,
-                  114,
                   111,
+                  102,
+                  102,
                   101,
                   114
                 ]
               },
               {
                 "kind": "account",
-                "path": "introer.wallet",
-                "account": "Introer"
-              }
-            ]
-          },
-          "relations": [
-            "request"
-          ]
-        },
-        {
-          "name": "request",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  114,
-                  101,
-                  113,
-                  117,
-                  101,
-                  115,
-                  116
-                ]
+                "path": "offer.job",
+                "account": "Offer"
               },
               {
                 "kind": "account",
-                "path": "introer"
-              },
-              {
-                "kind": "account",
-                "path": "request.id",
-                "account": "Request"
+                "path": "wallet"
               }
             ]
           }
+        },
+        {
+          "name": "job"
         }
       ],
       "args": []
     }
   ],
   "accounts": [
+    {
+      "name": "Board",
+      "discriminator": [
+        79,
+        48,
+        160,
+        63,
+        153,
+        132,
+        240,
+        56
+      ]
+    },
     {
       "name": "Config",
       "discriminator": [
@@ -1173,19 +1166,6 @@
         250,
         204,
         130
-      ]
-    },
-    {
-      "name": "Directory",
-      "discriminator": [
-        145,
-        83,
-        165,
-        144,
-        183,
-        209,
-        7,
-        175
       ]
     },
     {
@@ -1202,33 +1182,33 @@
       ]
     },
     {
-      "name": "Request",
+      "name": "Job",
       "discriminator": [
-        125,
-        172,
-        150,
+        75,
+        124,
+        80,
+        203,
         161,
+        180,
+        202,
+        80
+      ]
+    },
+    {
+      "name": "Offer",
+      "discriminator": [
+        215,
+        88,
+        60,
+        71,
+        170,
         162,
-        115,
-        39,
-        71
+        73,
+        229
       ]
     }
   ],
   "events": [
-    {
-      "name": "Accepted",
-      "discriminator": [
-        54,
-        162,
-        140,
-        167,
-        179,
-        190,
-        95,
-        70
-      ]
-    },
     {
       "name": "AdminAccepted",
       "discriminator": [
@@ -1269,29 +1249,16 @@
       ]
     },
     {
-      "name": "BidPlaced",
+      "name": "Approved",
       "discriminator": [
-        135,
-        53,
-        176,
-        83,
-        193,
-        69,
-        108,
-        61
-      ]
-    },
-    {
-      "name": "Declined",
-      "discriminator": [
-        59,
-        213,
-        198,
-        187,
-        88,
-        218,
-        236,
-        20
+        17,
+        224,
+        150,
+        137,
+        174,
+        104,
+        7,
+        91
       ]
     },
     {
@@ -1308,6 +1275,32 @@
       ]
     },
     {
+      "name": "JobCancelled",
+      "discriminator": [
+        203,
+        84,
+        143,
+        130,
+        48,
+        134,
+        74,
+        191
+      ]
+    },
+    {
+      "name": "JobPosted",
+      "discriminator": [
+        18,
+        171,
+        12,
+        141,
+        212,
+        169,
+        183,
+        52
+      ]
+    },
+    {
       "name": "Made",
       "discriminator": [
         240,
@@ -1321,16 +1314,29 @@
       ]
     },
     {
-      "name": "Outbid",
+      "name": "OfferWithdrawn",
       "discriminator": [
-        205,
-        106,
-        230,
-        20,
-        225,
-        5,
-        68,
-        12
+        239,
+        29,
+        37,
+        199,
+        103,
+        204,
+        16,
+        102
+      ]
+    },
+    {
+      "name": "Offered",
+      "discriminator": [
+        79,
+        127,
+        13,
+        217,
+        178,
+        234,
+        1,
+        56
       ]
     },
     {
@@ -1358,19 +1364,6 @@
         221,
         99
       ]
-    },
-    {
-      "name": "Withdrawn",
-      "discriminator": [
-        20,
-        89,
-        223,
-        198,
-        194,
-        124,
-        219,
-        13
-      ]
     }
   ],
   "errors": [
@@ -1386,103 +1379,86 @@
     },
     {
       "code": 6002,
-      "name": "Paused",
-      "msg": "Bids are paused"
+      "name": "NoAdmin",
+      "msg": "Admin can't be the default key"
     },
     {
       "code": 6003,
+      "name": "Paused",
+      "msg": "New jobs and offers are paused"
+    },
+    {
+      "code": 6004,
       "name": "BadText",
       "msg": "Text is empty, not UTF-8 or not zero-padded"
     },
     {
-      "code": 6004,
+      "code": 6005,
       "name": "BidTooHigh",
       "msg": "Bid is above the max"
     },
     {
-      "code": 6005,
+      "code": 6006,
       "name": "BidTooLow",
       "msg": "Bid is below the min"
     },
     {
-      "code": 6006,
-      "name": "SelfBid",
-      "msg": "Introers can't bid on themselves"
-    },
-    {
       "code": 6007,
-      "name": "QueueFull",
-      "msg": "Queue is full: pass the lowest open request"
+      "name": "SelfOffer",
+      "msg": "Requesters can't offer on their own job"
     },
     {
       "code": 6008,
-      "name": "NotLowest",
-      "msg": "Passed request is not the lowest open one"
+      "name": "BadStatus",
+      "msg": "Job is in the wrong state"
     },
     {
       "code": 6009,
-      "name": "WrongRequest",
-      "msg": "Request does not belong to this introer"
+      "name": "StaleOffer",
+      "msg": "Offer was made on an earlier post at this address"
     },
     {
       "code": 6010,
+      "name": "OfferInUse",
+      "msg": "The approved offer can't be withdrawn while its job is live"
+    },
+    {
+      "code": 6011,
+      "name": "JobLive",
+      "msg": "The job is still live"
+    },
+    {
+      "code": 6012,
+      "name": "WrongJob",
+      "msg": "Job does not match"
+    },
+    {
+      "code": 6013,
+      "name": "WrongWallet",
+      "msg": "Wallet does not match"
+    },
+    {
+      "code": 6014,
       "name": "WrongRequester",
       "msg": "Requester does not match"
     },
     {
-      "code": 6011,
-      "name": "WrongWallet",
-      "msg": "Wallet does not match the introer"
-    },
-    {
-      "code": 6012,
-      "name": "BadStatus",
-      "msg": "Request is in the wrong state"
-    },
-    {
-      "code": 6013,
-      "name": "TooEarly",
-      "msg": "Too early to withdraw"
-    },
-    {
-      "code": 6014,
+      "code": 6015,
       "name": "WorkExpired",
       "msg": "Work window has passed"
     },
     {
-      "code": 6015,
+      "code": 6016,
       "name": "NotExpired",
       "msg": "Not expired yet"
     },
     {
-      "code": 6016,
+      "code": 6017,
       "name": "Overflow",
       "msg": "Math overflow"
-    },
-    {
-      "code": 6017,
-      "name": "Invariant",
-      "msg": "Stored state is inconsistent"
-    },
-    {
-      "code": 6018,
-      "name": "NoAdmin",
-      "msg": "Admin can't be the default key"
     }
   ],
   "types": [
-    {
-      "name": "Accepted",
-      "type": {
-        "kind": "struct",
-        "fields": [
-          {
-            "name": "request",
-            "type": "pubkey"
-          }
-        ]
-      }
-    },
     {
       "name": "AdminAccepted",
       "type": {
@@ -1523,25 +1499,70 @@
       }
     },
     {
-      "name": "BidPlaced",
+      "name": "Approved",
       "type": {
         "kind": "struct",
         "fields": [
           {
-            "name": "request",
+            "name": "job",
             "type": "pubkey"
           },
           {
             "name": "introer",
             "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Board",
+      "docs": [
+        "Ring of the newest job addresses, for clients that can't list program",
+        "accounts. Old entries may point at closed jobs. Zero-copy: too big to",
+        "deserialize on the stack."
+      ],
+      "serialization": "bytemuck",
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "head",
+            "docs": [
+              "Next slot to write."
+            ],
+            "type": "u8"
           },
           {
-            "name": "requester",
-            "type": "pubkey"
+            "name": "bump",
+            "type": "u8"
           },
           {
-            "name": "bid",
+            "name": "padding",
+            "type": {
+              "array": [
+                "u8",
+                6
+              ]
+            }
+          },
+          {
+            "name": "posted",
+            "docs": [
+              "Jobs ever posted; the next job's serial."
+            ],
             "type": "u64"
+          },
+          {
+            "name": "jobs",
+            "type": {
+              "array": [
+                "pubkey",
+                64
+              ]
+            }
           }
         ]
       }
@@ -1564,56 +1585,14 @@
           },
           {
             "name": "paused",
+            "docs": [
+              "Blocks `post_job` and `offer` only."
+            ],
             "type": "bool"
           },
           {
             "name": "bump",
             "type": "u8"
-          }
-        ]
-      }
-    },
-    {
-      "name": "Declined",
-      "type": {
-        "kind": "struct",
-        "fields": [
-          {
-            "name": "request",
-            "type": "pubkey"
-          }
-        ]
-      }
-    },
-    {
-      "name": "Directory",
-      "docs": [
-        "Ring of recently registered introer wallets, for clients that can't",
-        "list program accounts. Anyone can push old entries out by registering",
-        "new wallets; clients should not rely on it alone."
-      ],
-      "type": {
-        "kind": "struct",
-        "fields": [
-          {
-            "name": "head",
-            "docs": [
-              "Next slot to write."
-            ],
-            "type": "u8"
-          },
-          {
-            "name": "bump",
-            "type": "u8"
-          },
-          {
-            "name": "wallets",
-            "type": {
-              "array": [
-                "pubkey",
-                32
-              ]
-            }
           }
         ]
       }
@@ -1628,12 +1607,25 @@
             "type": "pubkey"
           },
           {
-            "name": "min_bid",
-            "type": "u64"
+            "name": "badge_id",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
           },
           {
-            "name": "next_id",
-            "type": "u64"
+            "name": "name",
+            "docs": [
+              "UTF-8, zero-padded."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
           },
           {
             "name": "jobs_done",
@@ -1648,52 +1640,8 @@
             "type": "i64"
           },
           {
-            "name": "open_count",
-            "docs": [
-              "Number of used entries at the front of `open`."
-            ],
-            "type": "u8"
-          },
-          {
             "name": "bump",
             "type": "u8"
-          },
-          {
-            "name": "badge_id",
-            "type": {
-              "array": [
-                "u8",
-                8
-              ]
-            }
-          },
-          {
-            "name": "offer",
-            "docs": [
-              "UTF-8, zero-padded."
-            ],
-            "type": {
-              "array": [
-                "u8",
-                64
-              ]
-            }
-          },
-          {
-            "name": "open",
-            "docs": [
-              "Open requests; entries past `open_count` are zero."
-            ],
-            "type": {
-              "array": [
-                {
-                  "defined": {
-                    "name": "OpenSlot"
-                  }
-                },
-                5
-              ]
-            }
           }
         ]
       }
@@ -1719,9 +1667,148 @@
                 8
               ]
             }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Job",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "requester",
+            "type": "pubkey"
           },
           {
-            "name": "min_bid",
+            "name": "nonce",
+            "type": "u64"
+          },
+          {
+            "name": "serial",
+            "docs": [
+              "Unique per post (from `Board.posted`); ties offers to this post even",
+              "if the same address is reused later."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "bid",
+            "type": "u64"
+          },
+          {
+            "name": "status",
+            "type": "u8"
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "approved_at",
+            "type": "i64"
+          },
+          {
+            "name": "made_at",
+            "type": "i64"
+          },
+          {
+            "name": "approved",
+            "docs": [
+              "Approved introer wallet; default until approved."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "offer_count",
+            "docs": [
+              "Offers ever made (saturates)."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "offers",
+            "docs": [
+              "Newest offering introer wallets, a ring."
+            ],
+            "type": {
+              "array": [
+                "pubkey",
+                16
+              ]
+            }
+          },
+          {
+            "name": "offers_head",
+            "docs": [
+              "Next ring slot to write."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "who",
+            "docs": [
+              "UTF-8, zero-padded."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "company",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "telegram",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "JobCancelled",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "job",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "JobPosted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "job",
+            "type": "pubkey"
+          },
+          {
+            "name": "requester",
+            "type": "pubkey"
+          },
+          {
+            "name": "bid",
             "type": "u64"
           }
         ]
@@ -1733,7 +1820,7 @@
         "kind": "struct",
         "fields": [
           {
-            "name": "request",
+            "name": "job",
             "type": "pubkey"
           },
           {
@@ -1744,47 +1831,70 @@
       }
     },
     {
-      "name": "OpenSlot",
-      "docs": [
-        "One open (not yet accepted) request of an introer."
-      ],
+      "name": "Offer",
       "type": {
         "kind": "struct",
         "fields": [
           {
-            "name": "id",
+            "name": "job",
+            "type": "pubkey"
+          },
+          {
+            "name": "introer",
+            "docs": [
+              "Introer wallet."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "job_serial",
+            "docs": [
+              "`Job.serial` of the post this offer was made on."
+            ],
             "type": "u64"
           },
           {
-            "name": "bid",
-            "type": "u64"
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
           }
         ]
       }
     },
     {
-      "name": "Outbid",
+      "name": "OfferWithdrawn",
       "type": {
         "kind": "struct",
         "fields": [
           {
-            "name": "request",
+            "name": "job",
+            "type": "pubkey"
+          },
+          {
+            "name": "introer",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Offered",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "job",
+            "type": "pubkey"
+          },
+          {
+            "name": "introer",
             "docs": [
-              "The refunded request."
+              "Introer wallet."
             ],
             "type": "pubkey"
-          },
-          {
-            "name": "requester",
-            "type": "pubkey"
-          },
-          {
-            "name": "bid",
-            "type": "u64"
-          },
-          {
-            "name": "new_bid",
-            "type": "u64"
           }
         ]
       }
@@ -1795,11 +1905,14 @@
         "kind": "struct",
         "fields": [
           {
-            "name": "request",
+            "name": "job",
             "type": "pubkey"
           },
           {
             "name": "introer",
+            "docs": [
+              "Introer wallet."
+            ],
             "type": "pubkey"
           },
           {
@@ -1827,7 +1940,7 @@
         "kind": "struct",
         "fields": [
           {
-            "name": "request",
+            "name": "job",
             "type": "pubkey"
           },
           {
@@ -1836,89 +1949,6 @@
               "One of the `REFUND_*` constants."
             ],
             "type": "u8"
-          }
-        ]
-      }
-    },
-    {
-      "name": "Request",
-      "type": {
-        "kind": "struct",
-        "fields": [
-          {
-            "name": "introer",
-            "docs": [
-              "Introer PDA."
-            ],
-            "type": "pubkey"
-          },
-          {
-            "name": "requester",
-            "type": "pubkey"
-          },
-          {
-            "name": "id",
-            "type": "u64"
-          },
-          {
-            "name": "bid",
-            "type": "u64"
-          },
-          {
-            "name": "status",
-            "type": "u8"
-          },
-          {
-            "name": "created_at",
-            "type": "i64"
-          },
-          {
-            "name": "accepted_at",
-            "type": "i64"
-          },
-          {
-            "name": "made_at",
-            "type": "i64"
-          },
-          {
-            "name": "bump",
-            "type": "u8"
-          },
-          {
-            "name": "target",
-            "docs": [
-              "UTF-8, zero-padded."
-            ],
-            "type": {
-              "array": [
-                "u8",
-                64
-              ]
-            }
-          },
-          {
-            "name": "telegram",
-            "docs": [
-              "UTF-8, zero-padded."
-            ],
-            "type": {
-              "array": [
-                "u8",
-                32
-              ]
-            }
-          }
-        ]
-      }
-    },
-    {
-      "name": "Withdrawn",
-      "type": {
-        "kind": "struct",
-        "fields": [
-          {
-            "name": "request",
-            "type": "pubkey"
           }
         ]
       }

@@ -35,7 +35,7 @@ solana program deploy target/deploy/intro_escrow.so \
 ```
 
 3. Run `init_config()` signed by the deployer key, e.g. with the Anchor TS client and
-   `idl/intro_escrow.json`. It creates `Config` and `Directory`.
+   `idl/intro_escrow.json`. It creates `Config` and `Board`.
 
 4. `propose_admin(<LEDGER>)`, signed by the deployer, then `accept_admin`, signed by the
    Ledger. Check the `Config` bytes (`solana account <config PDA>`): admin at offset 8 is the
@@ -59,29 +59,31 @@ If a deploy fails midway, `solana program show --buffers` lists the buffer; clos
 
 - [ ] Deployed code matches the reviewed commit: `solana-verify` or
       `solana program dump <id> out.so` and compare hash with `target/deploy/intro_escrow.so`.
-- [ ] `Config` exists: admin = Ledger, `paused = false`. `Directory` exists.
+- [ ] `Config` exists: admin = Ledger, `paused = false`. `Board` exists.
 - [ ] Ledger can sign `set_paused` (test pause and unpause once).
-- [ ] One full real job on mainnet with a small bid: register, bid, accept, made, confirm.
-      Introer got the bid, requester got the rent back, request account closed.
-- [ ] One refund path (withdraw or decline) works.
+- [ ] One full real job on mainnet with a small bid: register, post_job, offer, approve,
+      mark_made, confirm. Introer got the bid, requester got the rent back, job closed,
+      `close_offer` returned the offer rent.
+- [ ] One refund path (`cancel_job`) works.
 - [ ] Web app, Worker and badge point at this program id.
 - [ ] IDL in repo matches the deployed build.
 - [ ] Everyone agrees: no more code changes are possible after `--final`.
 
-## Cost estimate (from the built .so, 335,576 bytes)
+## Cost estimate (from the built .so, 340,424 bytes)
 
 Rent = `(128 + bytes) × 6,960` lamports (same as `solana rent <bytes>`).
 
 | Item | Bytes | SOL | Kept? |
 | --- | --- | --- | --- |
-| ProgramData (45 + .so, `--max-len` = .so size) | 335,621 | 2.3368 | locked forever once immutable |
+| ProgramData (45 + .so, `--max-len` = .so size) | 340,469 | 2.3706 | locked forever once immutable |
 | Program account | 36 | 0.0011 | locked |
-| Buffer during deploy (37 + .so) | 335,613 | 2.3368 | returned after deploy |
+| Buffer during deploy (37 + .so) | 340,461 | 2.3705 | returned after deploy |
 | Deploy tx fees (~340 writes × 5,000 + priority) | | ~0.002–0.01 | spent |
 | Config account | 74 | 0.0014 | locked |
-| Directory account | 1,034 | 0.0081 | locked |
-| Each introer (paid by introer) | 230 | 0.0025 | stays |
-| Each request (paid by requester) | 210 | 0.0024 | returned to requester on settle |
+| Board account | 2,072 | 0.0153 | locked |
+| Each introer (paid by introer) | 101 | 0.0016 | stays |
+| Each job (paid by requester) | 733 | 0.0060 | returned to requester on settle |
+| Each offer (paid by introer) | 89 | 0.0015 | returned to introer when closed |
 
-Net cost: about **2.35 SOL**. Have about **4.7 SOL** in the deployer key during deploy, since
+Net cost: about **2.39 SOL**. Have about **4.8 SOL** in the deployer key during deploy, since
 the buffer is funded before it is returned.
