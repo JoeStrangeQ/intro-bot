@@ -533,11 +533,11 @@ else
   check(#ob == 7, "fixture outbid: lowest and its requester only")
   same("accept", escrow.ix_accept(intro, acc("accept", 3)))
   same("mark_made", escrow.ix_made(intro, acc("mark_made", 3)))
-  same("decline", escrow.ix_decline(intro, acc("decline", 4), requester))
-  same("withdraw", escrow.ix_withdraw(intro, acc("withdraw", 4)))
-  same("confirm", escrow.ix_confirm(intro, acc("confirm", 4), wallet))
-  same("refund_unconfirmed", escrow.ix_refund("refund_unconfirmed", intro, acc("refund_unconfirmed", 4), requester))
-  same("refund_expired", escrow.ix_refund("refund_expired", intro, acc("refund_expired", 4), requester))
+  same("decline", escrow.ix_decline(intro, acc("decline", 3), requester))
+  same("withdraw", escrow.ix_withdraw(intro, acc("withdraw", 3)))
+  same("confirm", escrow.ix_confirm(intro, acc("confirm", 3), wallet))
+  same("refund_unconfirmed", escrow.ix_refund("refund_unconfirmed", intro, acc("refund_unconfirmed", 3), requester))
+  same("refund_expired", escrow.ix_refund("refund_expired", intro, acc("refund_expired", 3), requester))
   -- Account dumps.
   local f = io.open(FIX .. "/accounts.json")
   local dumps = json.decode(f:read("a"))
@@ -558,6 +558,8 @@ local lo, need = escrow.lowest({slots = {{id = "4", bid = "100"}, {id = "2", bid
 check(lo.id == "2" and need == "110", "lowest: oldest on a tie, +10%")
 check(escrow.lowest({slots = {}}) == nil, "no lowest when empty")
 check(select(2, escrow.lowest({slots = {{id = "1", bid = "95000000000"}}})) == "100000000000", "outbid capped at 100 SOL")
+check(select(2, escrow.lowest({slots = {{id = "1", bid = "99999999999"}}})) == "100000000000", "outbid above the lowest")
+check(select(2, escrow.lowest({slots = {{id = "1", bid = "100000000000"}}})) == nil, "no outbid when every bid is at the max")
 
 -- App: introer --------------------------------------------------------------------
 local ME = b58d(WALLET)
@@ -650,7 +652,7 @@ CHAIN[b58e(MYI)] = enc_introer({wallet = ME, min_bid = "50000000", next_id = 4, 
 advance(20000)
 list_select(1); list_select(2); advance(30)
 m = relay_reply(true)
-check(m.ixs[1].data == escrow.DISC.decline and m.ixs[1].accounts[5] == RQ and m.w[RQ], "decline: requester refunded")
+check(m.ixs[1].data == escrow.DISC.decline and m.ixs[1].accounts[4] == RQ and m.w[RQ], "decline: requester refunded")
 key("back")
 list_select(2); list_select(1); advance(30)
 m = relay_reply(true)
@@ -743,7 +745,7 @@ check(ix.data == escrow.DISC.bid .. fixed("Toly", 64) .. fixed("@joe", 32) .. u6
 check(ix.accounts[1] == m.keys[1] and ix.accounts[2] == escrow.config_pda() and ix.accounts[3] == OI
   and ix.accounts[4] == NEWR and ix.accounts[5] == string.rep("\0", 32) and ix.accounts[6] == P
   and ix.accounts[7] == P and #ix.accounts == 7, "bid: accounts, None as program id")
-check(m.w[escrow.config_pda()] and m.w[OI] and m.w[NEWR] and not m.w[P], "bid: writable")
+check(not m.w[escrow.config_pda()] and m.w[OI] and m.w[NEWR] and not m.w[P], "bid: writable, config read-only")
 CHAIN[b58e(NEWR)] = enc_request({introer = OI, requester = string.rep("\9", 32), id = 9, bid = "12500000000",
   status = 0, target = "Toly", telegram = "@joe"})
 advance(6000)
@@ -769,7 +771,7 @@ check(W.lists[1].rows[1] == "Confirm + pay" and W.lists[1].rows[2] == "Refund (7
 list_select(1); advance(30)
 m = relay_reply(true)
 ix = m.ixs[1]
-check(ix.data == escrow.DISC.confirm and ix.accounts[1] == m.keys[1] and ix.accounts[5] == OB and m.w[OB], "confirm: pays introer wallet")
+check(ix.data == escrow.DISC.confirm and ix.accounts[1] == m.keys[1] and ix.accounts[4] == OB and m.w[OB], "confirm: pays introer wallet")
 CHAIN[b58e(NEWR)] = nil
 advance(6000)
 check(last_toast() == "Confirm + pay: done", "confirm landed")

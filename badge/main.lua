@@ -433,6 +433,7 @@ function fresh_bid(s, r, build)
     r.lowest = nil
     local lo, need = escrow.lowest(x)
     if x.open < escrow.MAX_OPEN then return timer.after(20, build) end
+    if not need then return fail_bid("Queue full at the max bid") end
     if sol.cmp(r.bid, need) < 0 then return fail_bid("Bid at least " .. sol.format(need, 4) .. " SOL") end
     chain.request_pdas(intro, {lo.id}, function(pdas)
       chain.account(pdas[1], function(ok2, b2)
@@ -667,11 +668,11 @@ local function load_lowest(p, intro)
       if st.pick ~= p then return end
       local q = ok and b and escrow.decode_request(b)
       if q and q.status == escrow.OPEN then
-        p.lowest, p.need = {pda = pdas[1], requester = q.requester, bid = q.bid}, need
+        p.lowest, p.need = need and {pda = pdas[1], requester = q.requester, bid = q.bid}, need
       end
       if st.screen == "introer" and st.w.full then
         st.w.full:text(p.lowest and ("Full: bid at least " .. sol.format(need, 4) .. " SOL")
-          or "Full: can't read the lowest bid")
+          or not need and "Full: every bid is at the 100 SOL max" or "Full: can't read the lowest bid")
       end
     end)
   end)

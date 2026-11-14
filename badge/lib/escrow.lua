@@ -145,7 +145,7 @@ end
 function M.ix_bid(introer, request, target, telegram, amount, lowest)
   local p = program()
   local acc = {
-    {W, w = true}, {M.config_pda(), w = true}, {introer, w = true}, {request, w = true}, {tx.SYSTEM},
+    {W, w = true}, {M.config_pda()}, {introer, w = true}, {request, w = true}, {tx.SYSTEM},
     lowest and {lowest.pda, w = true} or {p}, lowest and {lowest.requester, w = true} or {p},
   }
   return ix("bid", acc, bytes.fixed(target, M.TARGET) .. bytes.fixed(telegram, M.TELEGRAM)
@@ -153,7 +153,7 @@ function M.ix_bid(introer, request, target, telegram, amount, lowest)
 end
 
 function M.ix_withdraw(introer, request)
-  return ix("withdraw", {{W, w = true}, {M.config_pda(), w = true}, {introer, w = true}, {request, w = true}})
+  return ix("withdraw", {{W, w = true}, {introer, w = true}, {request, w = true}})
 end
 
 function M.ix_accept(introer, request)
@@ -161,22 +161,20 @@ function M.ix_accept(introer, request)
 end
 
 function M.ix_made(introer, request)
-  return ix("mark_made", {{W}, {introer, w = true}, {request, w = true}})
+  return ix("mark_made", {{W}, {introer}, {request, w = true}})
 end
 
 function M.ix_decline(introer, request, requester)
-  return ix("decline", {{W}, {M.config_pda(), w = true}, {introer, w = true}, {request, w = true},
-    {requester, w = true}})
+  return ix("decline", {{W}, {introer, w = true}, {request, w = true}, {requester, w = true}})
 end
 
 function M.ix_confirm(introer, request, introer_wallet)
-  return ix("confirm", {{W, w = true}, {M.config_pda(), w = true}, {introer, w = true}, {request, w = true},
-    {introer_wallet, w = true}})
+  return ix("confirm", {{W, w = true}, {introer, w = true}, {request, w = true}, {introer_wallet, w = true}})
 end
 
--- Anyone may send these; the signer only pays the fee.
+-- Anyone may send these (refund_expired: the requester at 7 days, others 72h later).
 function M.ix_refund(name, introer, request, requester)
-  return ix(name, {{W}, {M.config_pda(), w = true}, {introer}, {request, w = true}, {requester, w = true}})
+  return ix(name, {{W}, {introer}, {request, w = true}, {requester, w = true}})
 end
 
 -- Which signed steps fit a request, for its introer or its requester, at unix time `now`.
@@ -220,6 +218,8 @@ function M.lowest(introer)
   if not lo then return nil end
   local need = sol_mul_div(sol_add(sol_mul_div(lo.bid, 100 + M.OUTBID_PERCENT, 1), "99"), 1, 100)
   if sol_cmp(need, M.MAX_BID) > 0 then need = M.MAX_BID end
+  if sol_cmp(need, lo.bid) <= 0 then need = sol_add(lo.bid, "1") end  -- must be above the lowest
+  if sol_cmp(need, M.MAX_BID) > 0 then need = nil end              -- every slot is at the max
   return lo, need
 end
 
