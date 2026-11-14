@@ -1,0 +1,1966 @@
+{
+  "address": "GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC",
+  "metadata": {
+    "name": "intro_escrow",
+    "version": "0.1.0",
+    "spec": "0.1.0"
+  },
+  "instructions": [
+    {
+      "name": "accept",
+      "discriminator": [
+        65,
+        150,
+        70,
+        216,
+        133,
+        6,
+        107,
+        4
+      ],
+      "accounts": [
+        {
+          "name": "introer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  114,
+                  111,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "wallet"
+              }
+            ]
+          },
+          "relations": [
+            "request"
+          ]
+        },
+        {
+          "name": "request",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "introer"
+              },
+              {
+                "kind": "account",
+                "path": "request.id",
+                "account": "Request"
+              }
+            ]
+          }
+        },
+        {
+          "name": "wallet",
+          "signer": true,
+          "relations": [
+            "introer"
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "bid",
+      "docs": [
+        "Posts a request with `amount` lamports held in the request account.",
+        "With `MAX_OPEN` open requests, `lowest` must be the lowest of them",
+        "(the other open ones go in remaining accounts); it is refunded."
+      ],
+      "discriminator": [
+        199,
+        56,
+        85,
+        38,
+        146,
+        243,
+        37,
+        158
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "introer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  114,
+                  111,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "introer.wallet",
+                "account": "Introer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "request",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "introer"
+              },
+              {
+                "kind": "account",
+                "path": "introer.next_id",
+                "account": "Introer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "requester",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "lowest",
+          "docs": [
+            "Lowest open request, only needed when the queue is full."
+          ],
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "lowest_requester",
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "target",
+          "type": "string"
+        },
+        {
+          "name": "telegram",
+          "type": "string"
+        },
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "confirm",
+      "docs": [
+        "Requester confirms the intro; the introer is paid."
+      ],
+      "discriminator": [
+        174,
+        1,
+        15,
+        213,
+        3,
+        190,
+        131,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "introer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  114,
+                  111,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "introer.wallet",
+                "account": "Introer"
+              }
+            ]
+          },
+          "relations": [
+            "request"
+          ]
+        },
+        {
+          "name": "request",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "introer"
+              },
+              {
+                "kind": "account",
+                "path": "request.id",
+                "account": "Request"
+              }
+            ]
+          }
+        },
+        {
+          "name": "wallet",
+          "writable": true
+        },
+        {
+          "name": "requester",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "request"
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "decline",
+      "docs": [
+        "Introer turns down an open request; it is refunded."
+      ],
+      "discriminator": [
+        24,
+        57,
+        90,
+        162,
+        91,
+        94,
+        245,
+        177
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "introer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  114,
+                  111,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "wallet"
+              }
+            ]
+          },
+          "relations": [
+            "request"
+          ]
+        },
+        {
+          "name": "request",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "introer"
+              },
+              {
+                "kind": "account",
+                "path": "request.id",
+                "account": "Request"
+              }
+            ]
+          }
+        },
+        {
+          "name": "wallet",
+          "signer": true,
+          "relations": [
+            "introer"
+          ]
+        },
+        {
+          "name": "requester",
+          "writable": true,
+          "relations": [
+            "request"
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "dispute",
+      "discriminator": [
+        216,
+        92,
+        128,
+        146,
+        202,
+        85,
+        135,
+        73
+      ],
+      "accounts": [
+        {
+          "name": "request",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "request.introer",
+                "account": "Request"
+              },
+              {
+                "kind": "account",
+                "path": "request.id",
+                "account": "Request"
+              }
+            ]
+          }
+        },
+        {
+          "name": "requester",
+          "signer": true,
+          "relations": [
+            "request"
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "init_config",
+      "docs": [
+        "Creates the config. Only the program's upgrade authority can call it;",
+        "the signer becomes the admin."
+      ],
+      "discriminator": [
+        23,
+        235,
+        115,
+        232,
+        168,
+        96,
+        1,
+        231
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "program",
+          "address": "GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC"
+        },
+        {
+          "name": "program_data"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "arbiter",
+          "type": "pubkey"
+        },
+        {
+          "name": "cap_total",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "mark_made",
+      "discriminator": [
+        138,
+        172,
+        191,
+        242,
+        90,
+        22,
+        193,
+        89
+      ],
+      "accounts": [
+        {
+          "name": "introer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  114,
+                  111,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "wallet"
+              }
+            ]
+          },
+          "relations": [
+            "request"
+          ]
+        },
+        {
+          "name": "request",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "introer"
+              },
+              {
+                "kind": "account",
+                "path": "request.id",
+                "account": "Request"
+              }
+            ]
+          }
+        },
+        {
+          "name": "wallet",
+          "signer": true,
+          "relations": [
+            "introer"
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "refund_expired",
+      "docs": [
+        "Anyone: refunds an accepted request the introer never marked made."
+      ],
+      "discriminator": [
+        118,
+        153,
+        164,
+        244,
+        40,
+        128,
+        242,
+        250
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "introer",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  114,
+                  111,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "introer.wallet",
+                "account": "Introer"
+              }
+            ]
+          },
+          "relations": [
+            "request"
+          ]
+        },
+        {
+          "name": "request",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "introer"
+              },
+              {
+                "kind": "account",
+                "path": "request.id",
+                "account": "Request"
+              }
+            ]
+          }
+        },
+        {
+          "name": "requester",
+          "writable": true,
+          "relations": [
+            "request"
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "register_introer",
+      "discriminator": [
+        123,
+        222,
+        241,
+        197,
+        138,
+        203,
+        140,
+        242
+      ],
+      "accounts": [
+        {
+          "name": "introer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  114,
+                  111,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "wallet"
+              }
+            ]
+          }
+        },
+        {
+          "name": "wallet",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "badge_id",
+          "type": {
+            "array": [
+              "u8",
+              8
+            ]
+          }
+        },
+        {
+          "name": "offer",
+          "type": "string"
+        },
+        {
+          "name": "min_bid",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "release_expired",
+      "docs": [
+        "Anyone: pays the introer once the confirm window has passed."
+      ],
+      "discriminator": [
+        150,
+        199,
+        225,
+        10,
+        15,
+        244,
+        46,
+        47
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "introer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  114,
+                  111,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "introer.wallet",
+                "account": "Introer"
+              }
+            ]
+          },
+          "relations": [
+            "request"
+          ]
+        },
+        {
+          "name": "request",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "introer"
+              },
+              {
+                "kind": "account",
+                "path": "request.id",
+                "account": "Request"
+              }
+            ]
+          }
+        },
+        {
+          "name": "wallet",
+          "writable": true
+        },
+        {
+          "name": "requester",
+          "writable": true,
+          "relations": [
+            "request"
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "resolve",
+      "docs": [
+        "Arbiter settles a dispute either way."
+      ],
+      "discriminator": [
+        246,
+        150,
+        236,
+        206,
+        108,
+        63,
+        58,
+        10
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "arbiter",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "introer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  114,
+                  111,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "introer.wallet",
+                "account": "Introer"
+              }
+            ]
+          },
+          "relations": [
+            "request"
+          ]
+        },
+        {
+          "name": "request",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "introer"
+              },
+              {
+                "kind": "account",
+                "path": "request.id",
+                "account": "Request"
+              }
+            ]
+          }
+        },
+        {
+          "name": "wallet",
+          "writable": true
+        },
+        {
+          "name": "requester",
+          "writable": true,
+          "relations": [
+            "request"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "to_introer",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "set_admin",
+      "discriminator": [
+        251,
+        163,
+        0,
+        52,
+        91,
+        194,
+        187,
+        92
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "admin",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "set_arbiter",
+      "discriminator": [
+        15,
+        205,
+        194,
+        180,
+        172,
+        213,
+        113,
+        211
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "arbiter",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "set_cap",
+      "discriminator": [
+        209,
+        207,
+        121,
+        129,
+        115,
+        39,
+        220,
+        4
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "cap_total",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "set_paused",
+      "discriminator": [
+        91,
+        60,
+        125,
+        192,
+        176,
+        225,
+        166,
+        218
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "paused",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "update_introer",
+      "discriminator": [
+        105,
+        254,
+        6,
+        222,
+        137,
+        88,
+        250,
+        80
+      ],
+      "accounts": [
+        {
+          "name": "introer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  114,
+                  111,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "wallet"
+              }
+            ]
+          }
+        },
+        {
+          "name": "wallet",
+          "signer": true,
+          "relations": [
+            "introer"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "offer",
+          "type": "string"
+        },
+        {
+          "name": "min_bid",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "withdraw",
+      "docs": [
+        "Requester takes back an open request."
+      ],
+      "discriminator": [
+        183,
+        18,
+        70,
+        156,
+        148,
+        109,
+        161,
+        34
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "introer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  114,
+                  111,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "introer.wallet",
+                "account": "Introer"
+              }
+            ]
+          },
+          "relations": [
+            "request"
+          ]
+        },
+        {
+          "name": "request",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "introer"
+              },
+              {
+                "kind": "account",
+                "path": "request.id",
+                "account": "Request"
+              }
+            ]
+          }
+        },
+        {
+          "name": "requester",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "request"
+          ]
+        }
+      ],
+      "args": []
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Config",
+      "discriminator": [
+        155,
+        12,
+        170,
+        224,
+        30,
+        250,
+        204,
+        130
+      ]
+    },
+    {
+      "name": "Introer",
+      "discriminator": [
+        62,
+        23,
+        154,
+        189,
+        4,
+        102,
+        206,
+        68
+      ]
+    },
+    {
+      "name": "Request",
+      "discriminator": [
+        125,
+        172,
+        150,
+        161,
+        162,
+        115,
+        39,
+        71
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "Accepted",
+      "discriminator": [
+        54,
+        162,
+        140,
+        167,
+        179,
+        190,
+        95,
+        70
+      ]
+    },
+    {
+      "name": "BidPlaced",
+      "discriminator": [
+        135,
+        53,
+        176,
+        83,
+        193,
+        69,
+        108,
+        61
+      ]
+    },
+    {
+      "name": "Declined",
+      "discriminator": [
+        59,
+        213,
+        198,
+        187,
+        88,
+        218,
+        236,
+        20
+      ]
+    },
+    {
+      "name": "Disputed",
+      "discriminator": [
+        186,
+        235,
+        91,
+        209,
+        148,
+        93,
+        152,
+        217
+      ]
+    },
+    {
+      "name": "IntroerRegistered",
+      "discriminator": [
+        199,
+        135,
+        87,
+        166,
+        199,
+        147,
+        213,
+        76
+      ]
+    },
+    {
+      "name": "Made",
+      "discriminator": [
+        240,
+        91,
+        7,
+        65,
+        219,
+        115,
+        50,
+        224
+      ]
+    },
+    {
+      "name": "Outbid",
+      "discriminator": [
+        205,
+        106,
+        230,
+        20,
+        225,
+        5,
+        68,
+        12
+      ]
+    },
+    {
+      "name": "Receipt",
+      "discriminator": [
+        251,
+        41,
+        103,
+        237,
+        186,
+        105,
+        152,
+        178
+      ]
+    },
+    {
+      "name": "Refunded",
+      "discriminator": [
+        35,
+        103,
+        149,
+        246,
+        196,
+        123,
+        221,
+        99
+      ]
+    },
+    {
+      "name": "Withdrawn",
+      "discriminator": [
+        20,
+        89,
+        223,
+        198,
+        194,
+        124,
+        219,
+        13
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "NotUpgradeAuthority",
+      "msg": "Signer is not the program upgrade authority"
+    },
+    {
+      "code": 6001,
+      "name": "Unauthorized",
+      "msg": "Signer is not allowed"
+    },
+    {
+      "code": 6002,
+      "name": "Paused",
+      "msg": "Bids are paused"
+    },
+    {
+      "code": 6003,
+      "name": "TextTooLong",
+      "msg": "Text is empty or too long"
+    },
+    {
+      "code": 6004,
+      "name": "BidTooHigh",
+      "msg": "Bid is above the max"
+    },
+    {
+      "code": 6005,
+      "name": "BidTooLow",
+      "msg": "Bid is below the min"
+    },
+    {
+      "code": 6006,
+      "name": "OverCap",
+      "msg": "Escrow cap reached"
+    },
+    {
+      "code": 6007,
+      "name": "QueueFull",
+      "msg": "Queue is full: pass the lowest open request"
+    },
+    {
+      "code": 6008,
+      "name": "NotLowest",
+      "msg": "Passed request is not the lowest open one"
+    },
+    {
+      "code": 6009,
+      "name": "WrongRequest",
+      "msg": "Request does not belong to this introer"
+    },
+    {
+      "code": 6010,
+      "name": "WrongRequester",
+      "msg": "Requester does not match"
+    },
+    {
+      "code": 6011,
+      "name": "WrongWallet",
+      "msg": "Wallet does not match the introer"
+    },
+    {
+      "code": 6012,
+      "name": "BadStatus",
+      "msg": "Request is in the wrong state"
+    },
+    {
+      "code": 6013,
+      "name": "WindowClosed",
+      "msg": "Confirm window has closed"
+    },
+    {
+      "code": 6014,
+      "name": "NotExpired",
+      "msg": "Not expired yet"
+    },
+    {
+      "code": 6015,
+      "name": "Overflow",
+      "msg": "Math overflow"
+    }
+  ],
+  "types": [
+    {
+      "name": "Accepted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "request",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BidPlaced",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "request",
+            "type": "pubkey"
+          },
+          {
+            "name": "introer",
+            "type": "pubkey"
+          },
+          {
+            "name": "requester",
+            "type": "pubkey"
+          },
+          {
+            "name": "bid",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Config",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "arbiter",
+            "type": "pubkey"
+          },
+          {
+            "name": "paused",
+            "type": "bool"
+          },
+          {
+            "name": "cap_total",
+            "docs": [
+              "Max lamports held across all requests."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "total_held",
+            "docs": [
+              "Sum of the bids of all live requests."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Declined",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "request",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Disputed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "request",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Introer",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "wallet",
+            "type": "pubkey"
+          },
+          {
+            "name": "badge_id",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "offer",
+            "type": "string"
+          },
+          {
+            "name": "min_bid",
+            "type": "u64"
+          },
+          {
+            "name": "next_id",
+            "type": "u64"
+          },
+          {
+            "name": "open_count",
+            "type": "u8"
+          },
+          {
+            "name": "jobs_done",
+            "type": "u32"
+          },
+          {
+            "name": "earned",
+            "type": "u64"
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IntroerRegistered",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "introer",
+            "type": "pubkey"
+          },
+          {
+            "name": "wallet",
+            "type": "pubkey"
+          },
+          {
+            "name": "badge_id",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "min_bid",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Made",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "request",
+            "type": "pubkey"
+          },
+          {
+            "name": "made_at",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Outbid",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "request",
+            "docs": [
+              "The refunded request."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "requester",
+            "type": "pubkey"
+          },
+          {
+            "name": "bid",
+            "type": "u64"
+          },
+          {
+            "name": "new_bid",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Receipt",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "request",
+            "type": "pubkey"
+          },
+          {
+            "name": "introer",
+            "type": "pubkey"
+          },
+          {
+            "name": "requester",
+            "type": "pubkey"
+          },
+          {
+            "name": "bid",
+            "type": "u64"
+          },
+          {
+            "name": "jobs_done",
+            "type": "u32"
+          },
+          {
+            "name": "earned",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Refunded",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "request",
+            "type": "pubkey"
+          },
+          {
+            "name": "reason",
+            "docs": [
+              "One of the `REFUND_*` constants."
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Request",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "introer",
+            "docs": [
+              "Introer PDA."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "requester",
+            "type": "pubkey"
+          },
+          {
+            "name": "id",
+            "type": "u64"
+          },
+          {
+            "name": "target",
+            "type": "string"
+          },
+          {
+            "name": "telegram",
+            "type": "string"
+          },
+          {
+            "name": "bid",
+            "type": "u64"
+          },
+          {
+            "name": "status",
+            "type": "u8"
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "accepted_at",
+            "type": "i64"
+          },
+          {
+            "name": "made_at",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Withdrawn",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "request",
+            "type": "pubkey"
+          }
+        ]
+      }
+    }
+  ]
+}

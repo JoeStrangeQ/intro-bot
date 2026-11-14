@@ -18,7 +18,8 @@ Relay: `https://relay.botbotcap.com` (Solana Pay transaction requests only).
 
 ## Program: `intro_escrow`
 
-Program id: placeholder keypair generated in the program branch; the deploy step fills it.
+Program id: `GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC` (keypair kept outside the repo).
+IDL: `idl/intro_escrow.json`. Deploy steps: `docs/deploy.md`.
 Native SOL only. All amounts in lamports (u64).
 
 ### Constants
@@ -66,6 +67,25 @@ On every payout: `jobs_done += 1`, `earned += bid`, `total_held -= bid`.
 `IntroerRegistered`, `BidPlaced{request, introer, requester, bid}`, `Outbid`, `Withdrawn`,
 `Accepted`, `Declined`, `Made`, `Receipt{request, introer, requester, bid, jobs_done, earned}`,
 `Refunded{request, reason}`.
+
+### Program details (filled in by the program branch)
+- `init_config(arbiter, cap_total)`: the signer must be the upgrade authority and becomes `admin`.
+  Accounts: `config, authority, program, program_data, system_program`.
+- `bid` accounts: `config, introer, request, requester, lowest?, lowest_requester?, system_program`.
+  `request` is the PDA for `introer.next_id`. When the queue is not full, pass the program id for
+  `lowest` / `lowest_requester` (Anchor "none"); they are ignored.
+- **Full queue (addition):** besides `lowest` + `lowest_requester`, pass the other 4 open
+  requests of the introer as remaining accounts (read-only). This proves `lowest` really is the
+  lowest. The new bid must be strictly higher than `lowest.bid`.
+- `target` must not be empty. `min_bid` must also be ≤ `MAX_BID`.
+- Payout and refund ixs take `wallet` (= `introer.wallet`) and `requester` (= `request.requester`)
+  accounts; wrong keys fail.
+- Event fields: `IntroerRegistered{introer, wallet, badge_id, min_bid}`,
+  `Outbid{request, requester, bid, new_bid}` (request = the refunded one), `Withdrawn{request}`,
+  `Accepted{request}`, `Declined{request}`, `Made{request, made_at}`, `Disputed{request}`.
+  `Refunded{request, reason}` is emitted on every refund: `0` withdrawn, `1` declined,
+  `2` outbid, `3` expired, `4` arbiter.
+- Errors: see `EscrowError` in the IDL.
 
 ## Machine value (display only, labelled "demo value")
 `value = earned × 0.8 × wear`, `wear = max(0.5, 1 − 0.01 × days since created_at)`.
