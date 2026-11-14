@@ -160,6 +160,8 @@ describe('relay', () => {
       set_admin: 'fba300345bc2bb5c',
       set_paused: '5b3c7dc0b0e1a6da',
       set_cap: 'd1cf79817327dc04',
+      propose_admin: '79d6c7d4572775ea',
+      accept_admin: '702a2d5a74b50daa',
     };
     for (const [name, hex] of Object.entries(admin)) {
       const res = await post(message({ disc: [...Buffer.from(hex, 'hex')] }));

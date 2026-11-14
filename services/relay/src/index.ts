@@ -9,7 +9,8 @@ import bs58 from 'bs58';
 export const PROGRAM_ID = 'GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC';
 const PROGRAM = bs58.decode(PROGRAM_ID);
 // User-facing escrow instructions by Anchor discriminator, from
-// idl/intro_escrow.json. Admin ones (init_config, set_*) are refused.
+// idl/intro_escrow.json. Admin ones (init_config, set_paused,
+// propose_admin, accept_admin) are refused.
 export const ALLOWED_IX: Record<string, string> = {
   '7bdef1c58acb8cf2': 'register_introer',
   '69fe06de8958fa50': 'update_introer',
