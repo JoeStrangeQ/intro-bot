@@ -8,16 +8,18 @@ import bs58 from 'bs58';
 // System stays allowed as an account but never as a program.
 export const PROGRAM_ID = 'GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC';
 const PROGRAM = bs58.decode(PROGRAM_ID);
-// User-facing escrow instructions by Anchor discriminator, from
+// User-facing escrow instructions (spec v2) by Anchor discriminator, from
 // idl/intro_escrow.json. Admin ones (init_config, set_paused,
 // propose_admin, accept_admin, cancel_admin_proposal) are refused.
 export const ALLOWED_IX: Record<string, string> = {
   '7bdef1c58acb8cf2': 'register_introer',
   '69fe06de8958fa50': 'update_introer',
-  c738552692f3259e: 'bid',
-  b712469c946da122: 'withdraw',
-  '419646d885066b04': 'accept',
-  '18395aa25b5ef5b1': 'decline',
+  '22d03af881eab3d3': 'post_job',
+  '7ef19bf132ec5376': 'cancel_job',
+  '35cc245a970636e7': 'offer',
+  cb2683eacc7a3596: 'withdraw_offer',
+  bf484323efd16184: 'close_offer',
+  '454ad9247375614c': 'approve',
   '8aacbff25a16c159': 'mark_made',
   ae010fd503be8300: 'confirm',
   '7699a4f42880f2fa': 'refund_expired',
