@@ -26,6 +26,11 @@ local LABEL = {
 }
 local STATUS = {pending = "Unpaid", open = "Open", approved = "Picked", made = "Made", closed = "Closed"}
 local TABHINT = "LEFT/RIGHT screens   CANCEL home"
+-- LEDs stay brand purple while the app is open.
+local function brand_led()
+  if led then led.fill(0x6A, 0x50, 0xD8) end
+end
+
 local CTA = "Robots that earn: botbotcap.com"
 local CTA_EARNED = "This badge just earned. Your robots can too: botbotcap.com"
 local CTA_PAID = "Paid! Robots that earn: botbotcap.com"
@@ -419,7 +424,7 @@ local function met(id)
   ui.toast("Met! Verified in a moment.")
   if led then
     led.fill(0x61, 0xBB, 0x46)
-    timer.after(600, function() led.off() end)
+    timer.after(600, brand_led)
   end
   leave_meet()
   -- The meet uploads once Wi-Fi is back; the server marks the job met soon after.
@@ -618,7 +623,7 @@ local function anim_tick(ms)
     a.logo, a.shift = art.logo(127, 14, 5, shift), shift
   end
   if led then
-    if a.t >= ANIM_MS then led.off()
+    if a.t >= ANIM_MS then brand_led()
     elseif (a.t // 150) % 2 == 0 then led.fill(0x6A, 0x50, 0xD8)
     else led.fill(0xA8, 0x52, 0x1A) end
   end
@@ -767,5 +772,6 @@ BUILD.splash = splash
 
 -- Wi-Fi first: the mesh takes the radio only on the We met screen.
 if mesh and mesh.pause then mesh.pause() end
+brand_led()
 splash()
 restart_poll()
