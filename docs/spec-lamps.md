@@ -6,7 +6,7 @@
    makes the job; the badge pays the bid into the app's escrow `ESC-GQD4T2WC` with
    `lamps.deposit` (memo `job <id>`). The badge OS asks you to approve the payment.
 2. **Board.** Once the server sees the deposit in the escrow ledger, the job is listed.
-   Unpaid jobs go away after 30 minutes.
+   Unpaid jobs stay in My jobs for up to 72 hours.
 3. **Offer.** Anyone can offer; no sign-up. The first offer makes your introer profile, named by your Telegram. Offering shows the
    requester's Telegram.
 4. **Approve.** The requester picks one offer.

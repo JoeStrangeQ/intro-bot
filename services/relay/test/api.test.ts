@@ -89,7 +89,7 @@ describe('posting and deposits', () => {
     expect(() => s.app.post(REQ, { who: ' ', co: 'B', tg: 'x', bid: 10 })).toThrow(/who/);
   });
 
-  it('drops unpaid posts after 30 minutes', () => {
+  it('drops unpaid posts after 72 hours', () => {
     const s = setup();
     const { id } = s.app.post(REQ, { who: 'A', co: 'B', tg: 'x', bid: 10 });
     s.at(PAY_WAIT + 1);

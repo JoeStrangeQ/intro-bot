@@ -9,7 +9,7 @@ export const MAX_BID = 500; // a player can pay at most 500 !LAMPs a day
 export const MAX_OFFERS = 16;
 export const MAX_OPEN = 3; // live jobs per requester
 export const BOARD_SHOW = 10;
-export const PAY_WAIT = 30 * 60_000; // a job must be paid within 30 min of posting
+export const PAY_WAIT = 72 * 3_600_000; // an unpaid job stays up to 72 h
 export const WORK = 7 * 86_400_000; // approved -> made
 export const CONFIRM = 72 * 3_600_000; // made -> confirm
 export const TEXT = 31;
@@ -371,7 +371,7 @@ export class App {
     this.save();
   }
 
-  /** Drops unpaid posts after 30 min; refunds stalled jobs 72 h after the requester could. */
+  /** Drops unpaid posts after 72 h; refunds stalled jobs 72 h after the requester could. */
   sweep() {
     const t = this.now();
     for (const j of Object.values(this.s.jobs)) {
