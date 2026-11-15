@@ -26,9 +26,15 @@ local LABEL = {
 }
 local STATUS = {pending = "Unpaid", open = "Open", approved = "Picked", made = "Made", closed = "Closed"}
 local TABHINT = "LEFT/RIGHT screens   CANCEL home"
--- LEDs stay brand purple while the app is open.
+-- LEDs while the app is open: the logo's rainbow bands across the top (1..6, same
+-- order), brand purple on the right edge (7..8).
+local BANDS = {0x61BB46, 0xFDB827, 0xF5821F, 0xE03A3E, 0x963D97, 0x009DDC}
 local function brand_led()
-  if led then led.fill(0x6A, 0x50, 0xD8) end
+  if not led then return end
+  for i = 1, led.count or 8 do
+    local c = BANDS[i] or 0x6A50D8
+    led.set(i, c >> 16, (c >> 8) & 0xFF, c & 0xFF)
+  end
 end
 
 local CTA = "Robots that earn: botbotcap.com"

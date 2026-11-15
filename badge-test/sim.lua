@@ -176,7 +176,7 @@ local function new_badge(name, id, user)
     cancel = function(t) B.timers[t] = nil end,
   }
   env.badge = {id = function() return id end, online = function() return true end}
-  env.led = {fill = function() end, off = function() end}
+  env.led = {count = 8, fill = function() end, off = function() end, set = function() end}
   local function request(method, url, body, cb)
     assert(url:sub(1, 8) == "https://", "https only")
     local raw = body and json.encode(body) or ""
