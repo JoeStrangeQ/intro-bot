@@ -6,16 +6,16 @@ only when you confirm. We trust you to keep your word.
 
 The bid waits in an on-chain escrow. The badge never holds keys: it builds each
 transaction, the relay turns it into a QR, and you sign on your phone wallet.
-To connect, scan one QR with your phone wallet: the badge learns your address. No typing.
+Nothing to set up: your first payment QR also tells the badge your wallet. No typing.
 
 ## Screens
 
 LEFT / RIGHT moves between screens. CANCEL goes back, or exits from a main screen.
 
-- **Request an intro** (opens here): who, company, bid, Telegram (remembered), then a QR.
+- **Intro board** (opens here): "+ Request an intro" on top, then the newest jobs: who,
+  company, bid, offers. SELECT a job to offer. After you offer, you see the requester's Telegram.
+- **Request an intro**: who, company, bid, Telegram (remembered), then one QR to pay.
   "Your Telegram is shown to people who offer."
-- **Intro board**: the newest jobs: who, company, bid, offers. SELECT one to offer. After
-  you offer, you see the requester's Telegram.
 - **My jobs**: your jobs. Open: the offer pool (name, jobs done, earned); SELECT one to
   approve, or cancel. Then confirm, or refund when the time is up.
 - **My offers**: jobs you offered on. When you're picked: "Intro made". Closed jobs: get
@@ -40,7 +40,7 @@ When a job you made is confirmed, the badge plays "JOB DONE!" and flashes its li
 1. Open https://solana.com/breakpoint/badge/apps/submit and sign in.
 2. Drop this `badge/` folder on the editor.
 3. Press **Try in emulator**. Turn on **Demo mode** in Setup to try every screen with no
-   network, or connect your phone wallet to use the chain.
+   network, or pay from your phone wallet to use the chain.
 
 Testing `rpc` and `http` needs your account to have X linked. Needs Solana OS 2.1.0 or
 later (the `solana` module).

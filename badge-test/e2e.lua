@@ -114,8 +114,11 @@ local function key(name)
 end
 
 -- Build on the "badge", get the QR link from the relay, pay with the "phone".
-local function sign(ix, who)
-  local ok, link = wait(function(cb) chain.relay(tx.message({ix}), cb) end)
+local function sign(ix, who, seeds)
+  local msg, at = tx.message({ix})
+  local pdas = {}
+  for i, sd in ipairs(seeds or {}) do pdas[i] = {at = at[tx.PDA[i]], seeds = sd} end
+  local ok, link = wait(function(cb) chain.relay(msg, pdas, cb) end)
   if not ok then return false, "relay: " .. tostring(link) end
   if os.getenv("E2E_DEBUG") then print("link", link) end
   local out = sh("RPC_URL=" .. quote(RPC_URL) .. " node " .. quote(HERE .. "/wallet.mjs") .. " pay " .. quote(link) .. " " .. quote(who.file) .. " 2>/dev/null")
@@ -263,6 +266,23 @@ else
   r2 = balance(req2.pub)
   must("refund_expired by anyone 72h later", escrow.ix_refund("refund_expired", J3, req2.pub), req1)
   check(account(J3) == nil and diff(r2, balance(req2.pub)) > 300000000, "expired: requester refunded")
+end
+
+-- Ask first, pay once: the badge doesn't know the wallet; the relay derives the addresses.
+nonce = nonce + 1
+local n0 = tostring(nonce)
+local ok0, why0 = sign(escrow.ix_post_job(tx.PDA[1], n0, "Mert", "Helius", "@req1", "20000000"), req1,
+  {{bytes.hex("job"), "wallet", bytes.hex(bytes.pack_u64(n0))}})
+local J0 = escrow.job_pda(req1.pub, n0)
+local j0 = ok0 and job_at(J0)
+check(j0 and j0.requester == req1.pub and j0.who == "Mert",
+  "wallet-less post_job: relay fills the job address" .. (ok0 and "" or (": " .. tostring(why0))))
+if j0 then
+  local s0 = j0.serial
+  local ok1, why1 = sign(escrow.ix_offer(nil, J0, s0), ana, {{bytes.hex("introer"), "wallet"},
+    {bytes.hex("offer"), bytes.hex(J0), bytes.hex(bytes.pack_u64(s0)), "wallet"}})
+  check(ok1 and account(escrow.offer_pda(J0, s0, ana.pub)) ~= nil,
+    "wallet-less offer: relay fills the introer and offer addresses" .. (ok1 and "" or (": " .. tostring(why1))))
 end
 
 x = introer_of(ana.pub)

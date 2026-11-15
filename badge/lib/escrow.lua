@@ -132,10 +132,14 @@ local function pda(...)
 end
 function M.config_pda() return pda("config") end
 function M.board_pda() return pda("board") end
-function M.introer_pda(wallet) return pda("introer", wallet) end
-function M.job_pda(requester, nonce) return pda("job", requester, bytes.pack_u64(nonce)) end
+-- With no wallet yet (nil), the relay's stand-ins: tx.PDA[1] for the job or introer, [2] for the offer.
+function M.introer_pda(wallet) return wallet and pda("introer", wallet) or tx.PDA[1] end
+function M.job_pda(requester, nonce) return requester and pda("job", requester, bytes.pack_u64(nonce)) or tx.PDA[1] end
 -- Offers are per job serial, so offers on a closed job never count for a re-post.
-function M.offer_pda(job, serial, introer_wallet) return pda("offer", job, bytes.pack_u64(serial), introer_wallet) end
+function M.offer_pda(job, serial, introer_wallet)
+  if not introer_wallet then return tx.PDA[2] end
+  return pda("offer", job, bytes.pack_u64(serial), introer_wallet)
+end
 
 -- Instructions, signer first. W is tx.WALLET, the signer the relay fills in.
 local function ix(name, accounts, args)

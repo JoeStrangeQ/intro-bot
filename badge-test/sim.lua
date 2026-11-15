@@ -15,7 +15,8 @@ end
 
 -- Minimal JSON (enough for the API answers and to size storage) ------------
 local json = {}
-local CONNECT_ID = string.rep("ab", 16)
+local TX_ID = string.rep("ab", 16)
+local TX_URL = "solana:https://relay.botbotcap.com/tx/" .. TX_ID
 do
   local function enc(v)
     local t = type(v)
@@ -256,7 +257,7 @@ end
 local function new_world(opts)
   opts = opts or {}
   W = {ms = 0, objs = 0, labels = {}, lists = {}, qr = nil, timers = {}, toasts = {}, store = opts.store or {},
-    accounts = opts.accounts or {}, rpcq = {}, rpc_times = {}, posts = {}, connects = {}, whos = {}, led = {}, hint = "", input = nil,
+    accounts = opts.accounts or {}, rpcq = {}, rpc_times = {}, posts = {}, whos = {}, led = {}, hint = "", input = nil,
     confirm = nil, id = 0, mesh_sent = {}, offline = false, relay_fail = nil}
   local function obj(kind, o)
     W.objs = W.objs + 1
@@ -347,12 +348,11 @@ local function new_world(opts)
     W.rpcq[#W.rpcq + 1] = {method = method, params = params, cb = cb}
   end}
   _G.http = {post = function(url, body, cb)
-    if url == "https://relay.botbotcap.com/connect" then W.connects[#W.connects + 1] = cb return end
     check(url == "https://relay.botbotcap.com/tx", "relay url")
     check(#json.encode(body) <= 2048, "http body <= 2 KB")
     W.posts[#W.posts + 1] = {body = body, cb = cb}
   end, get = function(url, cb)
-    check(url == "https://relay.botbotcap.com/tx/" .. CONNECT_ID .. "/who", "who url")
+    check(url == "https://relay.botbotcap.com/tx/" .. TX_ID .. "/who", "who url")
     W.whos[#W.whos + 1] = cb
   end}
   _G.mesh = {
@@ -423,21 +423,15 @@ local function relay_reply(ok, res)
   assert(p, "no relay post")
   local m = require("lib.bytes").unhex(p.body.message)
   if os.getenv("DUMP") then io.open(os.getenv("DUMP"), "a"):write(p.body.message, "\n"):close() end
-  callback(p.cb, ok, res or {status = 200, body = json.encode({url = "solana:https://relay.botbotcap.com/tx/abc123"})})
-  return read_msg(m)
+  callback(p.cb, ok, res or {status = 200, body = json.encode({url = TX_URL})})
+  return read_msg(m), p.body.pdas
 end
--- Answer the connect QR, then the relay's "who" poll with the scanning wallet.
-local function connect_as(wallet)
-  local cb = table.remove(W.connects, 1)
-  assert(cb, "no connect post")
-  callback(cb, true, {status = 200, body = json.encode({id = CONNECT_ID,
-    url = "solana:https://relay.botbotcap.com/tx/" .. CONNECT_ID})})
-  check(W.qr and W.qr.t == "solana:https://relay.botbotcap.com/tx/" .. CONNECT_ID, "connect QR")
+-- The relay's "who" poll: nobody yet, then the wallet that scanned.
+local function scanned_by(wallet)
   advance(2000)
   local w = table.remove(W.whos, 1)
   assert(w, "no who poll")
   callback(w, true, {status = 200, body = '{"wallet":null}'})
-  check(W.qr, "still waiting before the scan")
   advance(2000)
   w = table.remove(W.whos, 1)
   assert(w, "no second who poll")
@@ -624,15 +618,14 @@ end
 new_world({accounts = CHAIN})
 check(has("Intro Bot") and has("Robots that earn"), "splash: the B and the CTA")
 advance(1600)
-check(has("Who do you want to meet?") and has("Robots that earn: botbotcap.com"), "opens on Request an intro, CTA")
-check(has("Your Telegram is shown to people who offer."), "Telegram warning")
-check(#W.rpcq == 0, "no rpc without a wallet")
+check(W.labels[1] and W.labels[1].t == "Intro board" and W.lists[1] and W.lists[1].rows[1].title == "+ Request an intro",
+  "opens on the board, Request an intro first")
+flush()
+check(W.lists[1].rows[1].title == "+ Request an intro", "request row stays on top")
 
--- Post a job: wallet first, then who, company, bid, Telegram.
+-- Post a job: who, company, bid, Telegram, then one QR. No wallet asked.
 list_select(1)
-check(not W.input and W.labels[1] and W.labels[1].t == "Connect", "connects the wallet first, no typing")
-connect_as(WALLET); flush()
-check(W.input and W.input.prompt == "Who do you want to meet?", "then who")
+check(W.input and W.input.prompt == "Who do you want to meet?", "asks who first, no wallet")
 type_in("Toly"); type_in("Solana Labs"); type_in("0.001")
 check(last_toast() == "At least 0.01 SOL", "bid floor")
 list_select(1); type_in("Toly"); type_in("Solana Labs"); type_in("101")
@@ -644,17 +637,23 @@ check(W.input and W.input.prompt == "Your Telegram @handle", "asks Telegram once
 type_in("")
 check(last_toast() == "Telegram is required", "Telegram required")
 list_select(1); type_in("Toly"); type_in("Solana Labs"); type_in("12.5"); type_in("joe")
-local m = relay_reply(true)
+local m, pdas = relay_reply(true)
 local ix = m.ixs[1]
 local nonce = tostring(string.unpack("<I8", ix.data, 9))
 check(tonumber(nonce) >= NOW, "nonce is the time")
-local MYJOB = escrow.job_pda(ME, nonce)
+local HOLD = txlib.PDA[1]
 check(m.keys[1] == W8 and #m.ixs == 1 and b58e(ix.program) == escrow.PROGRAM_ID, "one intro_escrow instruction")
-check(same(ix.accounts, {m.keys[1], CONFIG, BOARD, MYJOB, SYS}), "post_job: accounts")
-check(m.w[BOARD] and m.w[MYJOB] and not m.w[CONFIG], "post_job: writable")
+check(same(ix.accounts, {m.keys[1], CONFIG, BOARD, HOLD, SYS}), "post_job: the job is the relay's stand-in")
+check(m.w[BOARD] and m.w[HOLD] and not m.w[CONFIG], "post_job: writable")
+local hex = require("lib.bytes").hex
+check(pdas and #pdas == 1 and m.keys[pdas[1].at + 1] == HOLD and same(pdas[1].seeds,
+  {hex("job"), "wallet", hex(u64(nonce))}), "post_job: job seeds for the relay")
+local MYJOB = escrow.job_pda(ME, nonce)
 check(ix.data == escrow.DISC.post_job .. u64(nonce) .. fixed("Toly", 32) .. fixed("Solana Labs", 32)
   .. fixed("@joe", 32) .. u64(12500000000), "post_job: data (12.5 SOL)")
-check(W.qr and W.qr.t == "solana:https://relay.botbotcap.com/tx/abc123", "post QR")
+check(W.qr and W.qr.t == TX_URL, "post QR")
+scanned_by(WALLET); flush()
+check(W.store.wallet == json.encode(WALLET), "wallet learned from the scan")
 CHAIN[b58e(MYJOB)] = enc_job({requester = ME, nonce = nonce, bid = "12500000000", who = "Toly",
   company = "Solana Labs", telegram = "@joe"})
 on_board(MYJOB)
@@ -674,13 +673,13 @@ local JOB2 = put_job({requester = OTHER, nonce = 7, bid = "300000000", who = "Vi
 on_board(JOB2)
 go("Intro board"); advance(20000)
 local rows = W.lists[1].rows
-check(#rows == 2 and rows[1].title == "Vitalik @ Ethereum" and rows[1].sub:find("1 offer", 1, true)
-  and rows[2].title == "Toly @ Solana Labs", "board: newest first, offers counted")
-check(not rows[1].sub:find("@other", 1, true), "board hides Telegram")
-list_select(2)
+check(#rows == 3 and rows[1].title == "+ Request an intro" and rows[2].title == "Vitalik @ Ethereum"
+  and rows[2].sub:find("1 offer", 1, true) and rows[3].title == "Toly @ Solana Labs", "board: newest first, offers counted")
+check(not rows[2].sub:find("@other", 1, true), "board hides Telegram")
+list_select(3)
 check(has("Your job: see My jobs."), "own job: no offer")
 key("back")
-list_select(1)
+list_select(2)
 check(has("Telegram shown after you offer.") and not has("@other"), "Telegram hidden before offering")
 list_select(1)
 check(last_toast() == "Register in Profile first", "offer needs a profile")
@@ -701,7 +700,7 @@ flush()
 
 -- Offer on Vitalik's job.
 go("Intro board")
-list_select(1); list_select(1)
+list_select(2); list_select(1)
 m = relay_reply(true)
 ix = m.ixs[1]
 local MYOFFER = escrow.offer_pda(JOB2, "1", ME)
@@ -714,7 +713,7 @@ advance(6000)
 check(last_toast() == "Offer: done" and has("My offers"), "offered, My offers")
 flush()
 check(W.lists[1].rows[1].right == "Waiting" and W.lists[1].rows[1].sub:find("@other", 1, true), "my offer shows Telegram")
-go("Intro board"); list_select(1)
+go("Intro board"); list_select(2)
 check(has("You offered. Talk on Telegram:") and has("@other"), "job shows Telegram after offering")
 key("back")
 
@@ -818,13 +817,27 @@ local calls = 0
 for _, t in ipairs(W.rpc_times) do if W.ms - t < 60000 then calls = calls + 1 end end
 check(calls <= 30, "rpc budget")
 
+-- Registering first, before any payment: the relay fills the introer address.
+new_world({accounts = CHAIN})
+advance(1600)
+go("Profile")
+list_select(2); type_in("Joe")
+local rm, rp = relay_reply(true)
+local hx = require("lib.bytes").hex
+check(same(rm.ixs[1].accounts, {rm.keys[1], txlib.PDA[1], SYS}) and rp and #rp == 1
+  and same(rp[1].seeds, {hx("introer"), "wallet"}), "wallet-less register: introer seeds for the relay")
+scanned_by(WALLET); flush()
+advance(6000)
+check(last_toast() == "Register: done" and W.store.wallet == json.encode(WALLET), "registered; wallet learned")
+flush()
+
 -- Demo mode: no network, every screen.
 new_world({store = {mock = "true"}})
 advance(1600)
 check(#W.rpcq == 0, "demo: no rpc")
 go("Intro board")
-check(#W.lists[1].rows >= 4, "demo board")
-list_select(1)
+check(#W.lists[1].rows >= 5, "demo board")
+list_select(2)
 check(has("Telegram shown after you offer."), "demo job")
 list_select(1); advance(4100)
 check(last_toast() == "Offer: done", "demo offer")

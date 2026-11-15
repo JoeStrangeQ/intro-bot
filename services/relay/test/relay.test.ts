@@ -264,6 +264,29 @@ describe('relay', () => {
     expect((await call(`/tx/${'0'.repeat(32)}/who`)).status).toBe(404);
   });
 
+  it('fills wallet-made addresses (PDAs) when the wallet scans', async () => {
+    const seeds = ['6a6f62', 'wallet', '0100000000000000']; // "job", wallet, nonce 1
+    const res = await call('/tx', 'POST', { message: message(), pdas: [{ at: 1, seeds }] });
+    const { url } = (await res.json()) as { url: string };
+    const out = await call(url.slice(`solana:${ORIGIN}`.length), 'POST', {
+      account: bs58.encode(WALLET),
+    });
+    const { transaction } = (await out.json()) as { transaction: string };
+    const msg = Buffer.from(transaction, 'base64').subarray(65);
+    // Same as web3.js findProgramAddressSync(["job", key(7), 1u64], program).
+    expect(bs58.encode(msg.subarray(36, 68))).toBe('6acAHV8CdAC9SmAAkouQee6KkCEirWdCAa9JgYchrHXR');
+  });
+
+  it('refuses PDA specs that miss the holder key or the wallet', async () => {
+    const bad = async (pdas: unknown) =>
+      (await call('/tx', 'POST', { message: message(), pdas })).status;
+    expect(await bad([{ at: 2, seeds: ['6a6f62', 'wallet'] }])).toBe(400); // System, not a holder
+    expect(await bad([{ at: 1, seeds: ['6a6f62', '00'] }])).toBe(400); // no wallet
+    expect(await bad([{ at: 1, seeds: ['wallet', 'wallet'] }])).toBe(400);
+    expect(await bad([{ at: 1, seeds: ['zz', 'wallet'] }])).toBe(400);
+    expect(await bad('x')).toBe(400);
+  });
+
   it('builds links from the serving origin', async () => {
     const res = await handle(
       new Request('http://127.0.0.1:8787/tx', {

@@ -3,6 +3,8 @@
 // placeholder; the wallet then fetches it here with its own key and a fresh
 // blockhash filled in. Holds nothing but the message, for 10 minutes.
 import bs58 from 'bs58';
+import { ed25519 } from '@noble/curves/ed25519';
+import { sha256 } from '@noble/hashes/sha2';
 
 // Only intro_escrow may be called at the top level. It moves SOL by CPI, so
 // System stays allowed as an account but never as a program.
@@ -29,6 +31,13 @@ const toHex = (b: Uint8Array) =>
   Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 export const PLACEHOLDER = new Uint8Array(32).fill(1);
 const TTL_MS = 600_000;
+// Addresses made from the wallet (the job, the introer, the offer) can't be
+// built on the badge before the wallet is known. The badge puts 32 x (2 + i)
+// at those keys and sends their seeds, "wallet" standing for the wallet; the
+// relay derives them once the wallet scans.
+const MAX_PDAS = 2;
+const pdaHolder = (i: number) => new Uint8Array(32).fill(2 + i);
+export type PdaSpec = { at: number; seeds: string[] };
 const MAX_MESSAGE = 1232 - 1 - 64; // packet size minus one signature
 const MAX_BODY = MAX_MESSAGE * 2 + 64;
 const BLOCKHASH_MS = 5_000;
@@ -133,6 +142,44 @@ export function compactU16(b: Uint8Array, at: number): [number, number] {
 
 const same = (a: Uint8Array, b: Uint8Array) =>
   a.length === b.length && a.every((x, i) => x === b[i]);
+
+/** Program address for these seeds (the first bump off the curve). */
+export function findPda(seeds: Uint8Array[], program: Uint8Array) {
+  const tag = new TextEncoder().encode('ProgramDerivedAddress');
+  for (let bump = 255; bump >= 0; bump--) {
+    const parts = [...seeds, Uint8Array.of(bump), program, tag];
+    const buf = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let o = 0;
+    for (const p of parts) buf.set(p, (o += p.length) - p.length);
+    const hash = sha256(buf);
+    try {
+      ed25519.ExtendedPoint.fromHex(hash);
+    } catch {
+      return hash;
+    }
+  }
+  throw new Bad('no program address');
+}
+
+/** Each spec points at its own holder key; seeds are hex (<= 32 bytes) or "wallet", once. */
+export function checkPdas(keys: Uint8Array[], pdas: unknown): PdaSpec[] {
+  if (pdas === undefined) return [];
+  if (!Array.isArray(pdas) || pdas.length > MAX_PDAS) throw new Bad('bad pdas');
+  return pdas.map((p: unknown, i) => {
+    const { at, seeds } = (p ?? {}) as { at?: unknown; seeds?: unknown };
+    if (typeof at !== 'number' || !Number.isInteger(at) || !keys[at] || !same(keys[at], pdaHolder(i))) {
+      throw new Bad('bad pdas');
+    }
+    if (!Array.isArray(seeds) || seeds.length < 2 || seeds.length > 8) throw new Bad('bad pdas');
+    if (seeds.filter((x) => x === 'wallet').length !== 1) throw new Bad('bad pdas');
+    for (const x of seeds) {
+      if (x !== 'wallet' && (typeof x !== 'string' || !/^([0-9a-f]{2}){1,32}$/.test(x))) {
+        throw new Bad('bad pdas');
+      }
+    }
+    return { at, seeds: seeds as string[] };
+  });
+}
 
 /** Enforces the relay rules; throws Bad on any violation. */
 export function check(msg: Uint8Array) {
@@ -274,10 +321,15 @@ export async function handle(
   try {
     if (path === '/tx' && req.method === 'POST') {
       await limit('create');
-      const { message } = await readJson(req);
-      check(fromHex(message));
+      const { message, pdas } = await readJson(req);
+      const specs = checkPdas(check(fromHex(message)).keys, pdas);
       const id = crypto.randomUUID().replace(/-/g, '');
-      const put = await store(env, id, 'PUT', message as string);
+      const put = await store(
+        env,
+        id,
+        'PUT',
+        specs.length ? JSON.stringify({ m: message, p: specs }) : (message as string),
+      );
       if (!put.ok) throw new Error('store failed');
       return json({ url: `solana:${url.origin}/tx/${id}` });
     }
@@ -329,11 +381,22 @@ export async function handle(
         message: 'Connect your badge to Intro Bot',
       });
     }
-    const msg = fromHex(stored);
+    const saved = stored.startsWith('{')
+      ? (JSON.parse(stored) as { m: string; p: PdaSpec[] })
+      : { m: stored, p: [] };
+    const msg = fromHex(saved.m);
     const { keys, keysAt, hashAt } = check(msg);
     // The wallet must not already be in the message: keys would merge.
     if (keys.some((k) => same(k, account))) throw new Bad('account in use');
     msg.set(account, keysAt);
+    for (const { at, seeds } of saved.p) {
+      const pda = findPda(
+        seeds.map((x) => (x === 'wallet' ? account : fromHex(x))),
+        PROGRAM,
+      );
+      if (keys.some((k, i) => i !== at && same(k, pda))) throw new Bad('account in use');
+      msg.set(pda, keysAt + at * 32);
+    }
     msg.set(await hash, hashAt);
     const tx = new Uint8Array(1 + 64 + msg.length);
     tx[0] = 1; // one empty signature for the wallet to fill
