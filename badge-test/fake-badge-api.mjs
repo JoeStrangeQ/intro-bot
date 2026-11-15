@@ -59,7 +59,7 @@ createServer(async (req, res) => {
   }
   if (path === '/test/deposit') {
     const id = ledger.length + 1;
-    ledger.push({ id, type: 'deposit', amount: body.amount, memo: body.memo, user: body.user, badge: body.badge });
+    ledger.push({ id, kind: 'deposit', delta: body.amount, memo: body.memo, user: body.user, badge: body.badge });
     return send({ id: String(id) });
   }
   if (path === '/test/meet') {

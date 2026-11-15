@@ -222,6 +222,10 @@ describe('ledger and meets parsing', () => {
       badge: 'B',
     });
     expect(toDeposit({ id: 8, amount: -50, memo: 'x' })).toBeNull();
+    // The real ledger's shape (seen live): kind + delta.
+    expect(
+      toDeposit({ id: '165', kind: 'deposit', delta: 90, balance: 100, user: 'u', badge: '7ZNCET', app: 'intro-bot', memo: 'job 5' }),
+    ).toEqual({ id: '165', amount: 90, memo: 'job 5', user: 'u', badge: '7ZNCET' });
     expect(toDeposit({ id: 9, amount: 50, type: 'payout' })).toBeNull();
   });
   it('reads meets', () => {

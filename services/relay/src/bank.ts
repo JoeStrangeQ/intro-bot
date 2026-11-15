@@ -6,7 +6,7 @@ const str = (v: unknown) => (v === undefined || v === null ? '' : String(v));
 
 /** A ledger entry as a deposit, or null for anything else (payouts). Field names are read loosely. */
 export function toDeposit(it: Raw): Deposit | null {
-  const amount = Number(it.amount);
+  const amount = Number(it.delta ?? it.amount); // the real ledger calls it delta
   const kind = str(it.type ?? it.kind ?? 'deposit');
   if (!(amount > 0) || !/deposit/i.test(kind)) return null;
   const from = (it.from ?? {}) as Raw;
