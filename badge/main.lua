@@ -475,7 +475,10 @@ local function draw_spark()
       bars[k]:pos(16 + (k - 1) * 4, 90 - h)
       bars[k]:show(true)
     else
-      bars[k]:show(false)
+      -- No history yet: a flat line at zero, so the box isn't empty.
+      bars[k]:size(3, 2)
+      bars[k]:pos(16 + (k - 1) * 4, 88)
+      bars[k]:show(true)
     end
   end
 end
@@ -495,10 +498,21 @@ local function refresh_profile()
     w.value:text(lp(me.value))
     w.stats:text(me.name .. "   jobs " .. me.jobs .. "   earned " .. lp(me.earned))
   else
-    w.value:text("-- !LAMPs")
+    w.value:text(lp(0))
     w.stats:text(me and "Offer on a job to start earning" or ago_text())
   end
+  if w.bal then w.bal:text(st.bal and ("balance " .. lp(st.bal)) or (st.bal_err or "balance ...")) end
   draw_spark()
+end
+
+-- The owner's own !LAMPs (lamps.balance), shown under the machine value.
+local function load_balance()
+  if not lamps then st.bal_err = "balance: no lamps permission" return refresh_profile() end
+  lamps.balance(function(ok, bal)
+    if ok then st.bal, st.bal_err = math.tointeger(tonumber(bal)) or bal, nil
+    else st.bal, st.bal_err = nil, "balance: " .. tostring(bal) .. " by the badge" end
+    refresh_profile()
+  end)
 end
 
 -- The Telegram handle is also the introer name others see.
@@ -524,10 +538,12 @@ local function build_profile()
   if ui.qr then ui.qr(232, 28, 76, SITE) end
   ui.label(226, 106, "botbotcap.com", {size = 12, color = C.dim, w = 88, align = "center"})
   st.w.stats = line(96, "", C.ink)
+  st.w.bal = ui.label(120, 70, "", {size = 12, color = C.dim, w = 108})
   ui.list(6, 120, 308, 30, profile_items(), {on_select = function() edit_tg() end})
   center(180, CTA, 14, C.orange)
   ui.hint("SELECT change   LEFT/RIGHT screens")
   refresh_profile()
+  load_balance()
 end
 
 -- Badge Fleet MAV: every !LAMP the badge fleet's introers produced ----------
