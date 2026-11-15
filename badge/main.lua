@@ -25,7 +25,7 @@ local LABEL = {
   meet = "We met: verify badges", pay = "Pay the bid",
 }
 local STATUS = {pending = "Unpaid", open = "Open", approved = "Picked", made = "Made", closed = "Closed"}
-local TABHINT = "LEFT/RIGHT screens   CANCEL exit"
+local TABHINT = "LEFT/RIGHT screens   CANCEL home"
 local CTA = "Robots that earn: botbotcap.com"
 local CTA_EARNED = "This badge just earned. Your robots can too: botbotcap.com"
 local CTA_PAID = "Paid! Robots that earn: botbotcap.com"
@@ -685,7 +685,10 @@ end
 
 function on_key(key)
   if st.anim then return true end
-  if st.screen == "splash" and key ~= "back" then show("board") return true end
+  if st.screen == "splash" then
+    if key == "select" then show("board") return true end
+    return key ~= "back"
+  end
   if key == "back" then
     if st.screen == "meet" then
       leave_meet()
@@ -698,6 +701,7 @@ function on_key(key)
       show(j and j.mine and "myjobs" or (j and j.o and "myoffers") or "board")
       return true
     end
+    if IS_TAB[st.screen] then show("splash") return true end
     return false
   end
   if key == "select" and st.screen == "meet" then try_meet() return true end
@@ -721,18 +725,28 @@ function on_exit()
   if led then led.off() end
 end
 
--- Splash: the big rainbow bot, then the board.
+-- Splash: BotBot and a QR to botbotcap.com, so the badge can be shown off. SELECT enters.
 local function splash()
+  st.dirty = nil
   st.screen = "splash"
   ui.clear()
+  st.w = {}
   ui.bg(C.desk)
-  art.logo(108, 30, 8)
-  center(142, "Intro Bot", 20, C.ink)
-  center(170, CTA, 14, C.orange)
-  timer.after(1500, function()
-    if st.screen == "splash" and not st.modal then show("board") end
-  end)
+  ui.rect(4, 4, 312, 196, {color = C.ink})
+  ui.rect(5, 5, 310, 194, {color = C.paper})
+  if ui.qr then ui.qr(14, 18, 166, SITE) end
+  art.logo(212, 18, 5)
+  local function side(y, text, size, color)
+    ui.label(184, y, text, {size = size, color = color, w = 128, align = "center"})
+  end
+  side(90, "BotBot", 20, C.brand)
+  side(116, "Intro Bot", 14, C.ink)
+  side(144, "Robots that earn:", 12, C.orange)
+  side(160, "botbotcap.com", 14, C.orange)
+  side(184, "Scan me", 12, C.dim)
+  ui.hint("SELECT to enter   CANCEL exit")
 end
+BUILD.splash = splash
 
 -- Wi-Fi first: the mesh takes the radio only on the We met screen.
 if mesh and mesh.pause then mesh.pause() end

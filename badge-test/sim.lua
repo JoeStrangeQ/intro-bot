@@ -143,12 +143,12 @@ local function new_badge(name, id, user)
   end} or json
   env.ui = {
     W = 320, H = 218,
-    clear = function() B.objs, B.labels, B.list = 0, {}, nil end,
+    clear = function() B.objs, B.labels, B.list, B.qr = 0, {}, nil, nil end,
     bg = function() end,
     rect = function() return obj("rect", "") end,
     label = function(_, _, t) return obj("label", t) end,
     hint = function(t) B.hint = t end,
-    qr = function() return obj("qr", "") end,
+    qr = function(_, _, size, t) B.qr, B.qr_size = t, size return obj("qr", t) end,
     list = function(_, _, _, _, items, opts)
       local o = obj("list", "")
       o.its, o.on_select = items, opts and opts.on_select
@@ -286,6 +286,7 @@ local TABS = {board = 1, fleet = 2, request = 3, myjobs = 4, myoffers = 5, profi
 local TITLES = {["Intro board"] = "board", ["Badge Fleet"] = "fleet", ["Request an intro"] = "request",
   ["My jobs"] = "myjobs", ["My offers"] = "myoffers", ["Profile"] = "profile"}
 local function tab(B, name)
+  if B.labels[1] and B.labels[1].t == "BotBot" then key(B, "select") end
   if B.labels[1] and B.labels[1].t == "JOB DONE!" then B.saw_done = true run(B, 3000) end
   for _ = 1, 3 do  -- back out of a job or We met screen first
     if TITLES[B.labels[1] and B.labels[1].t or ""] then break end
@@ -307,7 +308,20 @@ end
 local A = new_badge("requester", "REQ001", "u-req")
 local I = new_badge("introer", "INT001", "u-int")
 run(A, 2000) run(I, 2000)
+check(A.labels[1] and A.labels[1].t == "BotBot", "splash first: " .. texts(A))
+check(A.qr == "https://botbotcap.com" and A.qr_size >= 150, "splash QR to botbotcap.com, big")
+check(A.hint == "SELECT to enter   CANCEL exit", "splash hint")
+run(A, 5000)
+check(A.labels[1].t == "BotBot", "splash stays until SELECT")
+key(A, "left") key(A, "right")
+check(A.labels[1].t == "BotBot", "only SELECT enters")
+key(A, "select") key(I, "select")
+check(A.qr == nil, "QR freed on the board")
 check(has(A, "No requests yet"), "empty board at start")
+check(A.env.on_key("back") == true and A.labels[1].t == "BotBot", "CANCEL on a tab goes home")
+check(A.env.on_key("back") == false, "CANCEL on the splash exits")
+key(A, "select")
+check(TITLES[A.labels[1].t] == "board", "SELECT enters again")
 check(A.mesh == false, "mesh paused at start: Wi-Fi first")
 
 -- No sign-up: every badge can request and offer.

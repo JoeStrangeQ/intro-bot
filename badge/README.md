@@ -9,9 +9,12 @@ relay.botbotcap.com keeps the board and pays out, and the badge server signs who
 
 ## Screens
 
-LEFT / RIGHT moves between screens. CANCEL goes back, or exits from a main screen.
+LEFT / RIGHT moves between screens. CANCEL goes back, or home from a main screen.
 
-- **Intro board** (opens here): "+ Request an intro", then the newest jobs. SELECT one to
+- **Home** (opens here): BotBot and a big QR to botbotcap.com, so people can scan your badge.
+  SELECT enters the app; CANCEL here exits.
+
+- **Intro board**: "+ Request an intro", then the newest jobs. SELECT one to
   offer; after you offer you see the requester's Telegram.
 - **Badge Fleet**: the "Badge Fleet MAV", every !LAMP paid to introers, and intros paid.
 - **Request an intro**: who, company, bid, Telegram (remembered), then the OS asks you to
