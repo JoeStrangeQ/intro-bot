@@ -1,7 +1,7 @@
 {
   "id": "intro-bot",
   "name": "Intro Bot",
-  "version": "4.0.3",
+  "version": "4.0.4",
   "author": "@botbotcap",
   "summary": "Request an intro at Breakpoint. Introers offer, you pick one, pay in !LAMPs when it is made. By BotBot.",
   "description": "Post who you want to meet and your bid in !LAMPs. It waits in the app's escrow. Introers offer, you pick one after talking on Telegram, meet badge to badge, and they are paid only when you confirm. The Badge Fleet MAV shows every !LAMP introers produced. Ask me about BotBot: botbotcap.com",

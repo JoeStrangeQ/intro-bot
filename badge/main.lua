@@ -30,6 +30,7 @@ local CTA = "Robots that earn: botbotcap.com"
 local CTA_EARNED = "This badge just earned. Your robots can too: botbotcap.com"
 local CTA_PAID = "Paid! Robots that earn: botbotcap.com"
 local SITE = "https://botbotcap.com"
+local X = "https://x.com/botbotcap"
 
 local function lp(n) return tostring(n or 0) .. " !LAMPs" end
 
@@ -725,7 +726,7 @@ function on_exit()
   if led then led.off() end
 end
 
--- Splash: BotBot and a QR to botbotcap.com, so the badge can be shown off. SELECT enters.
+-- Splash: BotBot and a QR to our X, so the badge can be shown off. SELECT enters.
 local function splash()
   st.dirty = nil
   st.screen = "splash"
@@ -734,16 +735,16 @@ local function splash()
   ui.bg(C.desk)
   ui.rect(4, 4, 312, 196, {color = C.ink})
   ui.rect(5, 5, 310, 194, {color = C.paper})
-  if ui.qr then ui.qr(14, 18, 166, SITE) end
+  if ui.qr then ui.qr(14, 18, 166, X) end
   art.logo(212, 18, 5)
   local function side(y, text, size, color)
     ui.label(184, y, text, {size = size, color = color, w = 128, align = "center"})
   end
   side(90, "BotBot", 20, C.brand)
   side(116, "Intro Bot", 14, C.ink)
-  side(144, "Robots that earn:", 12, C.orange)
-  side(160, "botbotcap.com", 14, C.orange)
-  side(184, "Scan me", 12, C.dim)
+  side(144, "Scan to follow", 12, C.orange)
+  side(160, "x.com/botbotcap", 14, C.orange)
+  side(184, "botbotcap.com", 12, C.dim)
   ui.hint("SELECT to enter   CANCEL exit")
 end
 BUILD.splash = splash

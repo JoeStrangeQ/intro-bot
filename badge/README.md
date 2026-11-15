@@ -11,7 +11,7 @@ relay.botbotcap.com keeps the board and pays out, and the badge server signs who
 
 LEFT / RIGHT moves between screens. CANCEL goes back, or home from a main screen.
 
-- **Home** (opens here): BotBot and a big QR to botbotcap.com, so people can scan your badge.
+- **Home** (opens here): BotBot and a big QR to x.com/botbotcap, so people can scan your badge and follow.
   SELECT enters the app; CANCEL here exits.
 
 - **Intro board**: "+ Request an intro", then the newest jobs. SELECT one to
