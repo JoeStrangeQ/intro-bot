@@ -88,10 +88,11 @@ healthy http://127.0.0.1:8899
 fund http://127.0.0.1:8899
 relay 8787 http://127.0.0.1:8899 "$E/relay.log"
 flow() { # rpc url, relay url, [time]: init_config, then the badge flow; a failure doesn't stop the next phase
-  if RPC_URL=$1 node badge-test/wallet.mjs init-config "$E/admin.json" 2>/dev/null; then
+  if RPC_URL=$1 node badge-test/wallet.mjs init-config "$E/admin.json" 2>/dev/null \
+    && RPC_URL=$1 node badge-test/wallet.mjs init-stats "$E/admin.json" 2>/dev/null; then
     lua badge-test/e2e.lua "$E" "$1" "$2" ${3:-} || STATUS=1
   else
-    echo "FAIL  init_config on $1"
+    echo "FAIL  init_config / init_stats on $1"
     STATUS=1
   fi
 }

@@ -5,6 +5,8 @@ local M = {}
 
 M.WALLET = ("\1"):rep(32)  -- not all zeros: that is the System Program
 M.SYSTEM = ("\0"):rep(32)
+-- Stand-ins for addresses made from the wallet; the relay derives them when it scans.
+M.PDA = {("\2"):rep(32), ("\3"):rep(32)}
 
 local function len(n)
   local s = ""
@@ -37,7 +39,7 @@ function M.message(instructions)
     for i, a in ipairs(ix.accounts) do idx[i] = string.char(at[a[1]]) end
     out[#out + 1] = string.char(at[ix.program]) .. len(#idx) .. table.concat(idx) .. len(#ix.data) .. ix.data
   end
-  return table.concat(out)
+  return table.concat(out), at
 end
 
 return M

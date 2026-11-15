@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy intro_escrow to Solana mainnet and run init_config (docs/deploy.md).
+# Deploy intro_escrow to Solana mainnet and run init_config and init_stats (docs/deploy.md).
 # Then puts the relay live on mainnet. Keeps the upgrade authority on the deployer key; make it immutable later, by hand.
 #
 #   RPC_URL=<mainnet rpc> scripts/deploy-mainnet.sh
@@ -24,6 +24,7 @@ say() { printf '\n== %s\n' "$*"; }
 [ "$(solana-keygen pubkey "$PROGRAM_KEY")" = "$PROGRAM" ] || { echo "program key mismatch"; exit 1; }
 
 say "Build and test"
+pnpm install --silent
 cargo build-sbf --manifest-path programs/intro-escrow/Cargo.toml --sbf-out-dir target/deploy
 cargo test -q
 
@@ -50,11 +51,14 @@ say "init_config (deployer becomes admin)"
 RPC_URL=$RPC_URL node badge-test/wallet.mjs init-config "$DEPLOYER" \
   || echo "init_config failed (already done? check the Config account)"
 
-say "Relay (intro-bot-relay-production.nav-keeper.workers.dev, mainnet rpc)"
+say "init_stats (fleet totals; skipped if it exists)"
+RPC_URL=$RPC_URL node badge-test/wallet.mjs init-stats "$DEPLOYER"
+
+say "Relay (relay.botbotcap.com, mainnet rpc)"
 ( cd services/relay
-  printf '%s' "$RPC_URL" | npx -y wrangler@4 secret put RPC_URL --env production
-  npx -y wrangler@4 deploy --env production )
-curl -fsS -X POST https://intro-bot-relay-production.nav-keeper.workers.dev/connect -H 'content-type: application/json' -d '{}' >/dev/null \
+  railway variables -s relay --set "RPC_URL=$RPC_URL" --skip-deploys >/dev/null
+  railway up --ci -s relay )
+curl -fsS -X POST https://relay.botbotcap.com/connect -H 'content-type: application/json' -d '{}' >/dev/null \
   && echo "relay is up" || echo "relay check failed"
 
 say "Done"

@@ -173,6 +173,7 @@ describe('relay', () => {
   it('refuses admin, removed v1 and unknown escrow instructions', async () => {
     const admin = {
       init_config: '17eb73e8a86001e7',
+      init_stats: 'cbbde5aef0be9e6e',
       set_admin: 'fba300345bc2bb5c',
       set_paused: '5b3c7dc0b0e1a6da',
       set_cap: 'd1cf79817327dc04',
@@ -262,6 +263,29 @@ describe('relay', () => {
     expect(Array.from(tx.slice(69, 101))).toEqual(Array.from(WALLET));
     expect(await who()).toEqual({ wallet: bs58.encode(WALLET) });
     expect((await call(`/tx/${'0'.repeat(32)}/who`)).status).toBe(404);
+  });
+
+  it('fills wallet-made addresses (PDAs) when the wallet scans', async () => {
+    const seeds = ['6a6f62', 'wallet', '0100000000000000']; // "job", wallet, nonce 1
+    const res = await call('/tx', 'POST', { message: message(), pdas: [{ at: 1, seeds }] });
+    const { url } = (await res.json()) as { url: string };
+    const out = await call(url.slice(`solana:${ORIGIN}`.length), 'POST', {
+      account: bs58.encode(WALLET),
+    });
+    const { transaction } = (await out.json()) as { transaction: string };
+    const msg = Buffer.from(transaction, 'base64').subarray(65);
+    // Same as web3.js findProgramAddressSync(["job", key(7), 1u64], program).
+    expect(bs58.encode(msg.subarray(36, 68))).toBe('6acAHV8CdAC9SmAAkouQee6KkCEirWdCAa9JgYchrHXR');
+  });
+
+  it('refuses PDA specs that miss the holder key or the wallet', async () => {
+    const bad = async (pdas: unknown) =>
+      (await call('/tx', 'POST', { message: message(), pdas })).status;
+    expect(await bad([{ at: 2, seeds: ['6a6f62', 'wallet'] }])).toBe(400); // System, not a holder
+    expect(await bad([{ at: 1, seeds: ['6a6f62', '00'] }])).toBe(400); // no wallet
+    expect(await bad([{ at: 1, seeds: ['wallet', 'wallet'] }])).toBe(400);
+    expect(await bad([{ at: 1, seeds: ['zz', 'wallet'] }])).toBe(400);
+    expect(await bad('x')).toBe(400);
   });
 
   it('builds links from the serving origin', async () => {

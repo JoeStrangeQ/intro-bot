@@ -50,6 +50,18 @@ pub mod intro_escrow {
         Ok(())
     }
 
+    /// Creates the fleet totals (`Stats`). Admin only; added after mainnet
+    /// launch, so it is separate from `init_config`.
+    pub fn init_stats(ctx: Context<InitStats>) -> Result<()> {
+        ctx.accounts.stats.set_inner(Stats {
+            paid: 0,
+            jobs: 0,
+            bump: ctx.bumps.stats,
+            spare: [0; 64],
+        });
+        Ok(())
+    }
+
     /// Step 1 of an admin change: names the next admin, who must accept.
     pub fn propose_admin(ctx: Context<AdminOnly>, admin: Pubkey) -> Result<()> {
         require_keys_neq!(admin, Pubkey::default(), EscrowError::NoAdmin);
@@ -303,6 +315,8 @@ pub mod intro_escrow {
         let bid = a.job.bid;
         a.job.sub_lamports(bid)?;
         a.wallet.add_lamports(bid)?;
+        a.stats.paid = a.stats.paid.checked_add(bid).ok_or(EscrowError::Overflow)?;
+        a.stats.jobs = a.stats.jobs.checked_add(1).ok_or(EscrowError::Overflow)?;
         let introer = &mut a.introer;
         introer.jobs_done = introer
             .jobs_done
@@ -441,6 +455,17 @@ pub struct Config {
     pub bump: u8,
 }
 
+/// Fleet totals: every lamport paid to introers by `confirm` ("Badge Fleet MAV").
+#[account]
+#[derive(InitSpace)]
+pub struct Stats {
+    pub paid: u64,
+    pub jobs: u64,
+    pub bump: u8,
+    /// Room for later fields.
+    pub spare: [u8; 64],
+}
+
 /// Ring of the newest job addresses, for clients that can't list program
 /// accounts. Old entries may point at closed jobs. Zero-copy: too big to
 /// deserialize on the stack.
@@ -542,6 +567,17 @@ pub struct InitConfig<'info> {
     pub program: Program<'info, program::IntroEscrow>,
     #[account(constraint = program_data.upgrade_authority_address == Some(authority.key()) @ EscrowError::NotUpgradeAuthority)]
     pub program_data: Account<'info, ProgramData>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct InitStats<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    #[account(seeds = [b"config"], bump = config.bump, has_one = admin @ EscrowError::Unauthorized)]
+    pub config: Account<'info, Config>,
+    #[account(init, payer = admin, space = 8 + Stats::INIT_SPACE, seeds = [b"stats"], bump)]
+    pub stats: Account<'info, Stats>,
     pub system_program: Program<'info, System>,
 }
 
@@ -708,6 +744,8 @@ pub struct Confirm<'info> {
     /// CHECK: must be `job.approved`; receives the bid.
     #[account(mut, address = job.approved @ EscrowError::WrongWallet)]
     pub wallet: UncheckedAccount<'info>,
+    #[account(mut, seeds = [b"stats"], bump = stats.bump)]
+    pub stats: Account<'info, Stats>,
 }
 
 /// `refund_expired` and `refund_unconfirmed`.

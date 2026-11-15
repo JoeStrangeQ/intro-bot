@@ -3,6 +3,7 @@
 //
 //   node wallet.mjs pay <solana:link> <keypair.json>   -> {"signature": ...}
 //   node wallet.mjs init-config <admin keypair.json>   (admin only: the relay refuses it)
+//   node wallet.mjs init-stats <admin keypair.json>    (admin only; skipped if Stats exists)
 //
 // RPC_URL (default http://127.0.0.1:8899). Local keys only, made by e2e.sh.
 import { readFileSync } from 'node:fs';
@@ -84,11 +85,38 @@ async function initConfig(admin) {
   return { signature: await send(tx) };
 }
 
+// The fleet totals (Stats), admin only. Does nothing when it already exists.
+async function initStats(admin) {
+  const pda = (seed) => PublicKey.findProgramAddressSync([Buffer.from(seed)], PROGRAM)[0];
+  if (await connection.getAccountInfo(pda('stats'), 'confirmed')) return { skipped: 'stats exists' };
+  const ix = new TransactionInstruction({
+    programId: PROGRAM,
+    keys: [
+      { pubkey: admin.publicKey, isSigner: true, isWritable: true },
+      { pubkey: pda('config'), isSigner: false, isWritable: false },
+      { pubkey: pda('stats'), isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data: disc('init_stats'),
+  });
+  const tx = new Transaction().add(ix);
+  tx.feePayer = admin.publicKey;
+  tx.recentBlockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
+  tx.sign(admin);
+  return { signature: await send(tx) };
+}
+
 const [cmd, a, b] = process.argv.slice(2);
 try {
   const out =
-    cmd === 'pay' ? await pay(a, load(b)) : cmd === 'init-config' ? await initConfig(load(a)) : null;
-  if (!out) throw new Error('usage: wallet.mjs pay <link> <keypair> | init-config <keypair>');
+    cmd === 'pay'
+      ? await pay(a, load(b))
+      : cmd === 'init-config'
+        ? await initConfig(load(a))
+        : cmd === 'init-stats'
+          ? await initStats(load(a))
+          : null;
+  if (!out) throw new Error('usage: wallet.mjs pay <link> <keypair> | init-config <keypair> | init-stats <keypair>');
   console.log(JSON.stringify(out));
 } catch (err) {
   const logs = err.logs ?? err.transactionLogs;

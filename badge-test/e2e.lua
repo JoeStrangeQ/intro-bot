@@ -114,8 +114,11 @@ local function key(name)
 end
 
 -- Build on the "badge", get the QR link from the relay, pay with the "phone".
-local function sign(ix, who)
-  local ok, link = wait(function(cb) chain.relay(tx.message({ix}), cb) end)
+local function sign(ix, who, seeds)
+  local msg, at = tx.message({ix})
+  local pdas = {}
+  for i, sd in ipairs(seeds or {}) do pdas[i] = {at = at[tx.PDA[i]], seeds = sd} end
+  local ok, link = wait(function(cb) chain.relay(msg, pdas, cb) end)
   if not ok then return false, "relay: " .. tostring(link) end
   if os.getenv("E2E_DEBUG") then print("link", link) end
   local out = sh("RPC_URL=" .. quote(RPC_URL) .. " node " .. quote(HERE .. "/wallet.mjs") .. " pay " .. quote(link) .. " " .. quote(who.file) .. " 2>/dev/null")
@@ -152,6 +155,8 @@ check(big.a[1] == "12345678901" and big.a[2] == "12345678902" and big.b == 5 and
 print("-- chain: " .. RPC_URL .. "   relay: " .. RELAY_URL .. (CAN_TIME and "   (time travel)" or ""))
 check(account(escrow.config_pda()) ~= nil and account(escrow.board_pda()) ~= nil,
   "config and board made by init_config (upgrade authority " .. b58e(admin.pub):sub(1, 6) .. "..)")
+local function stats() return escrow.decode_stats(account(escrow.stats_pda())) end
+check(stats() and stats().paid == "0" and stats().jobs == 0, "stats made by init_stats: nothing paid yet")
 
 -- Introers register.
 must("register_introer (Ana)", escrow.ix_register(ana.pub, "E2E-0001", "Ana"), ana)
@@ -212,12 +217,15 @@ refused("mark_made by an introer not picked refused", escrow.ix_mark_made(J1), k
 refused("cancel after approving refused", escrow.ix_cancel_job(J1), req1, "BadStatus")
 must("mark_made", escrow.ix_mark_made(J1), ana)
 check(job_at(J1).status == escrow.MADE, "made: waiting for confirm")
-local before, ab = introer_of(ana.pub), balance(ana.pub)
+local before, ab, fleet0 = introer_of(ana.pub), balance(ana.pub), stats()
 must("confirm", escrow.ix_confirm(J1, ana.pub), req1)
 local after = introer_of(ana.pub)
 check(diff(ab, balance(ana.pub)) == SOL // 2, "Ana paid exactly the bid (0.5 SOL)")
 check(after.jobs == before.jobs + 1 and after.earned == sol.add(before.earned, tostring(SOL // 2)), "jobs and earned rise")
 check(account(J1) == nil, "confirmed job closed")
+local fleet = stats()
+check(fleet.paid == sol.add(fleet0.paid, tostring(SOL // 2)) and fleet.jobs == fleet0.jobs + 1,
+  "Badge Fleet MAV: total paid rises by the bid")
 local kb = balance(ana.pub)
 must("close_offer (anyone, job closed)", escrow.ix_close_offer(J1, S1, ana.pub), req2)
 check(account(escrow.offer_pda(J1, S1, ana.pub)) == nil and diff(kb, balance(ana.pub)) > 0, "offer rent back to Ana")
@@ -263,6 +271,23 @@ else
   r2 = balance(req2.pub)
   must("refund_expired by anyone 72h later", escrow.ix_refund("refund_expired", J3, req2.pub), req1)
   check(account(J3) == nil and diff(r2, balance(req2.pub)) > 300000000, "expired: requester refunded")
+end
+
+-- Ask first, pay once: the badge doesn't know the wallet; the relay derives the addresses.
+nonce = nonce + 1
+local n0 = tostring(nonce)
+local ok0, why0 = sign(escrow.ix_post_job(tx.PDA[1], n0, "Mert", "Helius", "@req1", "20000000"), req1,
+  {{bytes.hex("job"), "wallet", bytes.hex(bytes.pack_u64(n0))}})
+local J0 = escrow.job_pda(req1.pub, n0)
+local j0 = ok0 and job_at(J0)
+check(j0 and j0.requester == req1.pub and j0.who == "Mert",
+  "wallet-less post_job: relay fills the job address" .. (ok0 and "" or (": " .. tostring(why0))))
+if j0 then
+  local s0 = j0.serial
+  local ok1, why1 = sign(escrow.ix_offer(nil, J0, s0), ana, {{bytes.hex("introer"), "wallet"},
+    {bytes.hex("offer"), bytes.hex(J0), bytes.hex(bytes.pack_u64(s0)), "wallet"}})
+  check(ok1 and account(escrow.offer_pda(J0, s0, ana.pub)) ~= nil,
+    "wallet-less offer: relay fills the introer and offer addresses" .. (ok1 and "" or (": " .. tostring(why1))))
 end
 
 x = introer_of(ana.pub)

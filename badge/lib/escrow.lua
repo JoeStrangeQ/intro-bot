@@ -22,7 +22,7 @@ M.STATUS = {[0] = "Open", [1] = "Approved", [2] = "Waiting for confirm"}
 -- Anchor discriminators: sha256("account:<Name>") / sha256("global:<ix>"), first 8 bytes.
 local D = {
   Introer = "3e179abd0466ce44", Job = "4b7c50cba1b4ca50", Offer = "d7583c47aaa249e5",
-  Board = "4f30a03f9984f038",
+  Board = "4f30a03f9984f038", Stats = "be7d333fa9c524ee",
   register_introer = "7bdef1c58acb8cf2", update_introer = "69fe06de8958fa50",
   post_job = "22d03af881eab3d3", cancel_job = "7ef19bf132ec5376", offer = "35cc245a970636e7",
   withdraw_offer = "cb2683eacc7a3596", close_offer = "bf484323efd16184", approve = "454ad9247375614c",
@@ -46,6 +46,8 @@ M.INTROER = {wallet = 9, badge_id = 41, name = 49, jobs_done = 81, earned = 85, 
 M.OFFER = {job = 9, introer = 41, job_serial = 73, created_at = 81, size = 89}
 -- Board (zero-copy): head u8 | bump u8 | 6 padding | posted u64 | jobs [64 x 32], a ring of the newest
 M.BOARD_L = {head = 9, posted = 17, jobs = 25, size = 2072}
+-- Stats (fleet totals): paid u64 | jobs u64 | bump | spare [64]
+M.STATS = {paid = 9, jobs = 17, size = 89}
 
 local ZERO = ("\0"):rep(32)
 
@@ -110,6 +112,13 @@ function M.decode_offer(b)
     created_at = bytes.time(b, L.created_at)}
 end
 
+-- Fleet totals: lamports paid to introers (as a string) and intros paid.
+function M.decode_stats(b)
+  local L = M.STATS
+  if type(b) ~= "string" or #b < L.size or b:sub(1, 8) ~= M.DISC.Stats then return nil end
+  return {paid = bytes.u64(b, L.paid), jobs = tonumber(bytes.u64(b, L.jobs)) or 0}
+end
+
 -- The board's job addresses, newest first.
 function M.decode_board(b)
   local L = M.BOARD_L
@@ -132,10 +141,15 @@ local function pda(...)
 end
 function M.config_pda() return pda("config") end
 function M.board_pda() return pda("board") end
-function M.introer_pda(wallet) return pda("introer", wallet) end
-function M.job_pda(requester, nonce) return pda("job", requester, bytes.pack_u64(nonce)) end
+function M.stats_pda() return pda("stats") end
+-- With no wallet yet (nil), the relay's stand-ins: tx.PDA[1] for the job or introer, [2] for the offer.
+function M.introer_pda(wallet) return wallet and pda("introer", wallet) or tx.PDA[1] end
+function M.job_pda(requester, nonce) return requester and pda("job", requester, bytes.pack_u64(nonce)) or tx.PDA[1] end
 -- Offers are per job serial, so offers on a closed job never count for a re-post.
-function M.offer_pda(job, serial, introer_wallet) return pda("offer", job, bytes.pack_u64(serial), introer_wallet) end
+function M.offer_pda(job, serial, introer_wallet)
+  if not introer_wallet then return tx.PDA[2] end
+  return pda("offer", job, bytes.pack_u64(serial), introer_wallet)
+end
 
 -- Instructions, signer first. W is tx.WALLET, the signer the relay fills in.
 local function ix(name, accounts, args)
@@ -188,7 +202,7 @@ end
 
 function M.ix_confirm(job, introer_wallet)
   return ix("confirm", {{W, w = true}, {job, w = true}, {M.introer_pda(introer_wallet), w = true},
-    {introer_wallet, w = true}})
+    {introer_wallet, w = true}, {M.stats_pda(), w = true}})
 end
 
 -- The requester refunds their own job: the same placeholder key as caller and requester,

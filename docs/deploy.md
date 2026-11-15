@@ -55,11 +55,18 @@ solana program set-upgrade-authority GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMc
 If a deploy fails midway, `solana program show --buffers` lists the buffer; close it with
 `solana program close <buffer>` to get its SOL back.
 
+## Upgrade (before `--final`)
+
+`scripts/upgrade-mainnet.sh` builds and tests, grows the program account if the new build is
+bigger (`solana program extend`), upgrades with the deployer key, then runs `init_stats`
+(admin only; skipped if `Stats` exists). It reads the RPC from `~/.config/intro-bot/rpc-url`.
+Needs ~2.2 SOL: the ~2.0 SOL buffer comes back, ~0.1 SOL stays as rent for the extra bytes.
+
 ## Pre-immutability checklist
 
 - [ ] Deployed code matches the reviewed commit: `solana-verify` or
       `solana program dump <id> out.so` and compare hash with `target/deploy/intro_escrow.so`.
-- [ ] `Config` exists: admin = Ledger, `paused = false`. `Board` exists.
+- [ ] `Config` exists: admin = Ledger, `paused = false`. `Board` and `Stats` exist.
 - [ ] Ledger can sign `set_paused` (test pause and unpause once).
 - [ ] One full real job on mainnet with a small bid: register, post_job, offer, approve,
       mark_made, confirm. Introer got the bid, requester got the rent back, job closed,

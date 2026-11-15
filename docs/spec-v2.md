@@ -30,6 +30,8 @@ and the app says so on the request screen: "Your Telegram is shown to people who
 - `Config` ["config"]: admin, pending_admin, paused, bump. `paused` blocks only `post_job` and `offer`.
 - `Board` ["board"]: `head: u8`, `jobs: [Pubkey; 64]`, a ring of the newest job addresses,
   written by `post_job`. Created in `init_config`.
+- `Stats` ["stats"]: paid u64 (lamports paid to introers by `confirm`), jobs u64 (confirms), bump,
+  spare [u8;64]. The "Badge Fleet MAV". Made once by the admin with `init_stats`.
 - `Introer` ["introer", wallet]: wallet, badge_id [u8;8], name [u8;32], jobs_done u32,
   earned u64, created_at, bump. Registered once (`register_introer`, `update_introer`).
 - `Job` ["job", requester, nonce u64 le]: requester, nonce, bid, status (0 Open, 1 Approved,
@@ -54,10 +56,10 @@ and the app says so on the request screen: "Your Telegram is shown to people who
 | `close_offer` | anyone | Offer whose job account no longer exists → close, rent to the introer |
 | `approve(introer_wallet)` | requester | Open, and an Offer exists for that introer → Approved, `approved_at` |
 | `mark_made` | approved introer | Approved and now ≤ approved_at + 7d → Made |
-| `confirm` | requester | Approved or Made → pay the approved introer's wallet; update Introer stats; close. Receipt. |
+| `confirm` | requester | Approved or Made → pay the approved introer's wallet; update Introer and Stats; close. Receipt. Stats is the last account. |
 | `refund_expired` | requester after 7d of Approved; anyone after 7d + 72h | refund, close |
 | `refund_unconfirmed` | requester after 72h of Made; anyone after 72h + 72h | refund, close |
-| admin: `init_config`, `propose_admin`, `accept_admin`, `cancel_admin_proposal`, `set_paused` | admin | as v1 |
+| admin: `init_config`, `init_stats`, `propose_admin`, `accept_admin`, `cancel_admin_proposal`, `set_paused` | admin | as v1 |
 
 Events: JobPosted, JobCancelled, Offered, OfferWithdrawn, Approved, Made, Receipt, Refunded{reason}.
 Remove from v1: `bid`, `withdraw`, `accept`, `decline`, the open-request queue, `Request`, `Directory`.
@@ -70,6 +72,7 @@ Remove from v1: `bid`, `withdraw`, `accept`, `decline`, the open-request queue, 
 - **My jobs** (requester): status, offer pool (Introer names, jobs done, earned per offerer);
   SELECT an offerer → Approve QR; then Confirm / Cancel / Refund by state.
 - **My offers** (introer): jobs I offered on; the approved one shows "Mark made" QR.
+- **Badge Fleet**: "Badge Fleet MAV", total SOL paid to introers and intros paid, from `Stats`.
 - **Profile**: register as an introer; machine value "demo value" ticker; "Ask me about BotBot · botbotcap.com".
 - Keep: demo mode, retry if a tx fails, LED and animation on Receipt.
 
@@ -109,6 +112,8 @@ Integers are little-endian. Offsets include the 8-byte discriminator.
 
 `Board` ["board"], 2072 bytes: head u8 @8 (next slot), bump @9, padding @10..16, posted u64 @16,
 jobs[i] @24 + 32·i (i = 0..63, zeros when empty; old entries may point at closed jobs).
+
+`Stats` ["stats"], 89 bytes: paid u64 @8, jobs u64 @16, bump @24, spare [64] @25.
 
 `Introer` ["introer", wallet], 101 bytes: wallet @8, badge_id [8] @40, name [32] @48,
 jobs_done u32 @80, earned u64 @84, created_at i64 @92, bump @100.
