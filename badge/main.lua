@@ -4,6 +4,7 @@
 -- board and pays out. The badge holds no keys: the badge server signs who is asking.
 local api = require("lib.api")
 local art = require("lib.art")
+local list = require("lib.list")
 
 local ESCROW = "ESC-GQD4T2WC"
 local MIN_BID, MAX_BID, TEXT = 10, 500, 31
@@ -114,6 +115,7 @@ end
 
 local function frame(name)
   ui.clear()
+  list.reset()
   st.w = {}
   ui.bg(C.desk)
   ui.rect(4, 4, 312, 196, {color = C.ink})
@@ -243,7 +245,7 @@ local function build_request()
   art.logo(14, 30, 3)
   ui.label(60, 32, "Who do you want to meet?", {size = 14, color = C.brand})
   ui.label(60, 50, "Post it. Introers offer. You pick one.", {size = 12, color = C.ink})
-  ui.list(6, 68, 308, 72, {
+  list.new(6, 68, 308, 72, {
     {title = "Request an intro", sub = "who, company, bid in !LAMPs"},
     {title = "My Telegram", right = st.tg or "not set"},
   }, {on_select = function(i) if i == 1 then ask_job() else ask_tg() end end})
@@ -304,11 +306,11 @@ local function build_jobs(name, role, empty, empty2)
   if off == 1 then items[1] = LEAD end
   for k, j in ipairs(rows or {}) do items[k + off] = job_item(j, role) end
   if #items == off then
-    if off == 1 then ui.list(6, 26, 308, 44, items, {on_select = function() ask_job() end}) end
+    if off == 1 then list.new(6, 26, 308, 44, items, {on_select = function() ask_job() end}) end
     center(off == 1 and 100 or 80, rows and empty or "Loading...")
     if rows and empty2 then center(off == 1 and 124 or 104, empty2, 12, C.dim) end
   else
-    ui.list(6, 26, 308, 172, items, {on_select = function(i)
+    list.new(6, 26, 308, 172, items, {on_select = function(i)
       if off == 1 and i == 1 then return ask_job() end
       local j = (rows_for(role) or {})[i - off]
       if j then open_job(j) end
@@ -414,7 +416,7 @@ local function build_job()
     end
   end
   if #items > 0 then
-    ui.list(6, y + 2, 308, math.min(196 - y - 18, 36 * #items), items, {on_select = function(i)
+    list.new(6, y + 2, 308, math.min(196 - y - 18, 36 * #items), items, {on_select = function(i)
       local a = act[i]
       if a then do_act(j, a[1], a[2]) end
     end})
@@ -579,7 +581,7 @@ local function build_profile()
   ui.label(226, 106, "botbotcap.com", {size = 12, color = C.dim, w = 88, align = "center"})
   st.w.stats = line(96, "", C.ink)
   st.w.bal = ui.label(120, 70, "", {size = 12, color = C.dim, w = 108})
-  ui.list(6, 120, 308, 30, profile_items(), {on_select = function() edit_tg() end})
+  list.new(6, 120, 308, 30, profile_items(), {on_select = function() edit_tg() end})
   center(180, CTA, 14, C.ink)
   ui.hint("SELECT change   LEFT/RIGHT screens")
   refresh_profile()
@@ -638,6 +640,7 @@ function job_done(n)
   if st.anim then return end
   if st.modal or not IS_TAB[st.screen] then st.pending = (st.pending or 0) + n return end
   ui.clear()
+  list.reset()
   st.w = {}
   ui.bg(C.brand)
   local a = {t = 0}
@@ -746,6 +749,9 @@ function on_key(key)
     if key == "select" then still() show("board") return true end
     return key ~= "back"
   end
+  if (key == "up" or key == "down" or key == "select") and st.screen ~= "meet" and list.key(key) then
+    return true
+  end
   if key == "back" then
     if st.screen == "meet" then
       leave_meet()
@@ -789,6 +795,7 @@ local function splash()
   st.dirty = nil
   st.screen = "splash"
   ui.clear()
+  list.reset()
   st.w = {}
   ui.bg(C.desk)
   ui.rect(4, 4, 312, 196, {color = C.ink})

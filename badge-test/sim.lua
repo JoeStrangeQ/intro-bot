@@ -123,7 +123,8 @@ local function new_badge(name, id, user)
     function o:text(v) check(#v <= 200, name .. ": label text under 200 bytes") self.t = v end
     function o:size() end
     function o:pos() end
-    function o:show() end
+    function o:show(v) self.hidden = v == false end
+    function o:color(c) self.c = c end
     function o:remove() B.objs = B.objs - 1 end
     function o:items(v) self.its = v end
     function o:select(i) self.sel = i end
@@ -143,18 +144,12 @@ local function new_badge(name, id, user)
   end} or json
   env.ui = {
     W = 320, H = 218,
-    clear = function() B.objs, B.labels, B.list, B.qr = 0, {}, nil, nil end,
+    clear = function() B.objs, B.labels, B.qr = 0, {}, nil end,
     bg = function() end,
-    rect = function() return obj("rect", "") end,
-    label = function(_, _, t) return obj("label", t) end,
+    rect = function(_, _, _, _, opts) local o = obj("rect", "") o.c = opts and opts.color return o end,
+    label = function(_, _, t, opts) local o = obj("label", t) o.c = opts and opts.color return o end,
     hint = function(t) B.hint = t end,
     qr = function(_, _, size, t) B.qr, B.qr_size = t, size return obj("qr", t) end,
-    list = function(_, _, _, _, items, opts)
-      local o = obj("list", "")
-      o.its, o.on_select = items, opts and opts.on_select
-      B.list = o
-      return o
-    end,
     toast = function(t) B.toasts[#B.toasts + 1] = t end,
     input = function(prompt, max, cb)
       local a = table.remove(B.answers, 1)
@@ -262,9 +257,13 @@ end
 
 local function has(B, s) return texts(B):find(s, 1, true) ~= nil end
 
+-- The screen's list (lib/list.lua), drawn with rects and labels.
+local function lst(B) return B.env.require("lib.list").active end
+
 local function item(B, prefix)
-  if not B.list then return nil end
-  for i, it in ipairs(B.list.its) do
+  local l = lst(B)
+  if not l then return nil end
+  for i, it in ipairs(l.its) do
     local title = type(it) == "table" and it.title or it
     if title:sub(1, #prefix) == prefix then return i end
   end
@@ -275,7 +274,19 @@ local function pick(B, prefix, answers)
   check(i ~= nil, B.name .. ": list has " .. prefix .. " (" .. texts(B) .. ")")
   if not i then return end
   for _, a in ipairs(answers or {}) do B.answers[#B.answers + 1] = a end
-  B.list.on_select(i)
+  local l = lst(B)
+  key(B, "up", #l.its)       -- walk the list with the keys, as on the badge
+  key(B, "down", i - 1)
+  check(l:selected() == i, B.name .. ": SELECT lands on " .. prefix)
+  local r = l.rows[i - l.top + 1]
+  check(r and r.title.c == 0xFFFFFF and not r.bar.hidden and r.bar.c == 0x6A50D8,
+    B.name .. ": selected row is a purple bar with white text")
+  for k, o in ipairs(l.rows) do
+    if k ~= i - l.top + 1 and o.title.t ~= "" then
+      check(o.title.c == 0x000000 and o.bar.hidden, B.name .. ": other rows black on paper")
+    end
+  end
+  key(B, "select")
   run(B, 200)
 end
 
