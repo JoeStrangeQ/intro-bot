@@ -4,7 +4,8 @@ Request an intro at Breakpoint. Say who you want to meet, their company and your
 !LAMPs. Introers offer. You talk on Telegram, pick one, meet badge to badge, and they are
 paid only when you confirm.
 
-The bid waits in the app's !LAMP escrow. The badge holds no keys: the server at
+Your job goes on the board at once, unpaid. Fund it any time (the bid waits in the app's !LAMP
+escrow); funded jobs show first, and a job must be funded before you confirm. The badge holds no keys: the server at
 relay.botbotcap.com keeps the board and pays out, and the badge server signs who is asking.
 
 ## Screens
@@ -14,11 +15,11 @@ LEFT / RIGHT moves between screens. CANCEL goes back, or home from a main screen
 - **Home** (opens here): BotBot and a big QR to x.com/botbotcap, so people can scan your badge and follow.
   SELECT enters the app; CANCEL here exits.
 
-- **Intro board**: "+ Request an intro", then the newest jobs. SELECT one to
+- **Intro board**: "+ Request an intro", then jobs, funded first ("Funded" or "Unpaid"). SELECT one to
   offer; after you offer you see the requester's Telegram.
 - **Badge Fleet**: the "Badge Fleet MAV", every !LAMP paid to introers, and intros paid.
-- **Request an intro**: who, company, bid, Telegram (remembered), then the OS asks you to
-  pay the bid.
+- **Request an intro**: who, company, bid, Telegram (remembered). It's posted, then the app
+  asks if you want to fund it now; you can also do it later from My jobs.
 - **My jobs**: your jobs. Approve an offer, cancel, "We met", confirm, or refund.
 - **My offers**: jobs you offered on. When picked: "We met", then "Intro made".
 - **Profile**: your Telegram and machine value. No sign-up: everyone can request and offer.

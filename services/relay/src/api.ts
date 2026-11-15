@@ -9,11 +9,12 @@ export const MAX_BID = 500; // a player can pay at most 500 !LAMPs a day
 export const MAX_OFFERS = 16;
 export const MAX_OPEN = 3; // live jobs per requester
 export const BOARD_SHOW = 10;
-export const PAY_WAIT = 72 * 3_600_000; // an unpaid job stays up to 72 h
+export const PAY_WAIT = 72 * 3_600_000; // an unpaid job no one was picked for stays up to 72 h
 export const WORK = 7 * 86_400_000; // approved -> made
 export const CONFIRM = 72 * 3_600_000; // made -> confirm
 export const TEXT = 31;
 
+// 'pending' is only in old saved state (unpaid posts before they went on the board); load() makes it 'open'.
 export type Status = 'pending' | 'open' | 'approved' | 'made' | 'closed';
 export type Job = {
   id: string;
@@ -25,7 +26,7 @@ export type Job = {
   bid: number;
   status: Status;
   created: number;
-  deposit?: string;
+  deposit?: string; // the ledger id once funded; unpaid jobs have none
   approved?: string;
   approvedAt?: number;
   madeAt?: number;
@@ -101,6 +102,8 @@ export class App {
 
   constructor(s: State, bank: Bank, now: () => number = Date.now, save: () => void = () => {}) {
     this.s = s;
+    // Unpaid posts used to wait off the board as 'pending'; now they are open, just not funded.
+    for (const j of Object.values(s.jobs)) if (j.status === 'pending') j.status = 'open';
     this.bank = bank;
     this.now = now;
     this.save = save;
@@ -116,22 +119,24 @@ export class App {
       bid: j.bid,
       n: j.offers.length,
       st: j.status,
+      f: !!j.deposit,
       o: j.offers.includes(user),
       me: j.approved === user,
       met: !!j.met,
     };
   }
 
-  private jobs(pred: (j: Job) => boolean, user: string, max: number) {
+  private jobs(pred: (j: Job) => boolean, user: string, max: number, fundedFirst = false) {
     return Object.values(this.s.jobs)
       .filter(pred)
-      .sort((a, b) => b.created - a.created)
+      .sort((a, b) => (fundedFirst ? Number(!!b.deposit) - Number(!!a.deposit) : 0) || b.created - a.created)
       .slice(0, max)
       .map((j) => this.row(j, user));
   }
 
   board(c: Caller) {
-    return { jobs: this.jobs((j) => j.status === 'open', c.user, BOARD_SHOW) };
+    // Every open job is public, paid or not; funded ones first, to draw introers.
+    return { jobs: this.jobs((j) => j.status === 'open', c.user, BOARD_SHOW, true) };
   }
 
   me(c: Caller) {
@@ -162,12 +167,15 @@ export class App {
     const t = this.now();
     const out: string[] = [];
     if (j.requester === user) {
-      if (j.status === 'pending') out.push('pay', 'edit', 'remove');
-      if (j.status === 'open') out.push('edit', 'cancel');
-      if (j.status === 'approved' || j.status === 'made') out.push('confirm');
-      if (j.status === 'approved' && t > (j.approvedAt ?? 0) + WORK) out.push('refund');
-      if (j.status === 'made' && t > (j.madeAt ?? 0) + CONFIRM) out.push('refund');
-      if (j.status === 'approved' || j.status === 'made') out.push('meet');
+      const funded = !!j.deposit;
+      const live = j.status === 'approved' || j.status === 'made';
+      // Funding is optional until the payout: an unpaid job pays first, then confirms.
+      if (j.status === 'open') out.push(...(funded ? ['edit', 'cancel'] : ['pay', 'edit', 'remove']));
+      if (live) out.push(funded ? 'confirm' : 'pay');
+      if (live && funded && j.status === 'approved' && t > (j.approvedAt ?? 0) + WORK) out.push('refund');
+      if (live && funded && j.status === 'made' && t > (j.madeAt ?? 0) + CONFIRM) out.push('refund');
+      if (live && !funded) out.push('remove');
+      if (live) out.push('meet');
     } else if (j.offers.includes(user)) {
       if (j.approved === user) {
         if (j.status === 'approved') out.push(j.met ? 'made' : 'meet');
@@ -233,7 +241,7 @@ export class App {
       co: text(body.co, 'company'),
       tg: tg.slice(0, TEXT),
       bid,
-      status: 'pending',
+      status: 'open',
       created: this.now(),
       offers: [],
     };
@@ -344,8 +352,8 @@ export class App {
       if (this.s.deposits[d.id]) continue;
       this.s.deposits[d.id] = true;
       const j = this.s.jobs[jobOf(d.memo) ?? ''];
-      if (j && j.status === 'pending' && j.requester === d.user && d.amount === j.bid) {
-        j.status = 'open';
+      const live = j && (j.status === 'open' || j.status === 'approved' || j.status === 'made');
+      if (j && live && !j.deposit && j.requester === d.user && d.amount === j.bid) {
         j.deposit = d.id;
       } else {
         // Unknown job, wrong payer or amount, or paid twice: give it back.
@@ -371,17 +379,16 @@ export class App {
     this.save();
   }
 
-  /** Drops unpaid posts after 72 h; refunds stalled jobs 72 h after the requester could. */
+  /** Drops unpaid open jobs after 72 h; refunds funded stalled jobs 72 h after the requester could. */
   sweep() {
     const t = this.now();
     for (const j of Object.values(this.s.jobs)) {
-      if (j.status === 'pending' && t > j.created + PAY_WAIT) delete this.s.jobs[j.id];
-      else if (
+      const stalled =
         (j.status === 'approved' && t > (j.approvedAt ?? 0) + WORK + CONFIRM) ||
-        (j.status === 'made' && t > (j.madeAt ?? 0) + CONFIRM + CONFIRM)
-      ) {
-        this.close(j, 'refunded', j.rbadge || j.requester, `Intro Bot: job ${j.id} refunded`);
-      }
+        (j.status === 'made' && t > (j.madeAt ?? 0) + CONFIRM + CONFIRM);
+      if (!j.deposit && j.status === 'open' && t > j.created + PAY_WAIT) delete this.s.jobs[j.id];
+      else if (stalled && !j.deposit) delete this.s.jobs[j.id]; // nothing held, nothing to give back
+      else if (stalled) this.close(j, 'refunded', j.rbadge || j.requester, `Intro Bot: job ${j.id} refunded`);
     }
     // Closed jobs are kept 30 days, then dropped.
     for (const j of Object.values(this.s.jobs)) {

@@ -157,7 +157,7 @@ local function new_badge(name, id, user)
       check(#a <= max, name .. ": answer fits " .. prompt)
       schedule(1, function() cb(a) end)
     end,
-    confirm = function(_, cb) schedule(1, function() cb(true) end) end,
+    confirm = function(t, cb) B.confirmed = t schedule(1, function() cb(not B.say_no) end) end,
   }
   env.storage = {
     get = function(k) return B.store[k] end,
@@ -340,17 +340,41 @@ tab(I, "profile")
 check(has(I, "Offer on a job to start earning"), "no register step")
 check(not has(I, "Register"), "no register row")
 
--- Requester posts a job and pays the bid into the escrow.
+-- Requester posts a job: it is on the board at once, unpaid; funding is optional.
 pick(A, "+ Request an intro", {"Toly", "Solana", "5"})
 check(last_toast(A) == "10 to 500 !LAMPs", "bid under 10 refused")
-pick(A, "+ Request an intro", {"Toly", "Solana", "50", "reqtg"})
+A.say_no = true
+pick(A, "+ Request an intro", {"Vitalik", "Ethereum", "20", "reqtg"})
+run(A, 500)
+A.say_no = nil
+check(A.confirmed == "Fund 20 !LAMPs now? Funded jobs show first.", "asks to fund: " .. tostring(A.confirmed))
+check((A.deposits or 0) == 0, "no deposit when declined")
+tab(I, "board")
+run(I, 300)
+local un = item(I, "Vitalik @ Ethereum")
+check(un ~= nil and lst(I).its[un].right == "Unpaid", "unpaid job is on the board, marked Unpaid")
+tab(A, "myjobs")
+pick(A, "Vitalik @ Ethereum")
+run(A, 300)
+check(item(A, "Pay the bid") and item(A, "Remove (not paid)"), "unpaid job: pay or remove (list scrolls)")
+pick(A, "Remove (not paid)")
+run(A, 300)
+tab(I, "profile")
+tab(I, "board")
+run(I, 300)
+check(item(I, "Vitalik @ Ethereum") == nil, "removed unpaid job leaves the board")
+
+-- Now a job funded right after posting.
+tab(A, "board")
+pick(A, "+ Request an intro", {"Toly", "Solana", "50"})
 run(A, 500)
 check(A.deposits == 1, "one deposit")
 check(A.last_amount == 50 and math.type(A.last_amount) == "integer", "deposit amount is a whole number")
-check(last_toast(A) == "Posted!", "posted after the deposit: " .. last_toast(A))
+check(last_toast(A) == "Funded!", "funded after the deposit: " .. last_toast(A))
 check(item(A, "Toly @ Solana") ~= nil, "my jobs lists the job")
 
 -- Introer sees it on the board and offers.
+tab(I, "profile")
 tab(I, "board")
 check(item(I, "Toly @ Solana") ~= nil, "board lists the job")
 pick(I, "Toly @ Solana")

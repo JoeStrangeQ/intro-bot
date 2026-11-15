@@ -47,15 +47,39 @@ async function openJob(s: ReturnType<typeof setup>, bid = 50) {
 }
 
 describe('posting and deposits', () => {
-  it('lists a job only after its deposit is in the ledger', async () => {
+  it('lists a job right away, unpaid, and marks it funded once the deposit is in the ledger', async () => {
     const s = setup();
     const { id, memo } = s.app.post(REQ, { who: 'Toly', co: 'Solana', tg: 'req', bid: 50 });
     expect(memo).toBe(`job ${id}`);
-    expect(s.app.board(OTHER).jobs).toHaveLength(0);
+    expect(s.app.board(OTHER).jobs.map((j) => [j.id, j.f])).toEqual([[id, false]]);
     s.bank.deposit(REQ.user, REQ.badge, 50, memo);
     await s.app.sync();
-    expect(s.app.board(OTHER).jobs.map((j) => j.id)).toEqual([id]);
+    expect(s.app.board(OTHER).jobs.map((j) => [j.id, j.f])).toEqual([[id, true]]);
     expect(s.app.s.jobs[id]?.tg).toBe('@req');
+  });
+
+  it('puts funded jobs first on the board', async () => {
+    const s = setup();
+    const a = s.app.post(REQ, { who: 'A', co: 'B', tg: '@x', bid: 50 });
+    s.bank.deposit(REQ.user, REQ.badge, 50, a.memo);
+    await s.app.sync();
+    s.at(1000);
+    const b = s.app.post(REQ, { who: 'C', co: 'D', tg: '@x', bid: 20 });
+    expect(s.app.board(OTHER).jobs.map((j) => j.id)).toEqual([a.id, b.id]);
+  });
+
+  it('lets an unpaid job get offers and a pick, but pays before confirm', async () => {
+    const s = setup();
+    const { id, memo } = s.app.post(REQ, { who: 'A', co: 'B', tg: '@x', bid: 50 });
+    await s.app.act(INT, id, "offer", { name: "@intro" });
+    await s.app.act(REQ, id, 'approve', { n: 0 });
+    expect(s.app.job(REQ, id).acts).toEqual(['pay', 'remove', 'meet']);
+    await expect(s.app.act(REQ, id, 'confirm', {})).rejects.toThrow(/can not confirm/);
+    s.bank.deposit(REQ.user, REQ.badge, 50, memo);
+    await s.app.sync();
+    expect(s.app.job(REQ, id).acts).toEqual(['confirm', 'meet']);
+    await s.app.act(REQ, id, 'confirm', {});
+    expect([...s.bank.paid.values()]).toEqual([{ to: INT.badge, amount: 50 }]);
   });
 
   it('returns deposits from the wrong payer, wrong amount, unknown job or twice', async () => {
@@ -95,6 +119,23 @@ describe('posting and deposits', () => {
     s.at(PAY_WAIT + 1);
     s.app.sweep();
     expect(s.app.s.jobs[id]).toBeUndefined();
+  });
+
+  it('keeps an unpaid job someone was picked for past 72 hours', async () => {
+    const s = setup();
+    const { id } = s.app.post(REQ, { who: 'A', co: 'B', tg: 'x', bid: 10 });
+    await s.app.act(INT, id, 'offer', { name: '@i' });
+    await s.app.act(REQ, id, 'approve', { n: 0 });
+    s.at(PAY_WAIT + 1);
+    s.app.sweep();
+    expect(s.app.s.jobs[id]?.status).toBe('approved');
+  });
+
+  it('migrates old pending jobs to open on load', () => {
+    const st = emptyState();
+    st.jobs['1'] = { id: '1', requester: 'u', rbadge: 'B', who: 'A', co: 'B', tg: '@x', bid: 10, status: 'pending', created: 1, offers: [] };
+    const app = new App(st, new FakeBank(), () => 2);
+    expect(app.s.jobs['1']?.status).toBe('open');
   });
 
   it('allows three live jobs per requester', () => {

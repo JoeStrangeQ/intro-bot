@@ -25,7 +25,16 @@ local LABEL = {
   confirm = "Confirm: pay the introer", refund = "Refund my bid", made = "Intro made",
   meet = "We met: verify badges", pay = "Pay the bid",
 }
-local STATUS = {pending = "Unpaid", open = "Open", approved = "Picked", made = "Made", closed = "Closed"}
+local STATUS = {open = "Open", approved = "Picked", made = "Made", closed = "Closed"}
+
+-- A job's status in one word or two. Jobs are on the board from posting; funding
+-- (the bid in escrow) is optional until the payout.
+local function status(j)
+  if j.st == "open" or j.st == "pending" then return j.f and "Funded" or "Unpaid" end
+  local s = STATUS[j.st] or j.st or ""
+  if (j.st == "approved" or j.st == "made") and not j.f then s = s .. ", unpaid" end
+  return s
+end
 local TABHINT = "LEFT/RIGHT screens   CANCEL home"
 -- LEDs while the app is open: the logo's rainbow bands across the top (1..6, same
 -- order), lavender on the right edge (7..8). LEFT runs a flicker left to right,
@@ -197,7 +206,7 @@ local function pay(id, bid)
       return
     end
     call("POST", "/jobs/" .. id .. "/paid", {deposit = res and res.id}, function(ok2, j)
-      ui.toast(ok2 and j.st == "open" and "Posted!" or "Paid. On the board in a moment.")
+      ui.toast(ok2 and j.f and "Funded!" or "Paid. Funded in a moment.")
       poll(true)
       show_later("myjobs")
     end)
@@ -231,7 +240,12 @@ local function ask_job()
         local function post(tg)
           call("POST", "/jobs", {who = who, co = co, tg = tg, bid = bid}, function(ok, r)
             if not ok then return ui.toast(tostring(r)) end
-            pay(r.id, bid)
+            ui.toast("Posted to the board!")
+            poll(true)
+            -- Funding is optional; funded jobs show first and draw introers.
+            confirm("Fund " .. lp(bid) .. " now? Funded jobs show first.", function(y)
+              if y then pay(r.id, bid) else show_later("myjobs") end
+            end)
           end)
         end
         if st.tg then post(st.tg) else ask_tg(post) end
@@ -259,7 +273,7 @@ end
 -- Lists of jobs ------------------------------------------------------------
 
 local function job_item(j, role)
-  local right = STATUS[j.st] or j.st
+  local right = status(j)
   if role == "introer" then
     right = j.st == "open" and "Waiting" or (j.me and (j.st == "made" and "Made" or "You!") or "Not picked")
   elseif role == "board" and j.o then
@@ -277,7 +291,7 @@ end
 function sig(rows)
   if not rows then return "-" end
   local t = {}
-  for k, j in ipairs(rows) do t[k] = j.id .. j.st .. j.n .. tostring(j.o) .. tostring(j.met) .. tostring(j.me) end
+  for k, j in ipairs(rows) do t[k] = j.id .. j.st .. j.n .. tostring(j.o) .. tostring(j.met) .. tostring(j.me) .. tostring(j.f) end
   return table.concat(t, ",")
 end
 
@@ -381,7 +395,7 @@ local function build_job()
   frame("job")
   local j = st.pick
   ui.label(14, 30, j.who .. " @ " .. j.co, {size = 14, color = C.ink, w = 292})
-  line(48, "bid " .. lp(j.bid) .. "   " .. (j.n or 0) .. " offers   " .. (STATUS[j.st] or j.st or ""))
+  line(48, "bid " .. lp(j.bid) .. "   " .. (j.n or 0) .. " offers   " .. status(j))
   if j.loading then
     center(100, j.loading == true and "Loading..." or j.loading)
     ui.hint("CANCEL back")
@@ -421,7 +435,9 @@ local function build_job()
       if a then do_act(j, a[1], a[2]) end
     end})
   end
-  if j.mine and (j.st == "open" or j.st == "pending") then
+  if j.mine and (j.st == "approved" or j.st == "made") and not j.f then
+    line(178, "Pay the bid, then confirm.", C.ink)
+  elseif j.mine and (j.st == "open" or j.st == "pending") then
     line(178, "New bid? Remove and post again.", C.dim)
   elseif j.me and j.st == "approved" and not j.met then
     line(178, "Meet badge to badge, then mark made.", C.ink)
@@ -801,12 +817,12 @@ local function splash()
   ui.rect(4, 4, 312, 196, {color = C.ink})
   ui.rect(5, 5, 310, 194, {color = C.paper})
   if ui.qr then ui.qr(14, 18, 166, X) end
-  art.logo(212, 18, 5)
+  art.logo(212, 12, 6)                      -- 72 px, centred in the right column (184..312)
   local function side(y, text, size, color)
     ui.label(184, y, text, {size = size, color = color, w = 128, align = "center"})
   end
-  side(90, "BotBot", 20, C.brand)
-  side(116, "Intro Bot", 14, C.ink)
+  side(92, "BotBot", 20, C.brand)
+  side(118, "Intro Bot", 14, C.ink)
   side(144, "Scan to follow", 12, C.ink)
   side(160, "x.com/botbotcap", 14, C.ink)
   side(184, "botbotcap.com", 12, C.dim)
