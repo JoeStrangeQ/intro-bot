@@ -1,113 +1,132 @@
--- lib/demo.lua: a pretend chain for demo mode, no network. Same shapes as the real reads.
-local escrow = require("lib.escrow")
-local sol = require("lib.sol")
-
+-- lib/demo.lua: a pretend server for demo mode, no network. Same answers as the real one.
 local M = {}
 
-M.ME = "demo-me"  -- stands in for my wallet
-M.PEOPLE = {
-  ["demo-ana"] = {name = "Ana (Solana devs)", jobs = 7, earned = "2400000000"},
-  ["demo-kai"] = {name = "Kai (Asia VCs)", jobs = 12, earned = "5100000000"},
-  ["demo-lea"] = {name = "Lea (market makers)", jobs = 2, earned = "300000000"},
-  [M.ME] = {name = "You", jobs = 3, earned = "1560000000"},
+local ME = "me"
+local PEOPLE = {
+  ana = {name = "Ana (Solana devs)", jobs = 7, earned = 240},
+  kai = {name = "Kai (Asia VCs)", jobs = 12, earned = 510},
+  lea = {name = "Lea (market makers)", jobs = 2, earned = 30},
 }
-local ASKS = {
-  {"Mert", "Helius"}, {"Toly", "Solana Labs"}, {"Lily", "Solana Foundation"}, {"Meow", "Jupiter"},
-  {"Armani", "Backpack"}, {"Akshay", "Superteam"},
-}
+local ASKS = {{"Mert", "Helius"}, {"Toly", "Solana Labs"}, {"Lily", "Solana Foundation"}, {"Meow", "Jupiter"}}
 
-local function job(d, who, company, bid, requester, status)
-  d.n = d.n + 1
-  return {pda = "demo-job" .. d.n, nonce = tostring(d.n), who = who, company = company, bid = bid,
-    telegram = "@" .. who:lower(), requester = requester or "demo-someone", status = status or escrow.OPEN,
-    created_at = d.now, approved_at = d.now, made_at = d.now, offers = {}, offer_count = 0}
-end
-
-function M.new(now)
-  local d = {n = 0, step = 0, now = now or 1790000000, offered = {}}
-  d.me = {wallet = M.ME, badge_id = "DEMO", name = "You", jobs = 3, earned = "1560000000",
-    created_at = d.now - 86400 * 4}
-  d.board = {}
-  for k = 1, 4 do
-    d.board[k] = job(d, ASKS[k][1], ASKS[k][2], tostring(k * 50000000))
+function M.new()
+  local d = {seq = 0, jobs = {}, me = {reg = true, name = "You", jobs = 3, earned = 156}, paid = 1240, paid_jobs = 31}
+  local function job(who, co, bid, req, st)
+    d.seq = d.seq + 1
+    local j = {id = tostring(d.seq), who = who, co = co, bid = bid, req = req or "someone", st = st or "open",
+      offers = {}, tg = "@" .. who:lower(), met = false}
+    d.jobs[#d.jobs + 1] = j
+    return j
   end
-  d.board[2].offers, d.board[2].offer_count = {"demo-ana"}, 1
-  -- One I offered on and got approved for.
-  local mine = d.board[3]
-  mine.status, mine.approved, mine.offers, mine.offer_count = escrow.APPROVED, M.ME, {M.ME, "demo-lea"}, 2
-  d.offered[mine.pda] = true
-  -- My own job, with offers to pick from.
-  local own = job(d, "Vitalik", "Ethereum", "300000000", M.ME)
-  own.offers, own.offer_count = {"demo-kai", "demo-ana"}, 2
-  d.board[#d.board + 1] = own
+  for k = 1, 4 do job(ASKS[k][1], ASKS[k][2], k * 25) end
+  d.jobs[2].offers = {"ana"}
+  local picked = d.jobs[3]
+  picked.st, picked.approved, picked.offers = "approved", ME, {ME, "lea"}
+  local own = job("Vitalik", "Ethereum", 300, ME)
+  own.offers = {"ana", "kai"}
   return d
 end
 
-function M.mine(d)
-  local out = {}
-  for _, j in ipairs(d.board) do if j.requester == M.ME then out[#out + 1] = j end end
+local function find(d, id)
+  for _, j in ipairs(d.jobs) do if j.id == id then return j end end
+end
+
+local function has(t, v)
+  for _, x in ipairs(t) do if x == v then return true end end
+  return false
+end
+
+local function row(j)
+  return {id = j.id, who = j.who, co = j.co, bid = j.bid, n = #j.offers, st = j.st,
+    o = has(j.offers, ME), me = j.approved == ME, met = j.met}
+end
+
+local function acts(d, j)
+  local a = {}
+  if j.req == ME then
+    if j.st == "pending" then a[#a + 1] = "pay" end
+    if j.st == "open" then a[#a + 1] = "cancel" end
+    if j.st == "approved" or j.st == "made" then a[#a + 1] = "confirm" a[#a + 1] = "meet" end
+  elseif has(j.offers, ME) then
+    if j.approved == ME then
+      if j.st == "approved" then a[#a + 1] = j.met and "made" or "meet" end
+    elseif j.st == "open" then a[#a + 1] = "withdraw" end
+  elseif j.st == "open" and d.me.reg then a[#a + 1] = "offer" end
+  return a
+end
+
+local function detail(d, j)
+  local out = row(j)
+  out.mine, out.acts = j.req == ME, acts(d, j)
+  if has(j.offers, ME) then out.tg = j.tg end
+  if j.approved then out.picked = j.approved == ME and d.me.name or PEOPLE[j.approved].name end
+  if j.req == ME then
+    out.pool = {}
+    for k, u in ipairs(j.offers) do out.pool[k] = PEOPLE[u] or {name = "You", jobs = 0, earned = 0} end
+  end
   return out
 end
 
-function M.my_offers(d)
+local function list(d, pred)
   local out = {}
-  for _, j in ipairs(d.board) do if d.offered[j.pda] then out[#out + 1] = j end end
+  for k = #d.jobs, 1, -1 do
+    local j = d.jobs[k]
+    if j.st ~= "closed" and pred(j) then out[#out + 1] = row(j) end
+  end
   return out
 end
 
-function M.introer(wallet) return M.PEOPLE[wallet] end
-
-local function find(d, pda)
-  for i, j in ipairs(d.board) do if j.pda == pda then return i, j end end
+-- Same paths as the server: returns ok, data.
+function M.call(d, method, path, body)
+  body = body or {}
+  if path == "/board" then return true, {jobs = list(d, function(j) return j.st == "open" end)} end
+  if path == "/fleet" then return true, {paid = d.paid, jobs = d.paid_jobs} end
+  if path == "/me" then
+    local m = {}
+    for k, v in pairs(d.me) do m[k] = v end
+    m.value = d.me.earned * 8 // 10
+    m.mine = list(d, function(j) return j.req == ME end)
+    m.offers = list(d, function(j) return has(j.offers, ME) end)
+    return true, m
+  end
+  if path == "/introer" then
+    d.me.reg, d.me.name = true, body.name
+    return M.call(d, "GET", "/me")
+  end
+  if path == "/jobs" then
+    d.seq = d.seq + 1
+    d.jobs[#d.jobs + 1] = {id = tostring(d.seq), who = body.who, co = body.co, bid = body.bid, req = ME,
+      st = "pending", offers = {}, tg = body.tg}
+    return true, {id = tostring(d.seq), memo = "job " .. d.seq, bid = body.bid, esc = "ESC-DEMO"}
+  end
+  local id, act = path:match("^/jobs/(%d+)/?(%a*)$")
+  local j = id and find(d, id)
+  if not j then return false, "no such job" end
+  if act == "" then return true, detail(d, j) end
+  if act == "paid" then j.st = "open"
+  elseif act == "offer" then j.offers[#j.offers + 1] = ME
+  elseif act == "withdraw" then
+    for k = #j.offers, 1, -1 do if j.offers[k] == ME then table.remove(j.offers, k) end end
+  elseif act == "approve" then j.st, j.approved = "approved", j.offers[(body.n or 0) + 1]
+  elseif act == "meet" then j.met = true
+  elseif act == "made" then j.st = "made"
+  elseif act == "confirm" then
+    j.st = "closed"
+    d.paid, d.paid_jobs = d.paid + j.bid, d.paid_jobs + 1
+  elseif act == "cancel" or act == "refund" then j.st = "closed"
+  else return false, "can not " .. act .. " now" end
+  return true, detail(d, j)
 end
 
--- One poll: new jobs and offers arrive; a job I made gets confirmed (a receipt).
+-- Every poll, the demo moves on a little: someone confirms the job I marked made.
 function M.tick(d)
-  d.step = d.step + 1
-  d.now = d.now + 20
-  if d.step % 3 == 0 and #d.board < 12 then
-    local a = ASKS[d.n % #ASKS + 1]
-    table.insert(d.board, 1, job(d, a[1], a[2], tostring(math.random(2, 30) * 10000000)))
-  end
-  for _, j in ipairs(d.board) do
-    if j.requester == M.ME and j.status == escrow.OPEN and d.step % 4 == 0 and #j.offers < 3 then
-      table.insert(j.offers, 1, "demo-lea")
-      j.offer_count = j.offer_count + 1
-      break
+  for _, j in ipairs(d.jobs) do
+    if j.approved == ME and j.st == "made" then
+      j.st = "closed"
+      d.me.jobs, d.me.earned = d.me.jobs + 1, d.me.earned + j.bid
+      d.paid, d.paid_jobs = d.paid + j.bid, d.paid_jobs + 1
+      return
     end
-  end
-  for i, j in ipairs(d.board) do
-    if j.approved == M.ME and j.status == escrow.MADE and d.step % 2 == 0 then
-      table.remove(d.board, i)
-      d.offered[j.pda] = nil
-      d.me.jobs = d.me.jobs + 1
-      d.me.earned = sol.add(d.me.earned, j.bid)
-      break
-    end
-  end
-end
-
--- Apply a signed step as if the wallet had sent it.
-function M.apply(d, action, r)
-  local i, j = find(d, r and r.pda)
-  if action == "post_job" then
-    local n = job(d, r.who, r.company, r.bid, M.ME)
-    n.telegram = r.telegram
-    table.insert(d.board, 1, n)
-  elseif action == "offer" and j then
-    d.offered[j.pda] = true
-    table.insert(j.offers, 1, M.ME)
-    j.offer_count = j.offer_count + 1
-  elseif action == "withdraw_offer" or action == "close_offer" then
-    d.offered[r.pda] = nil
-  elseif action == "approve" and j then
-    j.status, j.approved, j.approved_at = escrow.APPROVED, r.introer, d.now
-  elseif action == "mark_made" and j then
-    j.status, j.made_at = escrow.MADE, d.now
-  elseif j and (action == "cancel_job" or action == "confirm" or action:find("^refund")) then
-    table.remove(d.board, i)
-  elseif action == "register_introer" or action == "update_introer" then
-    d.me.name = r.name
   end
 end
 

@@ -1,15 +1,16 @@
 {
   "id": "intro-bot",
   "name": "Intro Bot",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "author": "@botbotcap",
-  "summary": "Request an intro at Breakpoint. Introers offer, you pick one, pay when it is made. By BotBot.",
-  "description": "Post who you want to meet and your bid in SOL. It waits in an on-chain escrow. Introers offer, you pick one after talking on Telegram, and they are paid only when you confirm. Every step is signed on your phone wallet by QR; the badge holds no keys. Ask me about BotBot: botbotcap.com",
+  "summary": "Request an intro at Breakpoint. Introers offer, you pick one, pay in !LAMPs when it is made. By BotBot.",
+  "description": "Post who you want to meet and your bid in !LAMPs. It waits in the app's escrow. Introers offer, you pick one after talking on Telegram, meet badge to badge, and they are paid only when you confirm. The Badge Fleet MAV shows every !LAMP introers produced. Ask me about BotBot: botbotcap.com",
   "icon": "heart",
   "accent": "6A50D8",
   "category": "social",
   "permissions": [
-    "rpc",
+    "lamps",
+    "mesh",
     "http",
     "led"
   ],

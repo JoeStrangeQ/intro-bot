@@ -1,17 +1,14 @@
--- Intro Bot v2: the intro board (docs/spec-v2.md). Post a job ("introduce me to..."), people
--- offer, you pick one after talking on Telegram, they make the intro, you confirm and pay.
--- Reads the chain with `rpc`, builds each transaction here, and the phone wallet signs it
--- through a Solana Pay QR from the relay. The badge never makes or stores keys.
-local sol = require("lib.sol")
-local escrow = require("lib.escrow")
-local tx = require("lib.tx")
-local chain = require("lib.chain")
+-- Intro Bot: the intro board, paid in !LAMPs (docs/spec-lamps.md). Post a job ("introduce me
+-- to..."), people offer, you pick one after talking on Telegram, meet badge to badge, and you
+-- confirm to pay. The bid waits in the app's !LAMP escrow; our server (lib/api.lua) keeps the
+-- board and pays out. The badge holds no keys: the badge server signs who is asking.
+local api = require("lib.api")
 local demo = require("lib.demo")
 local art = require("lib.art")
-local bytes = require("lib.bytes")
 
-local POLL_MS, WATCH_MS, WATCH_FOR = 20000, 6000, 600000
-local SPARK_N, MAX_MINE, MAX_OFFERED, BOARD_SHOW = 24, 6, 6, 10
+local ESCROW = "ESC-GQD4T2WC"
+local MIN_BID, MAX_BID, TEXT = 10, 500, 31
+local POLL_MS, SPARK_N = 20000, 24
 local C = {
   desk = 0xC9BFF2, brand = 0x6A50D8, ink = 0x241A52, paper = 0xF6F3FD,
   orange = 0xA8521A, white = 0xFFFFFF, dim = 0x6E6496, line = 0xDCD5F7,
@@ -19,61 +16,62 @@ local C = {
 local TABS = {"board", "fleet", "request", "myjobs", "myoffers", "profile"}
 local IS_TAB = {request = true, board = true, fleet = true, myjobs = true, myoffers = true, profile = true}
 local TITLE = {
-  request = "Request an intro", board = "Intro board", fleet = "Badge Fleet", myjobs = "My jobs", myoffers = "My offers",
-  profile = "Profile", job = "Job", myjob = "My job", offerjob = "My offer", sign = "Sign on phone"
+  request = "Request an intro", board = "Intro board", fleet = "Badge Fleet", myjobs = "My jobs",
+  myoffers = "My offers", profile = "Profile", job = "Job", meet = "We met",
 }
+local LABEL = {
+  offer = "Offer to make this intro", withdraw = "Withdraw my offer", cancel = "Cancel: bid back",
+  confirm = "Confirm: pay the introer", refund = "Refund my bid", made = "Intro made",
+  meet = "We met: verify badges", pay = "Pay the bid",
+}
+local STATUS = {pending = "Unpaid", open = "Open", approved = "Picked", made = "Made", closed = "Closed"}
 local TABHINT = "LEFT/RIGHT screens   CANCEL exit"
 local CTA = "Robots that earn: botbotcap.com"
 local CTA_EARNED = "This badge just earned. Your robots can too: botbotcap.com"
 local CTA_PAID = "Paid! Robots that earn: botbotcap.com"
 local SITE = "https://botbotcap.com"
 
+local function lp(n) return tostring(n or 0) .. " !LAMPs" end
+
 -- State ------------------------------------------------------------------
 
-local function stored_list(key, ok, max)
-  local s, out = storage.get(key), {}
+local function stored_spark()
+  local s, out = storage.get("spark"), {}
   if type(s) == "table" then
-    for k = 1, 32 do
-      if s[k] == nil then break end
-      if ok(s[k]) then out[#out + 1] = s[k] end
+    for k = 1, SPARK_N do
+      if type(s[k]) ~= "number" then break end
+      out[k] = s[k]
     end
   end
-  while #out > max do table.remove(out, 1) end
   return out
 end
 
-local function digits(v, n) return type(v) == "string" and v:find("^%d+$") ~= nil and #v <= n end
-
 local st = {
-  wallet = sol.is_wallet(storage.get("wallet")) and storage.get("wallet") or nil,
   mock = storage.get("mock") == true,
   tg = type(storage.get("tg")) == "string" and storage.get("tg") or nil,
-  spark = stored_list("spark", function(v) return type(v) == "number" end, SPARK_N),
+  spark = stored_spark(),
   jobs = math.tointeger(storage.get("jobs")),
-  -- My jobs, by nonce: {n = nonce, at = unix time posted, seen = landed}.
-  mine = stored_list("mine", function(m)
-    return type(m) == "table" and digits(m.n, 12) and type(m.at) == "number"
-  end, MAX_MINE),
-  -- Jobs I offered on: {j = job address (base58), at}.
-  offered = stored_list("offered", function(o)
-    return type(o) == "table" and sol.is_wallet(o.j) and digits(o.s, 20) and type(o.at) == "number"
-  end, MAX_OFFERED),
-  me = nil,            -- my Introer account, false when not registered, nil unknown
-  board = nil,         -- jobs on the board, newest first
-  my_jobs = nil,       -- rows for st.mine
-  my_offers = nil,     -- rows for st.offered ({closed = true} once the job is gone)
-  names = {},          -- [introer wallet] = Introer (or false), for offer pools
-  read_at = {board = {t = -1e9}, fleet = {t = -1e9}, myjobs = {t = -1e9}, myoffers = {t = -1e9}},  -- last read, per tab
-  status = "starting", updated = nil, busy = nil, gen = 0,
-  screen = nil, w = {}, pick = nil, sign = nil, retry = nil, anim = nil,
-  modal = nil, pending = nil, dirty = nil, ago = 0, mockdata = nil,
+  me = nil,        -- /me: {reg, name, jobs, earned, value, mine, offers}
+  board = nil,     -- /board jobs
+  fleet = nil,     -- /fleet: {paid, jobs}
+  pick = nil,      -- /jobs/<id> of the open job
+  status = "starting", updated = nil, gen = 0,
+  screen = nil, w = {}, anim = nil, modal = nil, pending = nil, dirty = nil, ago = 0,
+  mockdata = nil, meet = nil,
 }
 
-local function now() return sys.time() end
--- My wallet as the chain has it (32 bytes), or the demo's stand-in.
-local function me_key()
-  if st.mock then return demo.ME end
-  return st.wallet and solana.decode(st.wallet)
+-- Calls: the server, or the demo -------------------------------------------
+
+local function call(method, path, body, cb)
+  if st.mock then
+    st.mockdata = st.mockdata or demo.new()
+    local ok, data = demo.call(st.mockdata, method, path, body)
+    timer.after(10, function() cb(ok, data) end)
+  elseif method == "GET" then
+    api.get(path, cb)
+  else
+    api.post(path, body, cb)
+  end
 end
 
 -- Frame ------------------------------------------------------------------
@@ -87,7 +85,7 @@ local function frame(name)
   ui.rect(5, 5, 310, 20, {color = C.brand})
   art.logo(8, 8, 1)
   ui.label(26, 7, TITLE[name], {size = 14, color = C.white})
-  local tag = st.mock and "DEMO" or (st.wallet and sol.short(st.wallet) or "")
+  local tag = st.mock and "DEMO" or (st.me and st.me.reg and st.me.name or "")
   ui.label(160, 9, tag, {size = 12, color = C.white, w = 150, align = "right"})
 end
 
@@ -108,16 +106,9 @@ local function ago_text()
   return s < 2 and "updated now" or ("updated " .. s .. "s ago")
 end
 
-local function name_of(wallet)
-  local x = st.names[wallet]
-  if x and x.name ~= "" then return x.name end
-  if st.mock then return tostring(wallet) end
-  return sol.short(solana.encode(wallet))
-end
-
 -- Modals: redraws and the receipt animation wait until they close -----------
 
-local job_done, show  -- forward
+local job_done, show, poll, sig  -- forward
 
 local function modal(open, ...)
   local args = table.pack(...)
@@ -142,7 +133,6 @@ end
 local function input(prompt, max, cb) modal(ui.input, prompt, max, cb) end
 local function confirm(text, cb) modal(ui.confirm, text, cb) end
 
--- From async callbacks: wait while the animation or a dialog has the screen.
 local function show_later(name)
   if st.anim or st.modal then
     st.screen, st.dirty = name, true
@@ -151,227 +141,26 @@ local function show_later(name)
   end
 end
 
--- Signing: build the message, get a QR from the relay, watch the chain -----
+-- Paying: the OS asks the owner, then the server sees it in the escrow -----
 
-local start_sign  -- forward
-
--- What each step builds, which account shows it landed, and how.
--- With no wallet yet, post_job, register_introer and offer use the relay's stand-ins
--- and return their seeds (hex, "wallet" for the wallet); the address to watch is then nil.
-local HEX = function(t) return bytes.hex(t) end
-local function plan(action, r)
-  local me = me_key()
-  if not me then
-    if action == "post_job" then
-      return escrow.ix_post_job(tx.PDA[1], r.nonce, r.who, r.company, r.telegram, r.bid), nil, "exists",
-        {{HEX("job"), "wallet", HEX(bytes.pack_u64(r.nonce))}}
-    elseif action == "register_introer" then
-      return escrow.ix_register(nil, r.badge_id, r.name), nil, "exists", {{HEX("introer"), "wallet"}}
-    elseif action == "offer" then
-      return escrow.ix_offer(nil, r.pda, r.serial), nil, "exists",
-        {{HEX("introer"), "wallet"}, {HEX("offer"), HEX(r.pda), HEX(bytes.pack_u64(r.serial)), "wallet"}}
-    end
-  end
-  if action == "post_job" then
-    r.pda = r.pda or escrow.job_pda(me, r.nonce)
-    return escrow.ix_post_job(r.pda, r.nonce, r.who, r.company, r.telegram, r.bid), r.pda, "exists"
-  elseif action == "cancel_job" then
-    return escrow.ix_cancel_job(r.pda), r.pda, "gone"
-  elseif action == "offer" then
-    return escrow.ix_offer(me, r.pda, r.serial), escrow.offer_pda(r.pda, r.serial, me), "exists"
-  elseif action == "withdraw_offer" then
-    return escrow.ix_withdraw_offer(me, r.pda, r.serial), escrow.offer_pda(r.pda, r.serial, me), "gone"
-  elseif action == "close_offer" then
-    return escrow.ix_close_offer(r.pda, r.serial, me), escrow.offer_pda(r.pda, r.serial, me), "gone"
-  elseif action == "approve" then
-    return escrow.ix_approve(r.pda, r.serial, r.introer), r.pda, escrow.APPROVED
-  elseif action == "mark_made" then
-    return escrow.ix_mark_made(r.pda), r.pda, escrow.MADE
-  elseif action == "confirm" then
-    return escrow.ix_confirm(r.pda, r.approved), r.pda, "gone"
-  elseif action == "refund_expired" or action == "refund_unconfirmed" then
-    return escrow.ix_refund(action, r.pda), r.pda, "gone"
-  elseif action == "register_introer" then
-    return escrow.ix_register(me, r.badge_id, r.name), escrow.introer_pda(me), "exists"
-  end
-  return escrow.ix_update(me, r.badge_id, r.name), escrow.introer_pda(me), "name"
-end
-
--- true when it landed, nil to keep waiting.
-local function landed(want, b, r)
-  if want == "gone" then return b == nil end
-  if want == "exists" then return b ~= nil end
-  if want == "name" then
-    local i = b and escrow.decode_introer(b)
-    return i and i.name == r.name
-  end
-  local j = b and escrow.decode_job(b)
-  return j and j.status == want
-end
-
-local poll  -- forward
-
-local function stop_sign()
-  local s = st.sign
-  if s and s.timer then timer.cancel(s.timer) end
-  st.sign = nil
-end
-
-local function forget_offer(pda)
-  local b58 = st.mock and pda or solana.encode(pda)
-  for k = #st.offered, 1, -1 do
-    if st.offered[k].j == b58 then table.remove(st.offered, k) end
-  end
-  if not st.mock then storage.set("offered", st.offered) end
-end
-
-local function sign_done(s)
-  local a, r = s.action, s.row
-  if not st.mock then
-    if a == "post_job" then
-      st.mine[#st.mine + 1] = {n = r.nonce, at = now() or 0}
-      while #st.mine > MAX_MINE do table.remove(st.mine, 1) end
-      storage.set("mine", st.mine)
-    elseif a == "offer" then
-      st.offered[#st.offered + 1] = {j = solana.encode(r.pda), s = r.serial, at = now() or 0}
-      while #st.offered > MAX_OFFERED do table.remove(st.offered, 1) end
-      storage.set("offered", st.offered)
-    end
-  end
-  if a == "withdraw_offer" or a == "close_offer" then forget_offer(r.pda) end
-  stop_sign()
-  ui.toast(a == "post_job" and "Posted!" or a == "confirm" and CTA_PAID or (escrow.LABEL[a] .. ": done"))
-  poll(true)
-  show_later(s.back)
-end
-
-local function sign_text(a, b, c)
-  local w = st.w
-  if st.screen ~= "sign" or not w.l1 then return end
-  w.l1:text(a) w.l2:text(b or "") w.l3:text(c or "")
-end
-
--- A step that didn't land: offer to build it again.
-local function sign_failed(s, why)
-  stop_sign()
-  st.retry = s
-  if st.screen == "sign" then
-    sign_text(why, "SELECT to retry", "CANCEL to go back")
-    ui.hint("SELECT retry   CANCEL back")
-  end
-end
-
--- The wallet that scanned: save it, as the first payment sets up the badge.
-local function learned(wallet)
-  st.wallet = wallet
-  storage.set("wallet", wallet)
-  st.me, st.my_jobs, st.my_offers = nil, nil, nil
-end
-
-local function watch()
-  local s = st.sign
-  if not s then return end
-  if sys.millis() - s.started > WATCH_FOR then return sign_failed(s, "Nothing landed in 10 min.") end
-  -- Still nothing after 90 s: most often the wallet is short of SOL.
-  if not s.warned and sys.millis() - s.started > 90000 and st.screen == "sign" then
-    s.warned = true
-    sign_text("Not on chain yet", "Check your wallet", "has enough SOL.")
-  end
-  if not s.addr then
-    -- No wallet yet: ask the relay who scanned, then watch the real address.
-    return chain.who(s.id, function(wallet)
-      if st.sign ~= s or not wallet then return end
-      learned(wallet)
-      local _, addr = plan(s.action, s.row)
-      s.addr = addr
-      timer.cancel(s.timer)
-      s.timer = timer.every(WATCH_MS, watch)
+local function pay(id, bid)
+  local function sent(ok, res)
+    if not ok then return ui.toast("Not paid: " .. tostring(res)) end
+    call("POST", "/jobs/" .. id .. "/paid", {deposit = res and res.id}, function(ok2, j)
+      ui.toast(ok2 and j.st == "open" and "Posted!" or "Paid. On the board in a moment.")
+      poll(true)
+      show_later("myjobs")
     end)
   end
-  chain.account(s.addr, function(ok, b)
-    if st.sign ~= s or not ok then return end
-    if landed(s.want, b, s.row) then sign_done(s) end
-  end)
+  if st.mock then return sent(true, {id = "demo"}) end
+  if not lamps then return ui.toast("Needs the lamps permission") end
+  lamps.deposit(ESCROW, bid, "job " .. id, sent)
 end
 
-local function build_sign()
-  frame("sign")
-  local s = st.sign or st.retry
-  if st.sign and s.url and ui.qr then ui.qr(14, 32, 160, s.url) end
-  st.w.l1 = ui.label(186, 36, "", {size = 14, color = C.brand, w = 124})
-  st.w.l2 = ui.label(186, 60, "", {size = 12, color = C.ink, w = 124})
-  st.w.l3 = ui.label(186, 76, "", {size = 12, color = C.dim, w = 124})
-  ui.hint("CANCEL back")
-  if st.retry then
-    sign_text(st.retry.why or "Didn't land.", "SELECT to retry", "CANCEL to go back")
-    ui.hint("SELECT retry   CANCEL back")
-  elseif s and s.url then
-    sign_text(escrow.LABEL[s.action], "Scan with your", "phone wallet.")
-    ui.label(186, 104, "Waiting for the", {size = 12, color = C.dim})
-    ui.label(186, 118, "chain...", {size = 12, color = C.dim})
-    if st.mock then ui.label(186, 146, "Demo: not real", {size = 12, color = C.orange}) end
-  elseif s then
-    sign_text("Preparing...", "", "")
-  end
-end
-
-function start_sign(action, r, back)
-  stop_sign()
-  st.retry = nil
-  local s = {action = action, row = r, started = sys.millis(), back = back or st.screen}
-  st.sign = s
-  if st.mock then
-    s.url = "solana:" .. chain.RELAY .. "/tx/demo"
-    s.timer = timer.after(4000, function()
-      if st.sign ~= s then return end
-      demo.apply(st.mockdata, action, r)
-      sign_done(s)
-    end)
-    show("sign")
-    return
-  end
-  show("sign")
-  local function build()
-    if st.sign ~= s then return end
-    local ix, addr, want, seeds = plan(action, r)
-    s.addr, s.want = addr, want
-    local message, at = tx.message({ix})
-    local pdas = {}
-    for i, sd in ipairs(seeds or {}) do pdas[i] = {at = at[tx.PDA[i]], seeds = sd} end
-    chain.relay(message, pdas, function(ok, url, id)
-      if st.sign ~= s then return end
-      if not ok then
-        s.why = tostring(url)
-        return sign_failed(s, s.why)
-      end
-      s.url, s.id = url, id
-      s.timer = timer.every(s.addr and WATCH_MS or 2000, watch)
-      if st.screen == "sign" then show_later("sign") end
-    end)
-  end
-  -- Addresses cost instructions: work out the shared ones in callbacks of their own.
-  local me = me_key()
-  local warm = {
-    function() escrow.config_pda() end,
-    function() if me then escrow.introer_pda(me) end end,
-    function() if action == "post_job" then escrow.board_pda() end end,
-    function() if action == "post_job" and me then r.pda = r.pda or escrow.job_pda(me, r.nonce) end end,
-    function() if r.approved then escrow.introer_pda(r.approved) end end,
-    function() if r.introer and r.pda then escrow.offer_pda(r.pda, r.serial, r.introer) end end,
-  }
-  local k = 0
-  local function step()
-    if st.sign ~= s then return end
-    k = k + 1
-    if warm[k] then warm[k]() timer.after(20, step) else build() end
-  end
-  timer.after(20, step)
-end
-
--- Request an intro (home) ---------------------------------------------------
+-- Request an intro ---------------------------------------------------------
 
 local function ask_tg(then_do)
-  input("Your Telegram @handle", escrow.TELEGRAM - 1, function(tg)
+  input("Your Telegram @handle", TEXT, function(tg)
     if not tg then return end
     tg = tg:gsub("%s", "")
     if tg == "" or tg == "@" then ui.toast("Telegram is required") return end
@@ -383,20 +172,19 @@ local function ask_tg(then_do)
 end
 
 local function ask_job()
-  input("Who do you want to meet?", escrow.WHO, function(who)
+  input("Who do you want to meet?", TEXT, function(who)
     if not who or who:gsub("%s", "") == "" then return end
-    input("Their company", escrow.COMPANY, function(company)
-      if not company or company:gsub("%s", "") == "" then return end
-      input("Your bid in SOL", 12, function(amount)
-        if not amount then return end
-        local lam = sol.to_lamports(amount)
-        if not lam then ui.toast("Use a number like 0.1") return end
-        if sol.cmp(lam, escrow.MIN_BID) < 0 then ui.toast("At least 0.01 SOL") return end
-        if sol.cmp(lam, escrow.MAX_BID) > 0 then ui.toast("At most 100 SOL") return end
+    input("Their company", TEXT, function(co)
+      if not co or co:gsub("%s", "") == "" then return end
+      input("Your bid in !LAMPs", 3, function(amount)
+        local bid = math.tointeger(tonumber(amount or ""))
+        if not bid then ui.toast("Use a whole number like 50") return end
+        if bid < MIN_BID or bid > MAX_BID then ui.toast(MIN_BID .. " to " .. MAX_BID .. " !LAMPs") return end
         local function post(tg)
-          local r = {who = who, company = company, bid = lam, telegram = tg,
-            nonce = tostring(now() or sys.millis())}
-          start_sign("post_job", r, "myjobs")
+          call("POST", "/jobs", {who = who, co = co, tg = tg, bid = bid}, function(ok, r)
+            if not ok then return ui.toast(tostring(r)) end
+            pay(r.id, r.bid)
+          end)
         end
         if st.tg then post(st.tg) else ask_tg(post) end
       end)
@@ -410,11 +198,11 @@ local function build_request()
   ui.label(60, 32, "Who do you want to meet?", {size = 14, color = C.brand})
   ui.label(60, 50, "Post it. Introers offer. You pick one.", {size = 12, color = C.ink})
   ui.list(6, 68, 308, 72, {
-    {title = "Request an intro", sub = "who, company, bid"},
+    {title = "Request an intro", sub = "who, company, bid in !LAMPs"},
     {title = "My Telegram", right = st.tg or "not set"},
   }, {on_select = function(i) if i == 1 then ask_job() else ask_tg() end end})
   line(144, "Your Telegram is shown to people who offer.", C.ink)
-  line(158, "You pay only when you confirm the intro.")
+  line(158, "The bid waits in escrow. Paid when you confirm.")
   ui.rect(5, 174, 310, 1, {color = C.line})
   center(180, CTA, 14, C.orange)
   ui.hint(TABHINT)
@@ -422,196 +210,217 @@ end
 
 -- Lists of jobs ------------------------------------------------------------
 
-local function offered_on(j)
-  local b58 = st.mock and j.pda or solana.encode(j.pda)
-  for _, o in ipairs(st.offered) do if o.j == b58 then return true end end
-  return st.mock and st.mockdata and st.mockdata.offered[j.pda] or false
-end
-
--- How a job reads in a list, for `role`: "board", "requester" or "introer".
 local function job_item(j, role)
-  if j.closed then return {title = "(closed job)", sub = "get your offer rent back", right = "Closed"} end
-  local me = me_key()
-  local right = escrow.STATUS[j.status]
+  local right = STATUS[j.st] or j.st
   if role == "introer" then
-    right = j.status == escrow.OPEN and "Waiting" or (j.approved == me and "You!" or "Not picked")
-    if j.status == escrow.MADE and j.approved == me then right = "Made" end
+    right = j.st == "open" and "Waiting" or (j.me and (j.st == "made" and "Made" or "You!") or "Not picked")
+  elseif role == "board" and j.o then
+    right = "Offered"
   end
-  local offers = j.offer_count == 1 and "1 offer" or (j.offer_count .. " offers")
+  if j.met and (j.st == "approved" or j.st == "made") then right = right .. " +met" end
   return {
-    title = j.who .. " @ " .. j.company,
-    sub = sol.format(j.bid, 3) .. " SOL   " .. offers .. (role == "introer" and ("   " .. j.telegram) or ""),
+    title = j.who .. " @ " .. j.co,
+    sub = lp(j.bid) .. "   " .. (j.n == 1 and "1 offer" or (j.n .. " offers")),
     right = right,
   }
 end
 
--- The board leads with "+ Request an intro": job rows sit one below it.
-local LEAD = {title = "+ Request an intro", sub = "who, company, bid"}
-local function lead(role) return role == "board" and 1 or 0 end
+-- What a list shows, as one string: redraw only when it changes.
+function sig(rows)
+  if not rows then return "-" end
+  local t = {}
+  for k, j in ipairs(rows) do t[k] = j.id .. j.st .. j.n .. tostring(j.o) .. tostring(j.met) .. tostring(j.me) end
+  return table.concat(t, ",")
+end
 
-local function build_jobs(name, rows, role, empty, empty2, open)
+local LEAD = {title = "+ Request an intro", sub = "who, company, bid"}
+
+local function rows_for(role)
+  if role == "board" then return st.board end
+  local me = st.me
+  return me and (role == "requester" and me.mine or me.offers) or nil
+end
+
+local function open_job(j)
+  st.pick = {id = j.id, who = j.who, co = j.co, bid = j.bid, n = j.n, st = j.st, acts = {}, loading = true}
+  show("job")
+  call("GET", "/jobs/" .. j.id, nil, function(ok, d)
+    if not st.pick or st.pick.id ~= j.id then return end
+    if not ok then st.pick.loading = tostring(d) else st.pick = d end
+    if st.screen == "job" then show_later("job") end
+  end)
+end
+
+local function build_jobs(name, role, empty, empty2)
   frame(name)
-  local items, off = {}, lead(role)
+  local rows = rows_for(role)
+  local items, off = {}, role == "board" and 1 or 0
   if off == 1 then items[1] = LEAD end
   for k, j in ipairs(rows or {}) do items[k + off] = job_item(j, role) end
-  if off == 1 and #items == 1 then
-    st.w.list = ui.list(6, 26, 308, 44, items, {on_select = function() ask_job() end})
-    center(100, rows and empty or "Reading the chain...")
-    if rows and empty2 then center(124, empty2, 12, C.dim) end
-  elseif #items == 0 then
-    center(80, rows and empty or "Reading the chain...")
-    if rows and empty2 then center(104, empty2, 12, C.dim) end
+  if #items == off then
+    if off == 1 then ui.list(6, 26, 308, 44, items, {on_select = function() ask_job() end}) end
+    center(off == 1 and 100 or 80, rows and empty or "Loading...")
+    if rows and empty2 then center(off == 1 and 124 or 104, empty2, 12, C.dim) end
   else
-    st.w.list = ui.list(6, 26, 308, 172, items, {on_select = function(i)
+    ui.list(6, 26, 308, 172, items, {on_select = function(i)
       if off == 1 and i == 1 then return ask_job() end
-      local j = (role == "board" and st.board or role == "requester" and st.my_jobs or st.my_offers or {})[i - off]
-      if j then st.pick = j; show(open) end
+      local j = (rows_for(role) or {})[i - off]
+      if j then open_job(j) end
     end})
   end
-  st.w.rows, st.w.count = rows, #items - off
+  st.w.sig = sig(rows)
   ui.hint(#items > off and "SELECT open   LEFT/RIGHT screens" or TABHINT)
 end
 
-local function build_board()
-  build_jobs("board", st.board, "board", "No requests yet", "Be the first: + Request an intro", "job")
-end
-local function build_myjobs()
-  build_jobs("myjobs", st.my_jobs, "requester", "No jobs yet", "Request an intro to post one", "myjob")
-end
-local function build_myoffers()
-  build_jobs("myoffers", st.my_offers, "introer", "No offers yet", "Offer on a job in the board", "offerjob")
-end
-
--- Keep the list on the same job when rows move.
-local function refresh_jobs(rows, role, rebuild)
-  local off = lead(role)
-  if not st.w.list or not rows or #rows == 0 or (off == 1 and (st.w.count or 0) == 0) then
-    if (rows and #rows or -1) ~= st.w.count or (rows and not st.w.rows) then rebuild() end
-    return
-  end
-  local old = st.w.rows and st.w.rows[(st.w.list:selected() or 1) - off]
-  local items, sel = {}, st.w.list:selected() == 1 and off == 1 and 1 or 1 + off
-  if off == 1 then items[1] = LEAD end
-  for k, j in ipairs(rows) do
-    items[k + off] = job_item(j, role)
-    if old and j.pda == old.pda then sel = k + off end
-  end
-  st.w.list:items(items)
-  st.w.list:select(sel)
-  st.w.rows, st.w.count = rows, #rows
-end
+local function build_board() build_jobs("board", "board", "No requests yet", "Be the first: + Request an intro") end
+local function build_myjobs() build_jobs("myjobs", "requester", "No jobs yet", "Request an intro to post one") end
+local function build_myoffers() build_jobs("myoffers", "introer", "No offers yet", "Offer on a job in the board") end
 
 -- One job ------------------------------------------------------------------
 
-local function job_head(j)
-  ui.label(14, 30, j.who .. " @ " .. j.company, {size = 14, color = C.ink, w = 292})
-  line(50, "bid " .. sol.format(j.bid) .. " SOL   " .. j.offer_count .. " offers   " .. escrow.STATUS[j.status])
+local function do_act(j, a, n)
+  if a == "meet" then st.meet = {job = j.id} return show("meet") end
+  if a == "pay" then return pay(j.id, j.bid) end
+  local function go()
+    call("POST", "/jobs/" .. j.id .. "/" .. a, {n = n}, function(ok, d)
+      if not ok then return ui.toast(tostring(d)) end
+      ui.toast(a == "confirm" and CTA_PAID or (LABEL[a] or a) .. ": done")
+      st.pick = d
+      poll(true)
+      show_later("job")
+    end)
+  end
+  if a == "cancel" then return confirm("Cancel and get your bid back?", function(y) if y then go() end end) end
+  if a == "confirm" then
+    return confirm("Pay " .. lp(j.bid) .. " to " .. (j.picked or "them") .. "?", function(y) if y then go() end end)
+  end
+  go()
 end
 
 local function build_job()
   frame("job")
   local j = st.pick
-  job_head(j)
-  local me = me_key()
-  if me and j.requester == me then
-    line(70, "Your job: see My jobs.", C.ink, 14)
-  elseif offered_on(j) then
-    line(70, "You offered. Talk on Telegram:", C.ink, 14)
-    ui.label(14, 92, j.telegram, {size = 20, color = C.brand})
-  elseif j.status ~= escrow.OPEN then
-    line(70, "Someone was picked already.", C.ink, 14)
-  else
-    line(68, "Telegram shown after you offer.")
-    ui.list(6, 86, 308, 36, {{title = "Offer to make this intro", sub = "sign on your phone"}},
-      {on_select = function()
-        if not st.me then ui.toast("Register in Profile first") return end
-        start_sign("offer", j, "myoffers")
-      end})
-  end
-  line(170, "The requester picks one offer after talking.")
-  ui.hint("SELECT offer   CANCEL back")
-end
-
-local function load_names(j)
-  if st.names_job == j then return end  -- once per copy of the job
-  st.names_job = j
-  local want = {}
-  -- Not registered yet (false) is asked again: they may have registered since.
-  for _, w in ipairs(j.offers or {}) do if not st.names[w] then want[#want + 1] = w end end
-  if #want == 0 then return end
-  if st.mock then
-    for _, w in ipairs(want) do st.names[w] = demo.introer(w) or false end
+  ui.label(14, 30, j.who .. " @ " .. j.co, {size = 14, color = C.ink, w = 292})
+  line(48, "bid " .. lp(j.bid) .. "   " .. (j.n or 0) .. " offers   " .. (STATUS[j.st] or j.st or ""))
+  if j.loading then
+    center(100, j.loading == true and "Loading..." or j.loading)
+    ui.hint("CANCEL back")
     return
   end
-  chain.pdas(want, escrow.introer_pda, function(pdas)
-    chain.many(pdas, function(ok, data)
-      if not ok then return end
-      for i, w in ipairs(want) do st.names[w] = data[i] and escrow.decode_introer(data[i]) or false end
-      if st.screen == "myjob" and st.pick == j then show_later("myjob") end
-    end)
-  end)
-end
-
-local function build_myjob()
-  frame("myjob")
-  local j = st.pick
-  job_head(j)
-  local items, act = {}, {}
-  if j.status == escrow.OPEN then
-    line(68, j.offer_count == 0 and "No offers yet." or "Pick one after talking on Telegram:", C.ink)
-    for _, w in ipairs(j.offers) do
-      local x = st.names[w]
-      items[#items + 1] = {title = "Approve " .. name_of(w),
-        sub = x and ("jobs " .. x.jobs .. "   earned " .. sol.format(x.earned, 3) .. " SOL") or "introer"}
-      act[#act + 1] = {"approve", w}
-    end
-  else
-    line(68, "Picked: " .. name_of(j.approved), C.ink)
+  local y = 64
+  if j.tg then
+    line(y, "Telegram:", C.dim)
+    ui.label(84, y - 4, j.tg, {size = 20, color = C.brand})
+    y = y + 22
+  elseif not j.mine and j.st == "open" then
+    line(y, "Telegram shown after you offer.")
+    y = y + 16
   end
-  for _, a in ipairs(escrow.actions(j, "requester", nil, now())) do
-    items[#items + 1] = {title = escrow.LABEL[a]}
+  if j.picked then
+    line(y, "Picked: " .. j.picked .. (j.met and "   met: verified" or "   met: not yet"), C.ink)
+    y = y + 16
+  end
+  local items, act = {}, {}
+  if j.mine and j.st == "open" then
+    if #(j.pool or {}) == 0 then
+      line(y, "No offers yet.", C.ink)
+      y = y + 16
+    end
+    for k, p in ipairs(j.pool or {}) do
+      items[#items + 1] = {title = "Approve " .. p.name, sub = "jobs " .. p.jobs .. "   earned " .. lp(p.earned)}
+      act[#act + 1] = {"approve", k - 1}
+    end
+  end
+  for _, a in ipairs(j.acts or {}) do
+    items[#items + 1] = {title = LABEL[a] or a}
     act[#act + 1] = {a}
   end
   if #items > 0 then
-    ui.list(6, 86, 308, math.min(108, 36 * #items), items, {on_select = function(i)
+    ui.list(6, y + 2, 308, math.min(196 - y - 18, 36 * #items), items, {on_select = function(i)
       local a = act[i]
-      if not a then return end
-      if a[1] == "approve" then
-        start_sign("approve", {pda = j.pda, serial = j.serial, introer = a[2]}, "myjobs")
-      elseif a[1] == "cancel_job" then
-        confirm("Cancel and get your bid back?", function(yes) if yes then start_sign("cancel_job", j, "myjobs") end end)
-      else
-        start_sign(a[1], j, "myjobs")
-      end
+      if a then do_act(j, a[1], a[2]) end
     end})
   end
-  if j.status == escrow.MADE then line(178, "Made? Confirm to pay. 72h, then refund.", C.orange) end
-  local note = escrow.note(j, "requester", now())
-  if note then line(178, note, C.orange) end
-  ui.hint("SELECT sign   CANCEL back")
-  load_names(j)
+  if j.me and j.st == "approved" and not j.met then
+    line(178, "Meet them, badge to badge, then mark made.", C.orange)
+  elseif j.mine and j.st == "made" then
+    line(178, "Made? Confirm to pay. 72h, then refund.", C.orange)
+  elseif not j.mine and not j.tg and j.st == "open" and st.me and not st.me.reg then
+    line(178, "Register in Profile to offer.", C.orange)
+  end
+  ui.hint(#items > 0 and "SELECT choose   CANCEL back" or "CANCEL back")
 end
 
-local function build_offerjob()
-  frame("offerjob")
-  local j = st.pick
-  local acts
-  if j.closed then
-    line(32, "This job is closed.", C.ink, 14)
-    acts = {"close_offer"}
-  else
-    job_head(j)
-    line(68, "Telegram:", C.dim)
-    ui.label(84, 64, j.telegram, {size = 20, color = C.brand})
-    acts = escrow.actions(j, "introer", me_key(), now())
-    if j.approved == me_key() and j.status == escrow.MADE then line(92, "Made. Waiting for them to confirm.", C.ink) end
+-- We met: both badges sign a meet for this job ------------------------------
+
+local function meet_text(a, b)
+  if st.screen ~= "meet" or not st.w.m1 then return end
+  st.w.m1:text(a)
+  st.w.m2:text(b or "")
+end
+
+local function build_meet()
+  frame("meet")
+  art.logo(14, 32, 3)
+  ui.label(60, 34, "Hold your badges close", {size = 14, color = C.brand})
+  ui.label(60, 52, "Both open We met on this job.", {size = 12, color = C.ink})
+  st.w.m1 = center(96, "SELECT to verify", 14, C.ink)
+  st.w.m2 = center(118, "", 12, C.dim)
+  center(150, "Signed by both badges. No Wi-Fi needed.", 12, C.dim)
+  ui.hint("SELECT verify   CANCEL back")
+  if st.mock then return end
+  if not mesh or not mesh.meet then return meet_text("This badge can't meet", "Update Solana OS") end
+  if mesh.resume then mesh.resume() end
+end
+
+local function leave_meet()
+  if mesh and mesh.pause and not st.mock then mesh.pause() end
+  st.meet = nil
+end
+
+local function met(id)
+  ui.toast("Met! Verified in a moment.")
+  if led then
+    led.fill(0x61, 0xBB, 0x46)
+    timer.after(600, function() led.off() end)
   end
-  local items = {}
-  for k, a in ipairs(acts) do items[k] = escrow.LABEL[a] end
-  if #items > 0 then
-    ui.list(6, 110, 308, 36 * #items, items, {on_select = function(i) start_sign(acts[i], j, "myoffers") end})
+  leave_meet()
+  -- The meet uploads once Wi-Fi is back; the server marks the job met soon after.
+  call("GET", "/jobs/" .. id, nil, function(ok, d)
+    if ok then
+      st.pick = d
+      show_later("job")
+    end
+  end)
+end
+
+local function try_meet()
+  local m = st.meet
+  if not m then return end
+  if st.mock then
+    call("POST", "/jobs/" .. m.job .. "/meet", {}, function() met(m.job) end)
+    return
   end
-  ui.hint("SELECT sign   CANCEL back")
+  if not mesh or not mesh.meet then return end
+  local near
+  for _, p in ipairs(mesh.nearby() or {}) do
+    if p.kind == "badge" then near = p break end
+  end
+  if not near then return meet_text("No badge nearby", "Ask them to open We met too") end
+  meet_text("Asking " .. (near.name or near.id) .. "...", "")
+  local ok, err = mesh.meet(near.id, {job = m.job}, function(done, res)
+    if st.meet ~= m then return end
+    if done then met(m.job) else meet_text("Not met: " .. tostring(res), "SELECT to try again") end
+  end)
+  if not ok then meet_text("Not met: " .. tostring(err), "SELECT to try again") end
+end
+
+-- The other badge asks: sign only for the job open on this screen.
+function on_meet(from, data)
+  local m = st.meet
+  if st.screen ~= "meet" or not m or type(data) ~= "table" or tostring(data.job) ~= m.job then return nil end
+  timer.after(10, function() met(m.job) end)
+  return {job = m.job}
 end
 
 -- Profile ------------------------------------------------------------------
@@ -638,38 +447,38 @@ local function draw_spark()
   end
 end
 
-local function value_of(me) return sol.machine_value(me.earned, me.created_at, now()) end
-
-local reset_data, restart_poll  -- forward
+local restart_poll  -- forward
 
 local function profile_items()
+  local reg = st.me and st.me.reg
   return {
-    {title = "My wallet", sub = st.wallet and "SELECT to use another" or "set by your first payment",
-      right = st.wallet and sol.short(st.wallet) or ""},
-    {title = st.me and "Update my name" or "Register as an introer", sub = "sign on your phone"},
-    {title = "Demo mode", sub = "pretend chain, no network", right = st.mock and "ON" or "OFF"},
+    {title = reg and "Update my name" or "Register as an introer", sub = "free, no payment"},
+    {title = "Demo mode", sub = "pretend server, no network", right = st.mock and "ON" or "OFF"},
   }
 end
 
 local function refresh_profile()
   local w, me = st.w, st.me
   if not w.value then return end
-  if me then
-    w.value:text(sol.format(value_of(me), 3) .. " SOL")
-    w.stats:text((me.name ~= "" and me.name .. "   " or "") .. "jobs " .. me.jobs .. "   earned "
-      .. sol.format(me.earned, 3) .. " SOL")
+  if me and me.reg then
+    w.value:text(lp(me.value))
+    w.stats:text(me.name .. "   jobs " .. me.jobs .. "   earned " .. lp(me.earned))
   else
-    w.value:text("-- SOL")
-    w.stats:text(me == false and "Not an introer yet" or ago_text())
+    w.value:text("-- !LAMPs")
+    w.stats:text(me and "Not an introer yet" or ago_text())
   end
   draw_spark()
 end
 
 local function ask_name()
-  input("Your introer name", escrow.NAME, function(name)
+  input("Your introer name", TEXT, function(name)
     if not name or name:gsub("%s", "") == "" then return end
-    start_sign(st.me and "update_introer" or "register_introer",
-      {name = name, badge_id = (badge.id() or ""):sub(1, 8)}, "profile")
+    call("POST", "/introer", {name = name}, function(ok, me)
+      if not ok then return ui.toast(tostring(me)) end
+      st.me = me
+      ui.toast("Saved")
+      show_later("profile")
+    end)
   end)
 end
 
@@ -685,45 +494,26 @@ local function build_profile()
   ui.label(226, 106, "botbotcap.com", {size = 12, color = C.dim, w = 88, align = "center"})
   st.w.stats = line(96, "", C.ink)
   local list
-  list = ui.list(6, 112, 308, 64, profile_items(), {on_select = function(i)
-    if i == 1 then
-      if not st.wallet then return ui.toast("Pay or register once: the badge learns it") end
-      confirm("Use another wallet? Your next payment sets it.", function(yes)
-        if not yes then return end
-        st.wallet, st.mine, st.offered = nil, {}, {}
-        storage.remove("wallet") storage.remove("mine") storage.remove("offered")
-        reset_data()
-        restart_poll()
-        show("profile")
-        ui.toast("Wallet cleared")
-      end)
-    elseif i == 2 then
-      ask_name()
-    else
-      st.mock = not st.mock
-      storage.set("mock", st.mock)
-      reset_data()
-      restart_poll()
-      list:items(profile_items())
-      list:select(3)
-      ui.toast(st.mock and "Demo mode on" or "Demo mode off")
-    end
+  list = ui.list(6, 120, 308, 56, profile_items(), {on_select = function(i)
+    if i == 1 then return ask_name() end
+    st.mock = not st.mock
+    storage.set("mock", st.mock)
+    restart_poll()
+    list:items(profile_items())
+    list:select(2)
+    ui.toast(st.mock and "Demo mode on" or "Demo mode off")
   end})
   center(180, CTA, 14, C.orange)
   ui.hint("SELECT change   LEFT/RIGHT screens")
   refresh_profile()
 end
 
--- Screens ------------------------------------------------------------------
-
--- Badge Fleet MAV: every SOL paid to an introer through the escrow -----------
-
-local DEMO_STATS = {paid = "12400000000", jobs = 31}
+-- Badge Fleet MAV: every !LAMP the badge fleet's introers produced ----------
 
 local function refresh_fleet()
-  local w, f = st.w, st.stats
+  local w, f = st.w, st.fleet
   if not w.mav then return end
-  w.mav:text(f and (sol.format(f.paid, 3) .. " SOL") or "-- SOL")
+  w.mav:text(f and lp(f.paid) or "-- !LAMPs")
   w.jobs:text(f and (f.jobs .. (f.jobs == 1 and " intro paid" or " intros paid")) or ago_text())
 end
 
@@ -731,22 +521,22 @@ local function build_fleet()
   frame("fleet")
   art.logo(14, 32, 3)
   ui.label(60, 34, "Badge Fleet MAV", {size = 14, color = C.brand})
-  ui.label(60, 52, "Total paid to introers", {size = 12, color = C.dim})
+  ui.label(60, 52, "Total !LAMPs produced by introers", {size = 12, color = C.dim})
   st.w.mav = ui.label(14, 80, "", {size = 32, color = C.ink, w = 292, align = "center"})
   st.w.jobs = ui.label(14, 120, "", {size = 14, color = C.brand, w = 292, align = "center"})
-  center(146, "Every SOL paid to an introer, on-chain.", 12, C.dim)
+  center(146, "Every !LAMP paid to an introer.", 12, C.dim)
   ui.rect(5, 174, 310, 1, {color = C.line})
   center(180, CTA, 14, C.orange)
   ui.hint(TABHINT)
   refresh_fleet()
 end
 
+-- Screens ------------------------------------------------------------------
+
 local BUILD = {
-  request = build_request, board = build_board, fleet = build_fleet, myjobs = build_myjobs, myoffers = build_myoffers,
-  profile = build_profile, job = build_job, myjob = build_myjob, offerjob = build_offerjob,
-  sign = build_sign,
+  request = build_request, board = build_board, fleet = build_fleet, myjobs = build_myjobs,
+  myoffers = build_myoffers, profile = build_profile, job = build_job, meet = build_meet,
 }
-local BACK = {job = "board", myjob = "myjobs", offerjob = "myoffers"}
 
 function show(name)
   st.dirty = nil
@@ -759,9 +549,7 @@ function show(name)
   local fresh = st.screen ~= name
   st.screen = name
   BUILD[name]()
-  -- A tab's list is read when it opens, unless it was read in the last 15 s (rpc budget).
-  local at = st.read_at[name]
-  if fresh and at and sys.millis() - at.t > 15000 then poll(true) end
+  if fresh and IS_TAB[name] then poll(true) end
 end
 
 -- Receipt: JOB DONE ---------------------------------------------------------
@@ -786,7 +574,6 @@ end
 local function anim_tick(ms)
   local a = st.anim
   a.t = a.t + ms
-  -- The bands cycle: redraw the logo with the colours turned, 7 times a second.
   local shift = (a.t // 150) % 6
   if a.logo and shift ~= a.shift then
     a.logo:remove()
@@ -803,23 +590,24 @@ local function anim_tick(ms)
   end
 end
 
--- Reading the chain ----------------------------------------------------------
+-- Reading the server ---------------------------------------------------------
 
+-- Redraw the open tab when its data changed.
 local function refresh()
   if st.anim or st.modal then return end
   local s = st.screen
   if s == "profile" then refresh_profile()
-  elseif s == "board" then refresh_jobs(st.board, "board", build_board)
   elseif s == "fleet" then refresh_fleet()
-  elseif s == "myjobs" then refresh_jobs(st.my_jobs, "requester", build_myjobs)
-  elseif s == "myoffers" then refresh_jobs(st.my_offers, "introer", build_myoffers) end
+  elseif s == "board" or s == "myjobs" or s == "myoffers" then
+    local role = s == "board" and "board" or s == "myjobs" and "requester" or "introer"
+    if sig(rows_for(role)) ~= st.w.sig then show(s) end
+  end
 end
 
--- A new copy of my introer account: value, spark, receipts.
 local function got_me(me)
   st.me = me
-  if not me then return end
-  st.spark[#st.spark + 1] = sol.milli(value_of(me))
+  if not me.reg then return end
+  st.spark[#st.spark + 1] = me.value
   while #st.spark > SPARK_N do table.remove(st.spark, 1) end
   storage.set("spark", st.spark)
   local before = st.jobs
@@ -828,144 +616,44 @@ local function got_me(me)
   if before and me.jobs > before then job_done(me.jobs - before) end
 end
 
-local function fail(why)
-  st.busy = nil
-  st.status = tostring(why)
-  refresh()
-end
-
-local function finish()
-  st.busy, st.status, st.updated = nil, "ok", sys.millis()
-  refresh()
-end
-
--- Jobs at `pdas`, 3 per call (a Job is ~700 bytes), or 5 per call without the offers ring
--- (`list`): cb(rows with pda, missing[i] = true).
-local function read_jobs(gen, pdas, cb, list)
-  chain.many(pdas, function(ok, data)
-    if gen ~= st.gen then return end
-    if not ok then return fail(data) end
-    local rows, missing = {}, {}
-    for i = 1, #pdas do
-      local j = data[i] and escrow.decode_job(data[i])
-      if j then j.pda = pdas[i]; rows[#rows + 1] = j else missing[i] = true end
-    end
-    cb(rows, missing)
-  end, list and 5 or 3, list and escrow.JOB.LIST or nil)
-end
-
-local function read_board(gen)
-  chain.account(escrow.board_pda(), function(ok, b)
-    if gen ~= st.gen then return end
-    if not ok then return fail(b) end
-    local list = escrow.decode_board(b) or {}
-    while #list > BOARD_SHOW do table.remove(list) end
-    read_jobs(gen, list, function(rows)
-      st.board = rows
-      st.read_at.board.t = sys.millis()
-      finish()
-    end, true)
-  end)
-end
-
-local function newest_first(rows)
-  local out = {}
-  for k = #rows, 1, -1 do out[#out + 1] = rows[k] end
-  return out
-end
-
--- My jobs from their nonces; drop the closed ones and posts that never landed.
-local function read_mine(gen)
-  local me, list = me_key(), st.mine
-  chain.pdas(list, function(m) return escrow.job_pda(me, m.n) end, function(pdas)
-    if gen ~= st.gen then return end
-    read_jobs(gen, pdas, function(rows, missing)
-      local keep, t = {}, now()
-      for i, m in ipairs(list) do
-        if not missing[i] then
-          m.seen = true
-          keep[#keep + 1] = m
-        elseif not m.seen and (not t or t - m.at < 900) then
-          keep[#keep + 1] = m  -- not landed yet
-        end
-      end
-      if #keep ~= #list then st.mine = keep; storage.set("mine", keep) end
-      st.my_jobs = newest_first(rows)
-      st.read_at.myjobs.t = sys.millis()
-      finish()
-    end)
-  end)
-end
-
--- Jobs I offered on; a closed one stays until I take the offer's rent back.
-local function read_offers(gen)
-  local pdas = {}
-  for k, o in ipairs(st.offered) do pdas[k] = solana.decode(o.j) end
-  read_jobs(gen, pdas, function(rows, missing)
-    rows = newest_first(rows)
-    for i = 1, #pdas do
-      if missing[i] then rows[#rows + 1] = {closed = true, pda = pdas[i], serial = st.offered[i].s} end
-    end
-    st.my_offers = rows
-    st.read_at.myoffers.t = sys.millis()
-    finish()
-  end)
-end
-
 function poll(force)
-  if st.mock then
-    st.mockdata = st.mockdata or demo.new(now())
-    local d = st.mockdata
-    if not force then demo.tick(d) end
-    local me = {}
-    for k, v in pairs(d.me) do me[k] = v end
-    st.board, st.my_jobs, st.my_offers = d.board, demo.mine(d), demo.my_offers(d)
-    st.stats = DEMO_STATS
-    if not force then got_me(me) else st.me = me end
-    return finish()
-  end
-  if st.sign and st.sign.timer and not force then return end  -- the watch has the rpc budget
-  if st.busy and sys.millis() - st.busy < 30000 and not force then return end
-  if not rpc then return fail("needs the rpc permission") end
+  if st.mock and st.mockdata and not force then demo.tick(st.mockdata) end
   st.gen = st.gen + 1
-  st.busy = sys.millis()
   local gen = st.gen
-  local function rest()
-    local s = st.screen
-    if s == "board" or s == "job" then read_board(gen)
-    elseif s == "fleet" then
-      chain.account(escrow.stats_pda(), function(ok, b)
-        if gen ~= st.gen then return end
-        if not ok then return fail(b) end
-        st.stats = escrow.decode_stats(b) or {paid = "0", jobs = 0}
-        st.read_at.fleet.t = sys.millis()
-        finish()
-      end)
-    elseif (s == "myjobs" or s == "myjob") and st.wallet then read_mine(gen)
-    elseif (s == "myoffers" or s == "offerjob") and st.wallet then read_offers(gen)
-    else finish() end
-  end
-  if not st.wallet then return rest() end
-  chain.account(escrow.introer_pda(me_key()), function(ok, b)
+  local function done(ok, why)
     if gen ~= st.gen then return end
-    if not ok then return fail(b) end
-    got_me(b and escrow.decode_introer(b) or false)
-    rest()
+    st.status = ok and "ok" or tostring(why)
+    if ok then st.updated = sys.millis() end
+    refresh()
+  end
+  call("GET", "/me", nil, function(ok, me)
+    if gen ~= st.gen then return end
+    if not ok then return done(false, me) end
+    got_me(me)
+    local s = st.screen
+    if s == "board" then
+      call("GET", "/board", nil, function(ok2, b)
+        if gen == st.gen and ok2 then st.board = b.jobs end
+        done(ok2, b)
+      end)
+    elseif s == "fleet" then
+      call("GET", "/fleet", nil, function(ok2, f)
+        if gen == st.gen and ok2 then st.fleet = f end
+        done(ok2, f)
+      end)
+    else
+      done(true)
+    end
   end)
-end
-
--- Clears what came from the chain (or the demo), in memory and in storage.
-function reset_data()
-  st.me, st.board, st.my_jobs, st.my_offers, st.names, st.stats = nil, nil, nil, nil, {}, nil
-  st.updated, st.spark, st.jobs = nil, {}, nil
-  storage.remove("spark") storage.remove("jobs")
 end
 
 function restart_poll()
-  st.gen, st.busy, st.status, st.mockdata = st.gen + 1, nil, "starting", nil
-  stop_sign()
+  st.gen, st.status, st.mockdata = st.gen + 1, "starting", nil
+  st.me, st.board, st.fleet, st.updated, st.spark, st.jobs = nil, nil, nil, nil, {}, nil
+  storage.remove("spark")
+  storage.remove("jobs")
   if st.poll_id then timer.cancel(st.poll_id) end
-  st.poll_id = timer.every(POLL_MS, poll)
+  st.poll_id = timer.every(POLL_MS, function() poll() end)
   poll()
 end
 
@@ -979,21 +667,20 @@ function on_key(key)
   if st.anim then return true end
   if st.screen == "splash" and key ~= "back" then show("board") return true end
   if key == "back" then
-    if st.screen == "sign" then
-      local back = (st.sign or st.retry or {}).back or "request"
-      stop_sign()
-      st.retry = nil
-      show(back)
+    if st.screen == "meet" then
+      leave_meet()
+      show(st.pick and "job" or "board")
       return true
     end
-    if BACK[st.screen] then show(BACK[st.screen]) return true end
+    if st.screen == "job" then
+      local j = st.pick
+      st.pick = nil
+      show(j and j.mine and "myjobs" or (j and j.o and "myoffers") or "board")
+      return true
+    end
     return false
   end
-  if key == "select" and st.screen == "sign" and st.retry then
-    local s = st.retry
-    start_sign(s.action, s.row, s.back)
-    return true
-  end
+  if key == "select" and st.screen == "meet" then try_meet() return true end
   local k = tab_index()
   if k and (key == "left" or key == "right") then
     show(TABS[(k - 1 + (key == "right" and 1 or -1)) % #TABS + 1])
@@ -1014,7 +701,7 @@ function on_exit()
   if led then led.off() end
 end
 
--- Splash: the big rainbow bot, then Request an intro.
+-- Splash: the big rainbow bot, then the board.
 local function splash()
   st.screen = "splash"
   ui.clear()
@@ -1027,5 +714,7 @@ local function splash()
   end)
 end
 
+-- Wi-Fi first: the mesh takes the radio only on the We met screen.
+if mesh and mesh.pause then mesh.pause() end
 splash()
 restart_poll()
