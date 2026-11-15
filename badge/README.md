@@ -14,6 +14,8 @@ LEFT / RIGHT moves between screens. CANCEL goes back, or exits from a main scree
 
 - **Intro board** (opens here): "+ Request an intro" on top, then the newest jobs: who,
   company, bid, offers. SELECT a job to offer. After you offer, you see the requester's Telegram.
+- **Badge Fleet**: the "Badge Fleet MAV", every SOL paid to an introer through the escrow,
+  and how many intros were paid. Read from the chain.
 - **Request an intro**: who, company, bid, Telegram (remembered), then one QR to pay.
   "Your Telegram is shown to people who offer."
 - **My jobs**: your jobs. Open: the offer pool (name, jobs done, earned); SELECT one to

@@ -155,6 +155,8 @@ check(big.a[1] == "12345678901" and big.a[2] == "12345678902" and big.b == 5 and
 print("-- chain: " .. RPC_URL .. "   relay: " .. RELAY_URL .. (CAN_TIME and "   (time travel)" or ""))
 check(account(escrow.config_pda()) ~= nil and account(escrow.board_pda()) ~= nil,
   "config and board made by init_config (upgrade authority " .. b58e(admin.pub):sub(1, 6) .. "..)")
+local function stats() return escrow.decode_stats(account(escrow.stats_pda())) end
+check(stats() and stats().paid == "0" and stats().jobs == 0, "stats made by init_stats: nothing paid yet")
 
 -- Introers register.
 must("register_introer (Ana)", escrow.ix_register(ana.pub, "E2E-0001", "Ana"), ana)
@@ -215,12 +217,15 @@ refused("mark_made by an introer not picked refused", escrow.ix_mark_made(J1), k
 refused("cancel after approving refused", escrow.ix_cancel_job(J1), req1, "BadStatus")
 must("mark_made", escrow.ix_mark_made(J1), ana)
 check(job_at(J1).status == escrow.MADE, "made: waiting for confirm")
-local before, ab = introer_of(ana.pub), balance(ana.pub)
+local before, ab, fleet0 = introer_of(ana.pub), balance(ana.pub), stats()
 must("confirm", escrow.ix_confirm(J1, ana.pub), req1)
 local after = introer_of(ana.pub)
 check(diff(ab, balance(ana.pub)) == SOL // 2, "Ana paid exactly the bid (0.5 SOL)")
 check(after.jobs == before.jobs + 1 and after.earned == sol.add(before.earned, tostring(SOL // 2)), "jobs and earned rise")
 check(account(J1) == nil, "confirmed job closed")
+local fleet = stats()
+check(fleet.paid == sol.add(fleet0.paid, tostring(SOL // 2)) and fleet.jobs == fleet0.jobs + 1,
+  "Badge Fleet MAV: total paid rises by the bid")
 local kb = balance(ana.pub)
 must("close_offer (anyone, job closed)", escrow.ix_close_offer(J1, S1, ana.pub), req2)
 check(account(escrow.offer_pda(J1, S1, ana.pub)) == nil and diff(kb, balance(ana.pub)) > 0, "offer rent back to Ana")

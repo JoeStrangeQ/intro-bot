@@ -173,6 +173,7 @@ describe('relay', () => {
   it('refuses admin, removed v1 and unknown escrow instructions', async () => {
     const admin = {
       init_config: '17eb73e8a86001e7',
+      init_stats: 'cbbde5aef0be9e6e',
       set_admin: 'fba300345bc2bb5c',
       set_paused: '5b3c7dc0b0e1a6da',
       set_cap: 'd1cf79817327dc04',

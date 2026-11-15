@@ -204,6 +204,9 @@ end
 local function enc_offer(job, introer)
   return disc("Offer") .. job .. introer .. u64(1) .. string.pack("<i8", NOW) .. string.char(253)
 end
+local function enc_stats(paid, jobs)
+  return disc("Stats") .. u64(paid) .. u64(jobs) .. string.char(251) .. string.rep("\0", 64)
+end
 -- jobs oldest first.
 local function enc_board(jobs)
   local slots, head = ring(jobs, 64)
@@ -685,6 +688,15 @@ list_select(1)
 check(last_toast() == "Register in Profile first", "offer needs a profile")
 key("back")
 
+-- Badge Fleet MAV: total paid, from the Stats account.
+CHAIN[b58e(escrow.stats_pda())] = enc_stats("2500000000", 4)
+go("Badge Fleet"); advance(20000)
+check(has("Badge Fleet MAV") and has("2.5 SOL") and has("4 intros paid") and has("Robots that earn"),
+  "fleet: total paid and intros")
+CHAIN[b58e(escrow.stats_pda())] = enc_stats("3000000000", 5)
+advance(20000)
+check(has("3 SOL") and has("5 intros paid"), "fleet: updates on the next poll")
+
 -- Register as an introer.
 go("Profile"); advance(20000)
 check(has("Not an introer yet") and has("demo value"), "profile: not an introer")
@@ -748,8 +760,8 @@ check(has("Picked: Ana") and W.lists[1].rows[1].title == "Confirm + pay", "appro
 list_select(1)
 m = relay_reply(true)
 ix = m.ixs[1]
-check(same(ix.accounts, {m.keys[1], MYJOB, escrow.introer_pda(OTHER), OTHER}) and m.w[OTHER]
-  and m.w[escrow.introer_pda(OTHER)] and ix.data == escrow.DISC.confirm, "confirm: pays the picked introer")
+check(same(ix.accounts, {m.keys[1], MYJOB, escrow.introer_pda(OTHER), OTHER, escrow.stats_pda()}) and m.w[OTHER]
+  and m.w[escrow.introer_pda(OTHER)] and m.w[escrow.stats_pda()] and ix.data == escrow.DISC.confirm, "confirm: pays the picked introer")
 key("back")
 -- Made long ago: refund my own job, the signer twice as one key.
 put_job({requester = ME, nonce = nonce, bid = "12500000000", status = 2, approved = OTHER, made_at = NOW - 73 * 3600,
@@ -839,6 +851,8 @@ check(W.store.wallet == nil and last_toast() == "Wallet cleared", "wallet cleare
 new_world({store = {mock = "true"}})
 advance(1600)
 check(#W.rpcq == 0, "demo: no rpc")
+go("Badge Fleet")
+check(has("12.4 SOL") and has("31 intros paid"), "demo fleet")
 go("Intro board")
 check(#W.lists[1].rows >= 5, "demo board")
 list_select(2)

@@ -12,7 +12,7 @@ use anchor_lang::{
     AccountDeserialize, Discriminator, InstructionData, ToAccountMetas,
 };
 use intro_escrow::{
-    accounts as acc, instruction as ix, Board, Config, Introer, Job, Offer, BOARD_LEN,
+    accounts as acc, instruction as ix, Board, Config, Introer, Job, Offer, Stats, BOARD_LEN,
     CANCEL_DELAY, CONFIRM_WINDOW, LAMPORTS_PER_SOL as SOL, MAX_BID, MIN_BID, OFFER_RING,
     STATUS_APPROVED, STATUS_MADE, STATUS_OPEN, TEXT_LEN, WORK_WINDOW,
 };
@@ -38,6 +38,10 @@ fn pda(seeds: &[&[u8]]) -> Pubkey {
 
 fn config_key() -> Pubkey {
     pda(&[b"config"])
+}
+
+fn stats_key() -> Pubkey {
+    pda(&[b"stats"])
 }
 
 fn board_key() -> Pubkey {
@@ -177,6 +181,18 @@ fn init_config_ix(authority: Pubkey) -> Instruction {
     )
 }
 
+fn init_stats_ix(admin: Pubkey) -> Instruction {
+    build(
+        acc::InitStats {
+            admin,
+            config: config_key(),
+            stats: stats_key(),
+            system_program: anchor_lang::system_program::ID,
+        },
+        ix::InitStats {},
+    )
+}
+
 fn register_ix(wallet: Pubkey, name: Text) -> Instruction {
     build(
         acc::RegisterIntroer {
@@ -277,6 +293,7 @@ fn confirm_ix(requester: Pubkey, job: Pubkey, wallet: Pubkey) -> Instruction {
             job,
             introer: introer_key(&wallet),
             wallet,
+            stats: stats_key(),
         },
         ix::Confirm {},
     )
@@ -344,6 +361,7 @@ impl T {
         let mut svm = chain(Some(admin.pubkey()));
         svm.airdrop(&admin.pubkey(), 10 * SOL).unwrap();
         send(&mut svm, &admin, init_config_ix(admin.pubkey())).unwrap();
+        send(&mut svm, &admin, init_stats_ix(admin.pubkey())).unwrap();
         Self {
             svm,
             admin,
@@ -372,6 +390,10 @@ impl T {
 
     fn config(&self) -> Config {
         read(&self.svm, &config_key())
+    }
+
+    fn stats(&self) -> Stats {
+        read(&self.svm, &stats_key())
     }
 
     fn board(&self) -> Board {
@@ -758,6 +780,8 @@ fn happy_path_pays_the_approved_introer_and_returns_rent() {
     assert_eq!(t.lamports(&requester.pubkey()), before - 2 * SOL - 3 * FEE);
     let stats = t.introer(&bo.pubkey());
     assert_eq!((stats.jobs_done, stats.earned), (1, 2 * SOL));
+    let fleet = t.stats();
+    assert_eq!((fleet.paid, fleet.jobs), (2 * SOL, 1));
     assert_eq!(t.introer(&ana.pubkey()).jobs_done, 0);
 
     // Offers close afterwards, rent to each introer.
@@ -787,6 +811,42 @@ fn confirm_works_from_approved_but_not_open() {
     t.approve(&requester, job, ana.pubkey()).unwrap();
     t.confirm(&requester, job, ana.pubkey()).unwrap();
     assert_eq!(t.introer(&ana.pubkey()).jobs_done, 1);
+}
+
+#[test]
+fn init_stats_is_admin_only_and_runs_once() {
+    let mut t = T::new();
+    let fleet = t.stats();
+    assert_eq!((fleet.paid, fleet.jobs), (0, 0));
+    // Already made in `with_admin`.
+    let admin = t.admin.insecure_clone();
+    assert!(t.run(&admin, init_stats_ix(admin.pubkey())).is_err());
+    // A fresh chain: only the admin can make it.
+    let mut svm = chain(Some(admin.pubkey()));
+    svm.airdrop(&admin.pubkey(), 10 * SOL).unwrap();
+    send(&mut svm, &admin, init_config_ix(admin.pubkey())).unwrap();
+    let other = funded(&mut svm, 1);
+    fails(
+        send(&mut svm, &other, init_stats_ix(other.pubkey())),
+        "Unauthorized",
+    );
+    send(&mut svm, &admin, init_stats_ix(admin.pubkey())).unwrap();
+}
+
+#[test]
+fn confirm_needs_the_real_stats_account() {
+    let mut t = T::new();
+    let requester = t.user(20);
+    let ana = t.introer_named("Ana");
+    let job = t.post(&requester, SOL);
+    t.offer(&ana, job).unwrap();
+    t.approve(&requester, job, ana.pubkey()).unwrap();
+    let mut ix = confirm_ix(requester.pubkey(), job, ana.pubkey());
+    let last = ix.accounts.len() - 1;
+    ix.accounts[last].pubkey = config_key();
+    assert!(t.run(&requester, ix).is_err());
+    t.confirm(&requester, job, ana.pubkey()).unwrap();
+    assert_eq!(t.stats().jobs, 1);
 }
 
 // ---------- post / cancel ----------
@@ -1459,7 +1519,10 @@ fn write_instruction_fixtures() {
     let (i, r) = (introer.pubkey(), requester.pubkey());
     let job = |nonce: u64| job_key(&r, nonce);
     // init_config already ran in `with_admin`; record the same instruction.
-    let mut out: Vec<(&str, Instruction)> = vec![("init_config", init_config_ix(admin.pubkey()))];
+    let mut out: Vec<(&str, Instruction)> = vec![
+        ("init_config", init_config_ix(admin.pubkey())),
+        ("init_stats", init_stats_ix(admin.pubkey())),
+    ];
     let mut go = |t: &mut T, name: &'static str, payer: &Keypair, ix: Instruction| {
         t.run(payer, ix.clone()).unwrap();
         out.push((name, ix));
@@ -1578,8 +1641,9 @@ fn write_instruction_fixtures() {
         )
     };
     let accounts = format!(
-        "{{\n  \"config\": {},\n  \"board\": {},\n  \"introer\": {},\n  \"job\": {},\n  \"offer\": {}\n}}\n",
+        "{{\n  \"config\": {},\n  \"stats\": {},\n  \"board\": {},\n  \"introer\": {},\n  \"job\": {},\n  \"offer\": {}\n}}\n",
         dump(config_key()),
+        dump(stats_key()),
         dump(board_key()),
         dump(introer_key(&i)),
         dump(job(5)),

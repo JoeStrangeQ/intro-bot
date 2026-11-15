@@ -11,7 +11,7 @@ import { sha256 } from '@noble/hashes/sha2';
 export const PROGRAM_ID = 'GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC';
 const PROGRAM = bs58.decode(PROGRAM_ID);
 // User-facing escrow instructions (spec v2) by Anchor discriminator, from
-// idl/intro_escrow.json. Admin ones (init_config, set_paused,
+// idl/intro_escrow.json. Admin ones (init_config, init_stats, set_paused,
 // propose_admin, accept_admin, cancel_admin_proposal) are refused.
 export const ALLOWED_IX: Record<string, string> = {
   '7bdef1c58acb8cf2': 'register_introer',

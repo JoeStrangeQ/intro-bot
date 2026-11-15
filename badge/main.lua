@@ -16,10 +16,10 @@ local C = {
   desk = 0xC9BFF2, brand = 0x6A50D8, ink = 0x241A52, paper = 0xF6F3FD,
   orange = 0xA8521A, white = 0xFFFFFF, dim = 0x6E6496, line = 0xDCD5F7,
 }
-local TABS = {"board", "request", "myjobs", "myoffers", "profile"}
-local IS_TAB = {request = true, board = true, myjobs = true, myoffers = true, profile = true}
+local TABS = {"board", "fleet", "request", "myjobs", "myoffers", "profile"}
+local IS_TAB = {request = true, board = true, fleet = true, myjobs = true, myoffers = true, profile = true}
 local TITLE = {
-  request = "Request an intro", board = "Intro board", myjobs = "My jobs", myoffers = "My offers",
+  request = "Request an intro", board = "Intro board", fleet = "Badge Fleet", myjobs = "My jobs", myoffers = "My offers",
   profile = "Profile", job = "Job", myjob = "My job", offerjob = "My offer", sign = "Sign on phone"
 }
 local TABHINT = "LEFT/RIGHT screens   CANCEL exit"
@@ -63,7 +63,7 @@ local st = {
   my_jobs = nil,       -- rows for st.mine
   my_offers = nil,     -- rows for st.offered ({closed = true} once the job is gone)
   names = {},          -- [introer wallet] = Introer (or false), for offer pools
-  read_at = {board = {t = -1e9}, myjobs = {t = -1e9}, myoffers = {t = -1e9}},  -- last read, per tab
+  read_at = {board = {t = -1e9}, fleet = {t = -1e9}, myjobs = {t = -1e9}, myoffers = {t = -1e9}},  -- last read, per tab
   status = "starting", updated = nil, busy = nil, gen = 0,
   screen = nil, w = {}, pick = nil, sign = nil, retry = nil, anim = nil,
   modal = nil, pending = nil, dirty = nil, ago = 0, mockdata = nil,
@@ -716,8 +716,33 @@ end
 
 -- Screens ------------------------------------------------------------------
 
+-- Badge Fleet MAV: every SOL paid to an introer through the escrow -----------
+
+local DEMO_STATS = {paid = "12400000000", jobs = 31}
+
+local function refresh_fleet()
+  local w, f = st.w, st.stats
+  if not w.mav then return end
+  w.mav:text(f and (sol.format(f.paid, 3) .. " SOL") or "-- SOL")
+  w.jobs:text(f and (f.jobs .. (f.jobs == 1 and " intro paid" or " intros paid")) or ago_text())
+end
+
+local function build_fleet()
+  frame("fleet")
+  art.logo(14, 32, 3)
+  ui.label(60, 34, "Badge Fleet MAV", {size = 14, color = C.brand})
+  ui.label(60, 52, "Total paid to introers", {size = 12, color = C.dim})
+  st.w.mav = ui.label(14, 80, "", {size = 32, color = C.ink, w = 292, align = "center"})
+  st.w.jobs = ui.label(14, 120, "", {size = 14, color = C.brand, w = 292, align = "center"})
+  center(146, "Every SOL paid to an introer, on-chain.", 12, C.dim)
+  ui.rect(5, 174, 310, 1, {color = C.line})
+  center(180, CTA, 14, C.orange)
+  ui.hint(TABHINT)
+  refresh_fleet()
+end
+
 local BUILD = {
-  request = build_request, board = build_board, myjobs = build_myjobs, myoffers = build_myoffers,
+  request = build_request, board = build_board, fleet = build_fleet, myjobs = build_myjobs, myoffers = build_myoffers,
   profile = build_profile, job = build_job, myjob = build_myjob, offerjob = build_offerjob,
   sign = build_sign,
 }
@@ -785,6 +810,7 @@ local function refresh()
   local s = st.screen
   if s == "profile" then refresh_profile()
   elseif s == "board" then refresh_jobs(st.board, "board", build_board)
+  elseif s == "fleet" then refresh_fleet()
   elseif s == "myjobs" then refresh_jobs(st.my_jobs, "requester", build_myjobs)
   elseif s == "myoffers" then refresh_jobs(st.my_offers, "introer", build_myoffers) end
 end
@@ -894,6 +920,7 @@ function poll(force)
     local me = {}
     for k, v in pairs(d.me) do me[k] = v end
     st.board, st.my_jobs, st.my_offers = d.board, demo.mine(d), demo.my_offers(d)
+    st.stats = DEMO_STATS
     if not force then got_me(me) else st.me = me end
     return finish()
   end
@@ -906,6 +933,14 @@ function poll(force)
   local function rest()
     local s = st.screen
     if s == "board" or s == "job" then read_board(gen)
+    elseif s == "fleet" then
+      chain.account(escrow.stats_pda(), function(ok, b)
+        if gen ~= st.gen then return end
+        if not ok then return fail(b) end
+        st.stats = escrow.decode_stats(b) or {paid = "0", jobs = 0}
+        st.read_at.fleet.t = sys.millis()
+        finish()
+      end)
     elseif (s == "myjobs" or s == "myjob") and st.wallet then read_mine(gen)
     elseif (s == "myoffers" or s == "offerjob") and st.wallet then read_offers(gen)
     else finish() end
@@ -921,7 +956,7 @@ end
 
 -- Clears what came from the chain (or the demo), in memory and in storage.
 function reset_data()
-  st.me, st.board, st.my_jobs, st.my_offers, st.names = nil, nil, nil, nil, {}
+  st.me, st.board, st.my_jobs, st.my_offers, st.names, st.stats = nil, nil, nil, nil, {}, nil
   st.updated, st.spark, st.jobs = nil, {}, nil
   storage.remove("spark") storage.remove("jobs")
 end
