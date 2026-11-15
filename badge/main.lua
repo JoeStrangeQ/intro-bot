@@ -27,14 +27,43 @@ local LABEL = {
 local STATUS = {pending = "Unpaid", open = "Open", approved = "Picked", made = "Made", closed = "Closed"}
 local TABHINT = "LEFT/RIGHT screens   CANCEL home"
 -- LEDs while the app is open: the logo's rainbow bands across the top (1..6, same
--- order), brand purple on the right edge (7..8).
+-- order), lavender on the right edge (7..8). LEFT runs a flicker left to right,
+-- RIGHT right to left; the home screen keeps it running.
 local BANDS = {0x61BB46, 0xFDB827, 0xF5821F, 0xE03A3E, 0x963D97, 0x009DDC}
-local function brand_led()
+local SIDE = 0xC9BFF2
+local STEP_MS = 70
+local sweep = nil   -- {dir = 1 | -1, t = ms, loop = bool}
+
+local function led_set(i, c)
+  led.set(i, c >> 16, (c >> 8) & 0xFF, c & 0xFF)
+end
+
+-- `dark`: the top light (1..6) shown off for this frame of a flicker.
+local function brand_led(dark)
   if not led then return end
   for i = 1, led.count or 8 do
-    local c = BANDS[i] or 0x6A50D8
-    led.set(i, c >> 16, (c >> 8) & 0xFF, c & 0xFF)
+    led_set(i, i == dark and 0 or (BANDS[i] or SIDE))
   end
+end
+
+local function flicker(dir, loop)
+  sweep = {dir = dir, t = 0, loop = loop}
+  brand_led(dir == 1 and 1 or #BANDS)
+end
+
+local function sweep_tick(ms)
+  if not sweep then return end
+  sweep.t = sweep.t + ms
+  local k = sweep.t // STEP_MS + 1
+  if k > #BANDS then
+    if sweep.loop then sweep.t = 0 k = 1 else sweep = nil return brand_led() end
+  end
+  brand_led(sweep.dir == 1 and k or #BANDS + 1 - k)
+end
+
+local function still()
+  sweep = nil
+  brand_led()
 end
 
 local CTA = "Robots that earn: botbotcap.com"
@@ -714,7 +743,7 @@ end
 function on_key(key)
   if st.anim then return true end
   if st.screen == "splash" then
-    if key == "select" then show("board") return true end
+    if key == "select" then still() show("board") return true end
     return key ~= "back"
   end
   if key == "back" then
@@ -729,11 +758,12 @@ function on_key(key)
       show(j and j.mine and "myjobs" or (j and j.o and "myoffers") or "board")
       return true
     end
-    if IS_TAB[st.screen] then show("splash") return true end
+    if IS_TAB[st.screen] then show("splash") flicker(1, true) return true end
     return false
   end
   if key == "select" and st.screen == "meet" then try_meet() return true end
   local k = tab_index()
+  if key == "left" then flicker(1) elseif key == "right" then flicker(-1) end
   if k and (key == "left" or key == "right") then
     show(TABS[(k - 1 + (key == "right" and 1 or -1)) % #TABS + 1])
   end
@@ -742,6 +772,7 @@ end
 
 function on_tick(ms)
   if st.anim then return anim_tick(ms) end
+  sweep_tick(ms)
   st.ago = st.ago + ms
   if st.ago >= 1000 then
     st.ago = st.ago - 1000
@@ -778,6 +809,6 @@ BUILD.splash = splash
 
 -- Wi-Fi first: the mesh takes the radio only on the We met screen.
 if mesh and mesh.pause then mesh.pause() end
-brand_led()
 splash()
+flicker(1, true)
 restart_poll()
