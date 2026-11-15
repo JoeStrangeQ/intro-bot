@@ -272,6 +272,11 @@ local function watch()
   local s = st.sign
   if not s then return end
   if sys.millis() - s.started > WATCH_FOR then return sign_failed(s, "Nothing landed in 10 min.") end
+  -- Still nothing after 90 s: most often the wallet is short of SOL.
+  if not s.warned and sys.millis() - s.started > 90000 and st.screen == "sign" then
+    s.warned = true
+    sign_text("Not on chain yet", "Check your wallet", "has enough SOL.")
+  end
   if not s.addr then
     -- No wallet yet: ask the relay who scanned, then watch the real address.
     return chain.who(s.id, function(wallet)
@@ -639,7 +644,7 @@ local reset_data, restart_poll  -- forward
 
 local function profile_items()
   return {
-    {title = "My wallet", sub = st.wallet and "from your first payment" or "set by your first payment",
+    {title = "My wallet", sub = st.wallet and "SELECT to use another" or "set by your first payment",
       right = st.wallet and sol.short(st.wallet) or ""},
     {title = st.me and "Update my name" or "Register as an introer", sub = "sign on your phone"},
     {title = "Demo mode", sub = "pretend chain, no network", right = st.mock and "ON" or "OFF"},
@@ -682,7 +687,16 @@ local function build_profile()
   local list
   list = ui.list(6, 112, 308, 64, profile_items(), {on_select = function(i)
     if i == 1 then
-      ui.toast(st.wallet and st.wallet or "Pay or register once: the badge learns it")
+      if not st.wallet then return ui.toast("Pay or register once: the badge learns it") end
+      confirm("Use another wallet? Your next payment sets it.", function(yes)
+        if not yes then return end
+        st.wallet, st.mine, st.offered = nil, {}, {}
+        storage.remove("wallet") storage.remove("mine") storage.remove("offered")
+        reset_data()
+        restart_poll()
+        show("profile")
+        ui.toast("Wallet cleared")
+      end)
     elseif i == 2 then
       ask_name()
     else

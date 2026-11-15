@@ -830,6 +830,10 @@ scanned_by(WALLET); flush()
 advance(6000)
 check(last_toast() == "Register: done" and W.store.wallet == json.encode(WALLET), "registered; wallet learned")
 flush()
+go("Profile"); list_select(1)
+check(W.confirm, "change wallet asks first")
+local yes = W.confirm; W.confirm = nil; callback(yes, true); flush()
+check(W.store.wallet == nil and last_toast() == "Wallet cleared", "wallet cleared; next payment sets it")
 
 -- Demo mode: no network, every screen.
 new_world({store = {mock = "true"}})
