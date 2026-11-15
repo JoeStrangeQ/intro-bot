@@ -18,7 +18,7 @@ LEFT / RIGHT moves between screens. CANCEL goes back, or exits from a main scree
   pay the bid.
 - **My jobs**: your jobs. Approve an offer, cancel, "We met", confirm, or refund.
 - **My offers**: jobs you offered on. When picked: "We met", then "Intro made".
-- **Profile**: register as an introer (free), machine value (a demo value), demo mode.
+- **Profile**: your Telegram and machine value. No sign-up: everyone can request and offer.
 
 "We met": both badges open it on the job and the introer or requester presses SELECT. The
 badges sign a mesh meet; the server marks the job met. When a job you made is confirmed,

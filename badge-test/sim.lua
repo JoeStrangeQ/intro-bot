@@ -13,6 +13,7 @@ end
 
 -- JSON ---------------------------------------------------------------------
 local json = {}
+local FLOATS = os.getenv("FLOATS") == "1"
 do
   local function enc(v)
     local t = type(v)
@@ -75,6 +76,8 @@ do
       else
         local n = s:match("^-?[%d%.eE+-]+", i)
         i = i + #n
+        -- The badge's JSON may hand back floats (100.0); json.floats mimics that.
+        if json.floats then return tonumber(n) + 0.0 end
         return math.tointeger(tonumber(n)) or tonumber(n)
       end
     end
@@ -132,7 +135,12 @@ local function new_badge(name, id, user)
     B.timers[B.tid] = {at = B.now + ms, f = f, every = every}
     return B.tid
   end
-  env.json = json
+  env.json = FLOATS and {encode = json.encode, decode = function(t)
+    json.floats = true
+    local v, e = json.decode(t)
+    json.floats = false
+    return v, e
+  end} or json
   env.ui = {
     W = 320, H = 218,
     clear = function() B.objs, B.labels, B.list = 0, {}, nil end,
@@ -184,11 +192,14 @@ local function new_badge(name, id, user)
     post = function(url, body, cb) request("POST", url, body, cb) end,
   }
   env.lamps = {
+    balance = function(cb) schedule(1, function() cb(true, 100) end) end,
     deposit = function(addr, amount, memo, cb)
+      if B.deny then B.denied = amount return schedule(1, function() cb(false, B.deny) end) end
       check(addr == "ESC-GQD4T2WC", name .. ": deposits go to the app escrow")
       check(math.type(amount) == "integer" and amount <= 500, name .. ": whole bid within 500")
       local r = fake("/test/deposit", {user = user, badge = id, amount = amount, memo = memo})
       B.deposits = (B.deposits or 0) + 1
+      B.last_amount = amount
       schedule(1, function() cb(true, {balance = 1000, id = r.id}) end)
     end,
   }
@@ -299,13 +310,10 @@ run(A, 2000) run(I, 2000)
 check(has(A, "No requests yet"), "empty board at start")
 check(A.mesh == false, "mesh paused at start: Wi-Fi first")
 
--- Introer registers (free).
+-- No sign-up: every badge can request and offer.
 tab(I, "profile")
-check(has(I, "Not an introer yet"), "introer not registered yet")
-pick(I, "Register as an introer", {"Ana"})
-check(last_toast(I) == "Saved", "register saved")
-run(I, 300)
-check(has(I, "Ana"), "profile shows the name")
+check(has(I, "Offer on a job to start earning"), "no register step")
+check(not has(I, "Register"), "no register row")
 
 -- Requester posts a job and pays the bid into the escrow.
 pick(A, "+ Request an intro", {"Toly", "Solana", "5"})
@@ -313,6 +321,7 @@ check(last_toast(A) == "10 to 500 !LAMPs", "bid under 10 refused")
 pick(A, "+ Request an intro", {"Toly", "Solana", "50", "reqtg"})
 run(A, 500)
 check(A.deposits == 1, "one deposit")
+check(A.last_amount == 50 and math.type(A.last_amount) == "integer", "deposit amount is a whole number")
 check(last_toast(A) == "Posted!", "posted after the deposit: " .. last_toast(A))
 check(item(A, "Toly @ Solana") ~= nil, "my jobs lists the job")
 
@@ -322,7 +331,7 @@ check(item(I, "Toly @ Solana") ~= nil, "board lists the job")
 pick(I, "Toly @ Solana")
 run(I, 300)
 check(has(I, "Telegram shown after you offer."), "telegram hidden before offering")
-pick(I, "Offer to make this intro")
+pick(I, "Offer to make this intro", {"ana"})
 run(I, 300)
 check(has(I, "@reqtg"), "telegram shown after offering")
 
@@ -330,8 +339,8 @@ check(has(I, "@reqtg"), "telegram shown after offering")
 run(A, 20000)
 pick(A, "Toly @ Solana")
 run(A, 300)
-pick(A, "Approve Ana")
-check(has(A, "Picked: Ana"), "approved Ana")
+pick(A, "Approve @ana")
+check(has(A, "Picked: @ana"), "approved @ana")
 check(item(A, "Confirm") ~= nil and item(A, "We met") ~= nil, "requester can confirm or meet")
 
 -- Introer can't mark made before meeting.
@@ -391,22 +400,19 @@ run(A, 300)
 pays = json.decode(sh("curl -s " .. q(FAKE .. "/test/pays")))
 check(pays and pays[2] and pays[2].to == "REQ001" and pays[2].amount == 20, "cancel refunded 20")
 
+-- A refused deposit shows the OS's own words and leaves the job unpaid.
+A.deny = "denied"
+tab(A, "board")
+run(A, 300)
+pick(A, "+ Request an intro", {"Raj", "Solana", "100"})
+run(A, 500)
+check(A.denied == 100 and math.type(A.denied) == "integer", "denied deposit got a whole 100")
+check(last_toast(A) == "Not paid: denied", "raw reason shown: " .. last_toast(A))
+A.deny = nil
+
 -- Unsigned calls are refused.
 local raw = sh("curl -s -o /dev/null -w '%{http_code}' " .. q((os.getenv("LOCAL") or "http://127.0.0.1:8791") .. "/api/board"))
 check(raw == "401", "unsigned request refused: " .. raw)
-
--- Demo mode needs no network.
-local D = new_badge("demo", "DEM001", "u-demo")
-run(D, 2000)
-tab(D, "profile")
-local before = D.calls
-pick(D, "Demo mode")
-run(D, 500)
-tab(D, "board")
-check(item(D, "Mert @ Helius") ~= nil, "demo board")
-tab(D, "fleet")
-check(has(D, "1240 !LAMPs"), "demo fleet")
-check(D.calls == before, "demo makes no calls")
 
 print(string.format("%d passed, %d failed", passes, fails))
 os.exit(fails == 0 and 0 or 1)

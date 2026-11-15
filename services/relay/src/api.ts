@@ -87,7 +87,7 @@ function text(v: unknown, what: string): string {
   return s.slice(0, TEXT);
 }
 
-/** Machine value, as on the badge: earned × 0.8 × wear (demo value). */
+/** Machine value, as on the badge: earned × 0.8 × wear */
 export function machineValue(i: Introer, now: number): number {
   const days = Math.floor((now - i.created) / 86_400_000); // whole days, as on the badge before
   return Math.floor(i.earned * 0.8 * Math.max(0.5, 1 - 0.01 * days));
@@ -161,7 +161,6 @@ export class App {
   acts(j: Job, user: string): string[] {
     const t = this.now();
     const out: string[] = [];
-    const reg = !!this.s.introers[user];
     if (j.requester === user) {
       if (j.status === 'pending') out.push('pay');
       if (j.status === 'open') out.push('cancel');
@@ -174,7 +173,7 @@ export class App {
         if (j.status === 'approved') out.push(j.met ? 'made' : 'meet');
         else if (j.status === 'made' && !j.met) out.push('meet');
       } else if (j.status === 'open') out.push('withdraw');
-    } else if (j.status === 'open' && reg) out.push('offer');
+    } else if (j.status === 'open') out.push('offer');
     return out;
   }
 
@@ -242,7 +241,7 @@ export class App {
     return { id, memo: memo(id), bid };
   }
 
-  async act(c: Caller, id: string, act: string, body: { n?: unknown }) {
+  async act(c: Caller, id: string, act: string, body: { n?: unknown; name?: unknown }) {
     this.seen(c);
     const j = this.get(id);
     if (act === 'paid') {
@@ -264,6 +263,11 @@ export class App {
     if (act === 'offer') {
       if (j.offers.length >= MAX_OFFERS) throw new Err(409, 'this job is full');
       j.offers.push(c.user);
+      // Everyone is an introer: the first offer makes the profile, named by Telegram.
+      if (!this.s.introers[c.user]) {
+        const name = typeof body.name === 'string' && body.name.trim() ? text(body.name, 'name') : 'introer';
+        this.s.introers[c.user] = { user: c.user, badge: c.badge, name, jobs: 0, earned: 0, created: this.now() };
+      }
     } else if (act === 'withdraw') {
       j.offers = j.offers.filter((u) => u !== c.user);
     } else if (act === 'made') {

@@ -108,10 +108,10 @@ describe('the intro flow', () => {
   it('offer, approve, meet, made, confirm pays the introer and the Fleet MAV', async () => {
     const s = setup();
     const id = await openJob(s, 100);
-    await expect(s.app.act(INT, id, 'offer', {})).rejects.toThrow(/offer/); // not registered
-    s.app.register(INT, { name: 'Ana' });
     expect(s.app.job(INT, id).tg).toBeUndefined();
-    await s.app.act(INT, id, 'offer', {});
+    expect(s.app.me(INT).reg).toBe(false);
+    await s.app.act(INT, id, 'offer', { name: 'Ana' }); // no sign-up: the first offer makes the introer
+    expect(s.app.me(INT).name).toBe('Ana');
     expect(s.app.job(INT, id).tg).toBe('@req');
     expect(s.app.job(REQ, id).pool).toEqual([{ name: 'Ana', jobs: 0, earned: 0 }]);
     await expect(s.app.act(OTHER, id, 'approve', { n: 0 })).rejects.toThrow();
@@ -136,8 +136,7 @@ describe('the intro flow', () => {
   it('requester can confirm before made', async () => {
     const s = setup();
     const id = await openJob(s);
-    s.app.register(INT, { name: 'Ana' });
-    await s.app.act(INT, id, 'offer', {});
+    await s.app.act(INT, id, 'offer', { name: 'Ana' });
     await s.app.act(REQ, id, 'approve', { n: 0 });
     await s.app.act(REQ, id, 'confirm', {});
     expect(s.app.fleet().jobs).toBe(1);
@@ -146,8 +145,7 @@ describe('the intro flow', () => {
   it('cancel refunds an open job; withdraw removes an offer', async () => {
     const s = setup();
     const id = await openJob(s, 20);
-    s.app.register(INT, { name: 'Ana' });
-    await s.app.act(INT, id, 'offer', {});
+    await s.app.act(INT, id, 'offer', { name: 'Ana' });
     await s.app.act(INT, id, 'withdraw', {});
     expect(s.app.s.jobs[id]?.offers).toEqual([]);
     await expect(s.app.act(INT, id, 'cancel', {})).rejects.toThrow();
@@ -158,8 +156,7 @@ describe('the intro flow', () => {
   it('refund opens after 7 days approved, and auto-refunds 72 h later', async () => {
     const s = setup();
     const id = await openJob(s);
-    s.app.register(INT, { name: 'Ana' });
-    await s.app.act(INT, id, 'offer', {});
+    await s.app.act(INT, id, 'offer', { name: 'Ana' });
     await s.app.act(REQ, id, 'approve', { n: 0 });
     await expect(s.app.act(REQ, id, 'refund', {})).rejects.toThrow();
     s.at(WORK + 1);

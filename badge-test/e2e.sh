@@ -13,4 +13,4 @@ DATA_DIR=$DATA PORT=8791 TICK_MS=300 BADGE_API=http://127.0.0.1:8790 \
 SERVER_PID=$!
 trap 'kill $FAKE_PID $SERVER_PID 2>/dev/null; rm -rf "$DATA"' EXIT
 for _ in $(seq 20); do curl -fs http://127.0.0.1:8791/health >/dev/null && break; sleep 0.2; done
-lua badge-test/sim.lua || { cat "$DATA/server.log"; exit 1; }
+FLOATS=${FLOATS:-1} lua badge-test/sim.lua || { cat "$DATA/server.log"; exit 1; }

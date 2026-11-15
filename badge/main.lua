@@ -3,7 +3,6 @@
 -- confirm to pay. The bid waits in the app's !LAMP escrow; our server (lib/api.lua) keeps the
 -- board and pays out. The badge holds no keys: the badge server signs who is asking.
 local api = require("lib.api")
-local demo = require("lib.demo")
 local art = require("lib.art")
 
 local ESCROW = "ESC-GQD4T2WC"
@@ -47,7 +46,6 @@ local function stored_spark()
 end
 
 local st = {
-  mock = storage.get("mock") == true,
   tg = type(storage.get("tg")) == "string" and storage.get("tg") or nil,
   spark = stored_spark(),
   jobs = math.tointeger(storage.get("jobs")),
@@ -57,17 +55,13 @@ local st = {
   pick = nil,      -- /jobs/<id> of the open job
   status = "starting", updated = nil, gen = 0,
   screen = nil, w = {}, anim = nil, modal = nil, pending = nil, dirty = nil, ago = 0,
-  mockdata = nil, meet = nil,
+  meet = nil,
 }
 
--- Calls: the server, or the demo -------------------------------------------
+-- Calls to the server ------------------------------------------------------
 
 local function call(method, path, body, cb)
-  if st.mock then
-    st.mockdata = st.mockdata or demo.new()
-    local ok, data = demo.call(st.mockdata, method, path, body)
-    timer.after(10, function() cb(ok, data) end)
-  elseif method == "GET" then
+  if method == "GET" then
     api.get(path, cb)
   else
     api.post(path, body, cb)
@@ -85,7 +79,7 @@ local function frame(name)
   ui.rect(5, 5, 310, 20, {color = C.brand})
   art.logo(8, 8, 1)
   ui.label(26, 7, TITLE[name], {size = 14, color = C.white})
-  local tag = st.mock and "DEMO" or (st.me and st.me.reg and st.me.name or "")
+  local tag = st.me and st.me.reg and st.me.name or ""
   ui.label(160, 9, tag, {size = 12, color = C.white, w = 150, align = "right"})
 end
 
@@ -144,17 +138,27 @@ end
 -- Paying: the OS asks the owner, then the server sees it in the escrow -----
 
 local function pay(id, bid)
+  if not lamps then return ui.toast("Needs the lamps permission") end
+  -- JSON numbers can come back as floats (100.0); the OS wants a whole number.
+  local amount = math.tointeger(tonumber(bid))
+  if not amount then return ui.toast("Bad bid") end
   local function sent(ok, res)
-    if not ok then return ui.toast("Not paid: " .. tostring(res)) end
+    if not ok then
+      ui.toast("Not paid: " .. tostring(res))
+      -- Tell the server exactly what the OS said (and the balance), for its logs.
+      lamps.balance(function(okb, bal)
+        call("POST", "/log", {what = "deposit", job = id, amount = amount, why = tostring(res),
+          balance = okb and bal or tostring(bal)}, function() end)
+      end)
+      return
+    end
     call("POST", "/jobs/" .. id .. "/paid", {deposit = res and res.id}, function(ok2, j)
       ui.toast(ok2 and j.st == "open" and "Posted!" or "Paid. On the board in a moment.")
       poll(true)
       show_later("myjobs")
     end)
   end
-  if st.mock then return sent(true, {id = "demo"}) end
-  if not lamps then return ui.toast("Needs the lamps permission") end
-  lamps.deposit(ESCROW, bid, "job " .. id, sent)
+  lamps.deposit(tostring(ESCROW), amount, "job " .. tostring(id), sent)
 end
 
 -- Request an intro ---------------------------------------------------------
@@ -183,7 +187,7 @@ local function ask_job()
         local function post(tg)
           call("POST", "/jobs", {who = who, co = co, tg = tg, bid = bid}, function(ok, r)
             if not ok then return ui.toast(tostring(r)) end
-            pay(r.id, r.bid)
+            pay(r.id, bid)
           end)
         end
         if st.tg then post(st.tg) else ask_tg(post) end
@@ -281,8 +285,9 @@ local function build_myoffers() build_jobs("myoffers", "introer", "No offers yet
 local function do_act(j, a, n)
   if a == "meet" then st.meet = {job = j.id} return show("meet") end
   if a == "pay" then return pay(j.id, j.bid) end
+  if a == "offer" and not st.tg then return ask_tg(function() do_act(j, a, n) end) end
   local function go()
-    call("POST", "/jobs/" .. j.id .. "/" .. a, {n = n}, function(ok, d)
+    call("POST", "/jobs/" .. j.id .. "/" .. a, {n = n, name = st.tg}, function(ok, d)
       if not ok then return ui.toast(tostring(d)) end
       ui.toast(a == "confirm" and CTA_PAID or (LABEL[a] or a) .. ": done")
       st.pick = d
@@ -345,8 +350,6 @@ local function build_job()
     line(178, "Meet them, badge to badge, then mark made.", C.orange)
   elseif j.mine and j.st == "made" then
     line(178, "Made? Confirm to pay. 72h, then refund.", C.orange)
-  elseif not j.mine and not j.tg and j.st == "open" and st.me and not st.me.reg then
-    line(178, "Register in Profile to offer.", C.orange)
   end
   ui.hint(#items > 0 and "SELECT choose   CANCEL back" or "CANCEL back")
 end
@@ -368,13 +371,12 @@ local function build_meet()
   st.w.m2 = center(118, "", 12, C.dim)
   center(150, "Signed by both badges. No Wi-Fi needed.", 12, C.dim)
   ui.hint("SELECT verify   CANCEL back")
-  if st.mock then return end
   if not mesh or not mesh.meet then return meet_text("This badge can't meet", "Update Solana OS") end
   if mesh.resume then mesh.resume() end
 end
 
 local function leave_meet()
-  if mesh and mesh.pause and not st.mock then mesh.pause() end
+  if mesh and mesh.pause then mesh.pause() end
   st.meet = nil
 end
 
@@ -397,10 +399,6 @@ end
 local function try_meet()
   local m = st.meet
   if not m then return end
-  if st.mock then
-    call("POST", "/jobs/" .. m.job .. "/meet", {}, function() met(m.job) end)
-    return
-  end
   if not mesh or not mesh.meet then return end
   local near
   for _, p in ipairs(mesh.nearby() or {}) do
@@ -450,10 +448,8 @@ end
 local restart_poll  -- forward
 
 local function profile_items()
-  local reg = st.me and st.me.reg
   return {
-    {title = reg and "Update my name" or "Register as an introer", sub = "free, no payment"},
-    {title = "Demo mode", sub = "pretend server, no network", right = st.mock and "ON" or "OFF"},
+    {title = "My Telegram", sub = "shown when you offer or request", right = st.tg or "not set"},
   }
 end
 
@@ -465,18 +461,18 @@ local function refresh_profile()
     w.stats:text(me.name .. "   jobs " .. me.jobs .. "   earned " .. lp(me.earned))
   else
     w.value:text("-- !LAMPs")
-    w.stats:text(me and "Not an introer yet" or ago_text())
+    w.stats:text(me and "Offer on a job to start earning" or ago_text())
   end
   draw_spark()
 end
 
-local function ask_name()
-  input("Your introer name", TEXT, function(name)
-    if not name or name:gsub("%s", "") == "" then return end
-    call("POST", "/introer", {name = name}, function(ok, me)
-      if not ok then return ui.toast(tostring(me)) end
-      st.me = me
-      ui.toast("Saved")
+-- The Telegram handle is also the introer name others see.
+local function edit_tg()
+  ask_tg(function(tg)
+    if not (st.me and st.me.reg) then return show_later("profile") end
+    call("POST", "/introer", {name = tg}, function(ok, me)
+      if ok then st.me = me end
+      ui.toast(ok and "Saved" or tostring(me))
       show_later("profile")
     end)
   end)
@@ -485,7 +481,7 @@ end
 local function build_profile()
   frame("profile")
   art.logo(12, 30, 2)
-  ui.label(44, 30, "machine value (demo value)", {size = 12, color = C.dim})
+  ui.label(44, 30, "machine value", {size = 12, color = C.dim})
   st.w.value = ui.label(44, 42, "", {size = 20, color = C.brand})
   ui.rect(14, 64, 100, 28, {color = C.line})
   st.w.spark = {}
@@ -493,16 +489,7 @@ local function build_profile()
   if ui.qr then ui.qr(232, 28, 76, SITE) end
   ui.label(226, 106, "botbotcap.com", {size = 12, color = C.dim, w = 88, align = "center"})
   st.w.stats = line(96, "", C.ink)
-  local list
-  list = ui.list(6, 120, 308, 56, profile_items(), {on_select = function(i)
-    if i == 1 then return ask_name() end
-    st.mock = not st.mock
-    storage.set("mock", st.mock)
-    restart_poll()
-    list:items(profile_items())
-    list:select(2)
-    ui.toast(st.mock and "Demo mode on" or "Demo mode off")
-  end})
+  ui.list(6, 120, 308, 30, profile_items(), {on_select = function() edit_tg() end})
   center(180, CTA, 14, C.orange)
   ui.hint("SELECT change   LEFT/RIGHT screens")
   refresh_profile()
@@ -617,7 +604,6 @@ local function got_me(me)
 end
 
 function poll(force)
-  if st.mock and st.mockdata and not force then demo.tick(st.mockdata) end
   st.gen = st.gen + 1
   local gen = st.gen
   local function done(ok, why)
@@ -648,7 +634,7 @@ function poll(force)
 end
 
 function restart_poll()
-  st.gen, st.status, st.mockdata = st.gen + 1, "starting", nil
+  st.gen, st.status = st.gen + 1, "starting"
   st.me, st.board, st.fleet, st.updated, st.spark, st.jobs = nil, nil, nil, nil, {}, nil
   storage.remove("spark")
   storage.remove("jobs")

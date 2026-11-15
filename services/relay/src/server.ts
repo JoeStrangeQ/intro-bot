@@ -32,6 +32,11 @@ export async function route(app: App, method: string, path: string, c: Caller, b
     if (a === 'jobs' && id && !act) return app.job(c, id);
   } else if (method === 'POST') {
     if (a === 'introer' && !id) return app.register(c, body);
+    if (a === 'log' && !id) {
+      // What the badge OS answered (e.g. a refused deposit), so it shows in the logs.
+      console.log('badge log', c.badge, c.user, JSON.stringify(body).slice(0, 300));
+      return { ok: true };
+    }
     if (a === 'jobs' && !id) return { ...app.post(c, body), esc: ESCROW };
     if (a === 'jobs' && id && act) return app.act(c, id, act, body);
   }

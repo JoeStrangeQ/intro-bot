@@ -7,7 +7,7 @@
    `lamps.deposit` (memo `job <id>`). The badge OS asks you to approve the payment.
 2. **Board.** Once the server sees the deposit in the escrow ledger, the job is listed.
    Unpaid jobs go away after 30 minutes.
-3. **Offer.** Registered introers offer (registering is free). Offering shows the
+3. **Offer.** Anyone can offer; no sign-up. The first offer makes your introer profile, named by your Telegram. Offering shows the
    requester's Telegram.
 4. **Approve.** The requester picks one offer.
 5. **We met.** Both open "We met" on the job and hold their badges close. The badges sign a
@@ -25,7 +25,7 @@ Max 3 live jobs per requester, 16 offers per job. A player can pay at most 500 !
 
 ## MAV
 
-- **Machine value** (an introer's, "demo value"): earned x 0.8 x wear, wear = 1 - 1% per day
+- **Machine value** (an introer's): earned x 0.8 x wear, wear = 1 - 1% per day
   (at least 0.5).
 - **Badge Fleet MAV**: total !LAMPs paid to introers, and how many intros were paid.
 
@@ -48,7 +48,7 @@ All under `https://relay.botbotcap.com/api`, signed by the badge server.
 | `GET /me` | introer profile, machine value, my jobs, my offers |
 | `GET /fleet` | `{paid, jobs}`: the Badge Fleet MAV |
 | `GET /jobs/<id>` | one job, what I may do (`acts`), the offer pool for the requester |
-| `POST /introer {name}` | register or rename |
+| `POST /introer {name}` | rename (the first offer creates the introer) |
 | `POST /jobs {who, co, tg, bid}` | new job: `{id, memo, esc}`; then deposit |
 | `POST /jobs/<id>/<act>` | `paid`, `offer`, `withdraw`, `approve {n}`, `made`, `confirm`, `cancel`, `refund` |
 
