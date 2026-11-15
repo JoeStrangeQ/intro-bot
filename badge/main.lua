@@ -9,8 +9,8 @@ local ESCROW = "ESC-GQD4T2WC"
 local MIN_BID, MAX_BID, TEXT = 10, 500, 31
 local POLL_MS, SPARK_N = 20000, 24
 local C = {
-  desk = 0xC9BFF2, brand = 0x6A50D8, ink = 0x241A52, paper = 0xF6F3FD,
-  orange = 0x8A3A0A, white = 0xFFFFFF, dim = 0x3B3266, line = 0xDCD5F7,
+  desk = 0xC9BFF2, brand = 0x6A50D8, ink = 0x000000, paper = 0xF6F3FD,
+  orange = 0x8A3A0A, white = 0xFFFFFF, dim = 0x000000, line = 0xDCD5F7,
 }
 local TABS = {"board", "fleet", "request", "myjobs", "myoffers", "profile"}
 local IS_TAB = {request = true, board = true, fleet = true, myjobs = true, myoffers = true, profile = true}
@@ -210,7 +210,7 @@ local function build_request()
   line(144, "Offerers see your Telegram.", C.ink)
   line(158, "Bid waits in escrow till you confirm.")
   ui.rect(5, 174, 310, 1, {color = C.line})
-  center(180, CTA, 14, C.orange)
+  center(180, CTA, 14, C.ink)
   ui.hint(TABHINT)
 end
 
@@ -382,9 +382,9 @@ local function build_job()
   if j.mine and (j.st == "open" or j.st == "pending") then
     line(178, "New bid? Remove and post again.", C.dim)
   elseif j.me and j.st == "approved" and not j.met then
-    line(178, "Meet badge to badge, then mark made.", C.orange)
+    line(178, "Meet badge to badge, then mark made.", C.ink)
   elseif j.mine and j.st == "made" then
-    line(178, "Made? Confirm to pay. 72h, then refund.", C.orange)
+    line(178, "Made? Confirm to pay. 72h, then refund.", C.ink)
   end
   ui.hint(#items > 0 and "SELECT choose   CANCEL back" or "CANCEL back")
 end
@@ -540,7 +540,7 @@ local function build_profile()
   st.w.stats = line(96, "", C.ink)
   st.w.bal = ui.label(120, 70, "", {size = 12, color = C.dim, w = 108})
   ui.list(6, 120, 308, 30, profile_items(), {on_select = function() edit_tg() end})
-  center(180, CTA, 14, C.orange)
+  center(180, CTA, 14, C.ink)
   ui.hint("SELECT change   LEFT/RIGHT screens")
   refresh_profile()
   load_balance()
@@ -564,7 +564,7 @@ local function build_fleet()
   st.w.jobs = ui.label(14, 120, "", {size = 14, color = C.brand, w = 292, align = "center"})
   center(146, "Every !LAMP paid to an introer.", 12, C.dim)
   ui.rect(5, 174, 310, 1, {color = C.line})
-  center(180, CTA, 14, C.orange)
+  center(180, CTA, 14, C.ink)
   ui.hint(TABHINT)
   refresh_fleet()
 end
@@ -758,8 +758,8 @@ local function splash()
   end
   side(90, "BotBot", 20, C.brand)
   side(116, "Intro Bot", 14, C.ink)
-  side(144, "Scan to follow", 12, C.orange)
-  side(160, "x.com/botbotcap", 14, C.orange)
+  side(144, "Scan to follow", 12, C.ink)
+  side(160, "x.com/botbotcap", 14, C.ink)
   side(184, "botbotcap.com", 12, C.dim)
   ui.hint("SELECT to enter   CANCEL exit")
 end
