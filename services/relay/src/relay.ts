@@ -56,7 +56,10 @@ type Storage = {
 
 /** One Durable Object per id: strongly consistent, read right after write. */
 export class TxStore {
-  constructor(private state: { storage: Storage }) {}
+  private state: { storage: Storage };
+  constructor(state: { storage: Storage }) {
+    this.state = state;
+  }
   async fetch(req: Request) {
     const s = this.state.storage;
     if (req.method === 'PUT') {
@@ -106,11 +109,10 @@ const json = (body: unknown, status = 200) =>
   });
 
 class Bad extends Error {
-  constructor(
-    message: string,
-    readonly status = 400,
-  ) {
+  readonly status: number;
+  constructor(message: string, status = 400) {
     super(message);
+    this.status = status;
   }
 }
 

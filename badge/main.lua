@@ -363,8 +363,8 @@ local function build_connect()
   ui.label(186, 60, c and c.url and "Scan with your" or "Preparing...", {size = 12, color = C.ink, w = 124})
   ui.label(186, 76, c and c.url and "phone wallet." or "", {size = 12, color = C.ink, w = 124})
   if c and c.url then
-    ui.label(186, 104, "Approve the note", {size = 12, color = C.dim})
-    ui.label(186, 118, "to connect.", {size = 12, color = C.dim})
+    ui.label(186, 104, "Then tap Cancel.", {size = 12, color = C.dim})
+    ui.label(186, 118, "No fee, no signing.", {size = 12, color = C.dim})
   end
   ui.hint("CANCEL back")
 end

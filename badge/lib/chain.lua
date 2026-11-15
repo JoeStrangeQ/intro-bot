@@ -5,7 +5,7 @@ local sol = require("lib.sol")
 
 local M = {}
 
-M.RELAY = "https://intro-bot-relay-production.nav-keeper.workers.dev"
+M.RELAY = "https://relay.botbotcap.com"
 M.BUDGET = 27  -- of the badge's 30 rpc calls a minute
 local sent = {}
 

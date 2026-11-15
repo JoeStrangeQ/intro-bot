@@ -50,11 +50,11 @@ say "init_config (deployer becomes admin)"
 RPC_URL=$RPC_URL node badge-test/wallet.mjs init-config "$DEPLOYER" \
   || echo "init_config failed (already done? check the Config account)"
 
-say "Relay (intro-bot-relay-production.nav-keeper.workers.dev, mainnet rpc)"
+say "Relay (relay.botbotcap.com, mainnet rpc)"
 ( cd services/relay
-  printf '%s' "$RPC_URL" | npx -y wrangler@4 secret put RPC_URL --env production
-  npx -y wrangler@4 deploy --env production )
-curl -fsS -X POST https://intro-bot-relay-production.nav-keeper.workers.dev/connect -H 'content-type: application/json' -d '{}' >/dev/null \
+  railway variables -s relay --set "RPC_URL=$RPC_URL" --skip-deploys >/dev/null
+  railway up --ci -s relay )
+curl -fsS -X POST https://relay.botbotcap.com/connect -H 'content-type: application/json' -d '{}' >/dev/null \
   && echo "relay is up" || echo "relay check failed"
 
 say "Done"

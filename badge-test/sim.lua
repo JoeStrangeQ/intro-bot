@@ -347,12 +347,12 @@ local function new_world(opts)
     W.rpcq[#W.rpcq + 1] = {method = method, params = params, cb = cb}
   end}
   _G.http = {post = function(url, body, cb)
-    if url == "https://intro-bot-relay-production.nav-keeper.workers.dev/connect" then W.connects[#W.connects + 1] = cb return end
-    check(url == "https://intro-bot-relay-production.nav-keeper.workers.dev/tx", "relay url")
+    if url == "https://relay.botbotcap.com/connect" then W.connects[#W.connects + 1] = cb return end
+    check(url == "https://relay.botbotcap.com/tx", "relay url")
     check(#json.encode(body) <= 2048, "http body <= 2 KB")
     W.posts[#W.posts + 1] = {body = body, cb = cb}
   end, get = function(url, cb)
-    check(url == "https://intro-bot-relay-production.nav-keeper.workers.dev/tx/" .. CONNECT_ID .. "/who", "who url")
+    check(url == "https://relay.botbotcap.com/tx/" .. CONNECT_ID .. "/who", "who url")
     W.whos[#W.whos + 1] = cb
   end}
   _G.mesh = {
@@ -423,7 +423,7 @@ local function relay_reply(ok, res)
   assert(p, "no relay post")
   local m = require("lib.bytes").unhex(p.body.message)
   if os.getenv("DUMP") then io.open(os.getenv("DUMP"), "a"):write(p.body.message, "\n"):close() end
-  callback(p.cb, ok, res or {status = 200, body = json.encode({url = "solana:https://intro-bot-relay-production.nav-keeper.workers.dev/tx/abc123"})})
+  callback(p.cb, ok, res or {status = 200, body = json.encode({url = "solana:https://relay.botbotcap.com/tx/abc123"})})
   return read_msg(m)
 end
 -- Answer the connect QR, then the relay's "who" poll with the scanning wallet.
@@ -431,8 +431,8 @@ local function connect_as(wallet)
   local cb = table.remove(W.connects, 1)
   assert(cb, "no connect post")
   callback(cb, true, {status = 200, body = json.encode({id = CONNECT_ID,
-    url = "solana:https://intro-bot-relay-production.nav-keeper.workers.dev/tx/" .. CONNECT_ID})})
-  check(W.qr and W.qr.t == "solana:https://intro-bot-relay-production.nav-keeper.workers.dev/tx/" .. CONNECT_ID, "connect QR")
+    url = "solana:https://relay.botbotcap.com/tx/" .. CONNECT_ID})})
+  check(W.qr and W.qr.t == "solana:https://relay.botbotcap.com/tx/" .. CONNECT_ID, "connect QR")
   advance(2000)
   local w = table.remove(W.whos, 1)
   assert(w, "no who poll")
@@ -654,7 +654,7 @@ check(same(ix.accounts, {m.keys[1], CONFIG, BOARD, MYJOB, SYS}), "post_job: acco
 check(m.w[BOARD] and m.w[MYJOB] and not m.w[CONFIG], "post_job: writable")
 check(ix.data == escrow.DISC.post_job .. u64(nonce) .. fixed("Toly", 32) .. fixed("Solana Labs", 32)
   .. fixed("@joe", 32) .. u64(12500000000), "post_job: data (12.5 SOL)")
-check(W.qr and W.qr.t == "solana:https://intro-bot-relay-production.nav-keeper.workers.dev/tx/abc123", "post QR")
+check(W.qr and W.qr.t == "solana:https://relay.botbotcap.com/tx/abc123", "post QR")
 CHAIN[b58e(MYJOB)] = enc_job({requester = ME, nonce = nonce, bid = "12500000000", who = "Toly",
   company = "Solana Labs", telegram = "@joe"})
 on_board(MYJOB)
