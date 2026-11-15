@@ -10,7 +10,7 @@ local MIN_BID, MAX_BID, TEXT = 10, 500, 31
 local POLL_MS, SPARK_N = 20000, 24
 local C = {
   desk = 0xC9BFF2, brand = 0x6A50D8, ink = 0x241A52, paper = 0xF6F3FD,
-  orange = 0xA8521A, white = 0xFFFFFF, dim = 0x6E6496, line = 0xDCD5F7,
+  orange = 0x8A3A0A, white = 0xFFFFFF, dim = 0x3B3266, line = 0xDCD5F7,
 }
 local TABS = {"board", "fleet", "request", "myjobs", "myoffers", "profile"}
 local IS_TAB = {request = true, board = true, fleet = true, myjobs = true, myoffers = true, profile = true}
@@ -207,8 +207,8 @@ local function build_request()
     {title = "Request an intro", sub = "who, company, bid in !LAMPs"},
     {title = "My Telegram", right = st.tg or "not set"},
   }, {on_select = function(i) if i == 1 then ask_job() else ask_tg() end end})
-  line(144, "Your Telegram is shown to people who offer.", C.ink)
-  line(158, "The bid waits in escrow. Paid when you confirm.")
+  line(144, "Offerers see your Telegram.", C.ink)
+  line(158, "Bid waits in escrow till you confirm.")
   ui.rect(5, 174, 310, 1, {color = C.line})
   center(180, CTA, 14, C.orange)
   ui.hint(TABHINT)
@@ -380,9 +380,9 @@ local function build_job()
     end})
   end
   if j.mine and (j.st == "open" or j.st == "pending") then
-    line(178, "To change the bid, remove and post again.", C.dim)
+    line(178, "New bid? Remove and post again.", C.dim)
   elseif j.me and j.st == "approved" and not j.met then
-    line(178, "Meet them, badge to badge, then mark made.", C.orange)
+    line(178, "Meet badge to badge, then mark made.", C.orange)
   elseif j.mine and j.st == "made" then
     line(178, "Made? Confirm to pay. 72h, then refund.", C.orange)
   end

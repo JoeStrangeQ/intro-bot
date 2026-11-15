@@ -409,7 +409,7 @@ pick(A, "+ Request an intro", {"Mert", "Helius", "20"})
 run(A, 500)
 pick(A, "Mert @ Helius")
 run(A, 300)
-check(has(A, "To change the bid, remove and post again."), "bid change hint")
+check(has(A, "New bid? Remove and post again."), "bid change hint")
 -- The introer offers, then withdraws.
 tab(I, "board")
 run(I, 20000)
