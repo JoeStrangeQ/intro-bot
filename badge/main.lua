@@ -19,7 +19,8 @@ local TITLE = {
   myoffers = "My offers", profile = "Profile", job = "Job", meet = "We met",
 }
 local LABEL = {
-  offer = "Offer to make this intro", withdraw = "Withdraw my offer", cancel = "Cancel: bid back",
+  offer = "Offer to make this intro", withdraw = "Withdraw my offer", cancel = "Remove: bid back",
+  edit = "Edit who, company, Telegram", remove = "Remove (not paid)",
   confirm = "Confirm: pay the introer", refund = "Refund my bid", made = "Intro made",
   meet = "We met: verify badges", pay = "Pay the bid",
 }
@@ -295,7 +296,38 @@ local function do_act(j, a, n)
       show_later("job")
     end)
   end
-  if a == "cancel" then return confirm("Cancel and get your bid back?", function(y) if y then go() end end) end
+  if a == "cancel" then return confirm("Remove this job and get your bid back?", function(y) if y then go() end end) end
+  if a == "remove" then
+    return confirm("Remove this job? Nothing was paid.", function(y)
+      if not y then return end
+      call("POST", "/jobs/" .. j.id .. "/remove", {}, function(ok, d)
+        if not ok then return ui.toast(tostring(d)) end
+        ui.toast("Removed")
+        st.pick = nil
+        poll(true)
+        show_later("myjobs")
+      end)
+    end)
+  end
+  if a == "edit" then
+    -- Empty or cancelled keeps what was there.
+    local function keep(v) return v and v:gsub("%s", "") ~= "" and v or nil end
+    return input("Who (empty keeps " .. j.who .. ")", TEXT, function(who)
+      input("Company (empty keeps " .. j.co .. ")", TEXT, function(co)
+        input("Telegram (empty keeps it)", TEXT, function(tg)
+          local body = {who = keep(who), co = keep(co), tg = keep(tg)}
+          if not (body.who or body.co or body.tg) then return ui.toast("Nothing changed") end
+          call("POST", "/jobs/" .. j.id .. "/edit", body, function(ok, d)
+            if not ok then return ui.toast(tostring(d)) end
+            ui.toast("Saved")
+            st.pick = d
+            poll(true)
+            show_later("job")
+          end)
+        end)
+      end)
+    end)
+  end
   if a == "confirm" then
     return confirm("Pay " .. lp(j.bid) .. " to " .. (j.picked or "them") .. "?", function(y) if y then go() end end)
   end
@@ -326,6 +358,10 @@ local function build_job()
     y = y + 16
   end
   local items, act = {}, {}
+  for _, a in ipairs(j.acts or {}) do
+    items[#items + 1] = {title = LABEL[a] or a}
+    act[#act + 1] = {a}
+  end
   if j.mine and j.st == "open" then
     if #(j.pool or {}) == 0 then
       line(y, "No offers yet.", C.ink)
@@ -336,17 +372,15 @@ local function build_job()
       act[#act + 1] = {"approve", k - 1}
     end
   end
-  for _, a in ipairs(j.acts or {}) do
-    items[#items + 1] = {title = LABEL[a] or a}
-    act[#act + 1] = {a}
-  end
   if #items > 0 then
     ui.list(6, y + 2, 308, math.min(196 - y - 18, 36 * #items), items, {on_select = function(i)
       local a = act[i]
       if a then do_act(j, a[1], a[2]) end
     end})
   end
-  if j.me and j.st == "approved" and not j.met then
+  if j.mine and (j.st == "open" or j.st == "pending") then
+    line(178, "To change the bid, remove and post again.", C.dim)
+  elseif j.me and j.st == "approved" and not j.met then
     line(178, "Meet them, badge to badge, then mark made.", C.orange)
   elseif j.mine and j.st == "made" then
     line(178, "Made? Confirm to pay. 72h, then refund.", C.orange)

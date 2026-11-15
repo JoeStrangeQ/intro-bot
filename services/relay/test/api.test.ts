@@ -153,6 +153,22 @@ describe('the intro flow', () => {
     expect(s.bank.paid.get(`refund-${id}`)).toEqual({ to: REQ.badge, amount: 20 });
   });
 
+  it('requester can edit a job, and remove it before paying', async () => {
+    const s = setup();
+    const id = await openJob(s, 20);
+    await s.app.act(REQ, id, 'edit', { who: 'Mert', co: 'Helius', tg: 'new' });
+    expect(s.app.s.jobs[id]).toMatchObject({ who: 'Mert', co: 'Helius', tg: '@new' });
+    await expect(s.app.act(INT, id, 'edit', { who: 'x' })).rejects.toThrow();
+    const { id: un } = s.app.post(REQ, { who: 'A', co: 'B', tg: 'req', bid: 30 });
+    expect(s.app.acts(s.app.s.jobs[un]!, REQ.user)).toEqual(['pay', 'edit', 'remove']);
+    await s.app.act(REQ, un, 'remove', {});
+    expect(s.app.s.jobs[un]).toBeUndefined();
+    s.bank.deposit(REQ.user, REQ.badge, 30, `job ${un}`); // paid late: given back
+    await s.app.sync();
+    await s.app.flush();
+    expect([...s.bank.paid.values()]).toContainEqual({ to: REQ.badge, amount: 30 });
+  });
+
   it('refund opens after 7 days approved, and auto-refunds 72 h later', async () => {
     const s = setup();
     const id = await openJob(s);

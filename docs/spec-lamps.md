@@ -16,7 +16,8 @@
 6. **Made, confirm.** The introer can mark the intro made only after a verified meet. The
    requester confirms (any time after approving) and the server pays the bid from the
    escrow to the introer.
-7. **Refunds.** Cancel while open. After approving: 7 days for made, then 72 hours to
+7. **Edit and remove.** Edit who, company and Telegram any time before approving. Remove an unpaid job, or remove an open one to get the bid back. To change the bid, remove and post again. Introers can withdraw an offer until they are picked.
+8. **Refunds.** After approving: 7 days for made, then 72 hours to
    confirm; when a window passes the requester can refund. The server refunds by itself
    72 hours after that.
 
@@ -50,6 +51,6 @@ All under `https://relay.botbotcap.com/api`, signed by the badge server.
 | `GET /jobs/<id>` | one job, what I may do (`acts`), the offer pool for the requester |
 | `POST /introer {name}` | rename (the first offer creates the introer) |
 | `POST /jobs {who, co, tg, bid}` | new job: `{id, memo, esc}`; then deposit |
-| `POST /jobs/<id>/<act>` | `paid`, `offer`, `withdraw`, `approve {n}`, `made`, `confirm`, `cancel`, `refund` |
+| `POST /jobs/<id>/<act>` | `paid`, `offer`, `withdraw`, `approve {n}`, `made`, `confirm`, `cancel` (bid back), `refund`, `edit {who, co, tg}`, `remove` (unpaid) |
 
 State is one JSON file on a Railway volume (`DATA_DIR`).

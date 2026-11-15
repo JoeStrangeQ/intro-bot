@@ -162,8 +162,8 @@ export class App {
     const t = this.now();
     const out: string[] = [];
     if (j.requester === user) {
-      if (j.status === 'pending') out.push('pay');
-      if (j.status === 'open') out.push('cancel');
+      if (j.status === 'pending') out.push('pay', 'edit', 'remove');
+      if (j.status === 'open') out.push('edit', 'cancel');
       if (j.status === 'approved' || j.status === 'made') out.push('confirm');
       if (j.status === 'approved' && t > (j.approvedAt ?? 0) + WORK) out.push('refund');
       if (j.status === 'made' && t > (j.madeAt ?? 0) + CONFIRM) out.push('refund');
@@ -241,7 +241,12 @@ export class App {
     return { id, memo: memo(id), bid };
   }
 
-  async act(c: Caller, id: string, act: string, body: { n?: unknown; name?: unknown }) {
+  async act(
+    c: Caller,
+    id: string,
+    act: string,
+    body: { n?: unknown; name?: unknown; who?: unknown; co?: unknown; tg?: unknown },
+  ) {
     this.seen(c);
     const j = this.get(id);
     if (act === 'paid') {
@@ -268,6 +273,20 @@ export class App {
         const name = typeof body.name === 'string' && body.name.trim() ? text(body.name, 'name') : 'introer';
         this.s.introers[c.user] = { user: c.user, badge: c.badge, name, jobs: 0, earned: 0, created: this.now() };
       }
+    } else if (act === 'edit') {
+      if (body.who !== undefined) j.who = text(body.who, 'who');
+      if (body.co !== undefined) j.co = text(body.co, 'company');
+      if (body.tg !== undefined) {
+        let tg = text(body.tg, 'telegram');
+        if (!tg.startsWith('@')) tg = `@${tg}`;
+        j.tg = tg.slice(0, TEXT);
+      }
+    } else if (act === 'remove') {
+      // Unpaid: nothing to give back. A deposit that lands later is returned by sync().
+      const gone = this.job(c, id);
+      delete this.s.jobs[j.id];
+      this.save();
+      return { ...gone, st: 'closed' as const, acts: [] };
     } else if (act === 'withdraw') {
       j.offers = j.offers.filter((u) => u !== c.user);
     } else if (act === 'made') {
