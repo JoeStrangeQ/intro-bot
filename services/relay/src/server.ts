@@ -38,6 +38,7 @@ export async function route(app: App, method: string, path: string, c: Caller, b
       return { ok: true };
     }
     if (a === 'jobs' && !id) return { ...app.post(c, body), esc: ESCROW };
+    if (a === 'jobs' && id && act === 'bonus') return app.bonus(c, id, body);
     if (a === 'jobs' && id && act) return app.act(c, id, act, body);
   }
   throw new Err(404, 'not found');

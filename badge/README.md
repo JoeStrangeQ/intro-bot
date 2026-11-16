@@ -17,7 +17,7 @@ LEFT / RIGHT moves between screens. CANCEL goes back, or home from a main screen
 
 - **Intro board**: "+ Request an intro", then jobs, funded first ("Funded" or "Unpaid"). SELECT one to
   offer; after you offer you see the requester's Telegram.
-- **Badge Fleet**: the "Badge Fleet MAV", every !LAMP paid to introers, and intros paid.
+- **Badge Fleet**: the "Badge Fleet MAV", every !LAMP introers produced (bids paid plus bonuses), and intros paid.
 - **Request an intro**: who, company, bid, Telegram (remembered). It's posted, then the app
   asks if you want to fund it now; you can also do it later from My jobs.
 - **My jobs**: your jobs. Approve an offer, cancel, "We met", confirm, or refund.
@@ -27,6 +27,13 @@ LEFT / RIGHT moves between screens. CANCEL goes back, or home from a main screen
 "We met": both badges open it on the job and the introer or requester presses SELECT. The
 badges sign a mesh meet; the server marks the job met. When a job you made is confirmed,
 the badge plays "JOB DONE!".
+
+## Rewards
+
+After a confirmed intro the introer's badge claims a 50 !LAMP bonus with `lamps.award`:
+at most 100 a day, one per pair of people, only after a verified meet, and only with X
+linked. If nothing is given (no X, or the app's cap), it tries again an hour later. The
+cap is set by the badge team.
 
 ## Publish
 

@@ -8,6 +8,7 @@ local list = require("lib.list")
 
 local ESCROW = "ESC-GQD4T2WC"
 local MIN_BID, MAX_BID, TEXT = 10, 500, 31
+local BONUS = 50  -- !LAMPs the app awards an introer per confirmed intro (lamps.award)
 local POLL_MS, SPARK_N = 20000, 24
 local C = {
   desk = 0xC9BFF2, brand = 0x6A50D8, ink = 0x000000, paper = 0xF6F3FD,
@@ -609,7 +610,7 @@ end
 local function refresh_fleet()
   local w, f = st.w, st.fleet
   if not w.mav then return end
-  w.mav:text(f and lp(f.paid) or "-- !LAMPs")
+  w.mav:text(f and lp(f.made or f.paid) or "-- !LAMPs")
   w.jobs:text(f and (f.jobs .. (f.jobs == 1 and " intro paid" or " intros paid")) or ago_text())
 end
 
@@ -620,7 +621,7 @@ local function build_fleet()
   ui.label(60, 52, "Total !LAMPs produced by introers", {size = 12, color = C.dim})
   st.w.mav = ui.label(14, 80, "", {size = 32, color = C.ink, w = 292, align = "center"})
   st.w.jobs = ui.label(14, 120, "", {size = 14, color = C.brand, w = 292, align = "center"})
-  center(146, "Every !LAMP paid to an introer.", 12, C.dim)
+  center(146, "Bids paid plus bonuses awarded.", 12, C.dim)
   ui.rect(5, 174, 310, 1, {color = C.line})
   center(180, CTA, 14, C.ink)
   ui.hint(TABHINT)
@@ -662,9 +663,12 @@ function job_done(n)
   local a = {t = 0}
   a.logo, a.shift = art.logo(127, 14, 5, 0), 0
   ui.label(0, 98, "JOB DONE!", {size = 32, color = C.white, w = ui.W, align = "center"})
-  ui.label(0, 138, n > 1 and ("+" .. n .. " intros confirmed") or "+1 intro confirmed",
+  ui.label(0, 134, n > 1 and ("+" .. n .. " intros confirmed") or "+1 intro confirmed",
     {size = 14, color = C.desk, w = ui.W, align = "center"})
-  ui.label(10, 162, CTA_EARNED, {size = 14, color = C.white, w = 300, align = "center"})
+  if st.me and st.me.claim and #st.me.claim > 0 then
+    ui.label(0, 152, "+" .. BONUS .. " !LAMPs bonus", {size = 14, color = C.white, w = ui.W, align = "center"})
+  end
+  ui.label(10, 172, CTA_EARNED, {size = 14, color = C.white, w = 300, align = "center"})
   st.anim = a
 end
 
@@ -701,6 +705,31 @@ local function refresh()
   end
 end
 
+-- Rewards: the server lists bonuses this badge may claim (a met, confirmed intro; one per
+-- pair; two a day). lamps.award pays them within the app's daily cap; the server records it.
+local function claim_bonus()
+  local ids = st.me and st.me.claim
+  if not lamps or not lamps.award or st.claiming or not ids or #ids == 0 then return end
+  if st.bonus_next and sys.millis() < st.bonus_next then return end
+  local id = tostring(ids[1])
+  st.claiming = true
+  lamps.award(BONUS, "intro " .. id, function(ok, r)
+    local got = ok and type(r) == "table" and math.tointeger(tonumber(r.awarded)) or 0
+    local needs_x = ok and type(r) == "table" and r.needsX and true or false
+    call("POST", "/jobs/" .. id .. "/bonus", {awarded = got, needsX = needs_x}, function(ok2, b)
+      st.claiming = false
+      if got > 0 then
+        ui.toast("+" .. got .. " !LAMPs bonus")
+        if ok2 and type(b) == "table" and st.me then st.me.claim = b.claim end
+        return claim_bonus()
+      end
+      -- Nothing given: no X linked, or the app's cap for today. Try again in an hour.
+      st.bonus_next = sys.millis() + 3600000
+      if needs_x then ui.toast("Link X to get the " .. BONUS .. " !LAMP bonus") end
+    end)
+  end)
+end
+
 local function got_me(me)
   st.me = me
   if not me.reg then return end
@@ -711,6 +740,7 @@ local function got_me(me)
   st.jobs = me.jobs
   if before ~= me.jobs then storage.set("jobs", me.jobs) end
   if before and me.jobs > before then job_done(me.jobs - before) end
+  claim_bonus()
 end
 
 function poll(force)

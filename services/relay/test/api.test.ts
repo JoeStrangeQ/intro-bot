@@ -170,8 +170,8 @@ describe('the intro flow', () => {
     const out = await s.app.act(REQ, id, 'confirm', {});
     expect(out.st).toBe('closed');
     expect(s.bank.paid.get(`pay-${id}`)).toEqual({ to: INT.badge, amount: 100 });
-    expect(s.app.fleet()).toEqual({ paid: 100, jobs: 1 });
-    expect(s.app.me(INT)).toMatchObject({ jobs: 1, earned: 100, value: 80 });
+    expect(s.app.fleet()).toEqual({ paid: 100, jobs: 1, bonus: 0, made: 100 });
+    expect(s.app.me(INT)).toMatchObject({ jobs: 1, earned: 100, value: 80, claim: [id] });
   });
 
   it('requester can confirm before made', async () => {
@@ -241,6 +241,70 @@ describe('the intro flow', () => {
   });
 });
 
+describe('rewards', () => {
+  // A confirmed intro between REQ and `who`, with or without a verified meet.
+  async function done(s: ReturnType<typeof setup>, who = INT, met = true, req = REQ) {
+    const { id } = s.app.post(req, { who: 'Toly', co: 'Solana', tg: 'req', bid: 20 });
+    s.bank.deposit(req.user, req.badge, 20, `job ${id}`);
+    await s.app.act(req, id, 'paid', {});
+    await s.app.act(who, id, 'offer', { name: 'Ana' });
+    await s.app.act(req, id, 'approve', { n: 0 });
+    if (met) {
+      s.bank.meetItems.push({ id: String(s.bank.meetItems.length + 1), users: [who.user, req.user], jobs: [id] });
+      await s.app.syncMeets();
+    }
+    await s.app.act(req, id, 'confirm', {});
+    return id;
+  }
+
+  it('offers a bonus after a met, confirmed intro, and counts it once claimed', async () => {
+    const s = setup();
+    const id = await done(s);
+    expect(s.app.me(INT).claim).toEqual([id]);
+    expect(s.app.bonus(INT, id, { awarded: 50 })).toMatchObject({ claimed: true, amount: 50 });
+    expect(s.app.bonus(INT, id, { awarded: 50 })).toMatchObject({ claimed: true, amount: 50 }); // twice: no change
+    expect(s.app.me(INT)).toMatchObject({ bonus: 50, earned: 20, value: 56, claim: [] });
+    expect(s.app.fleet()).toEqual({ paid: 20, jobs: 1, bonus: 50, made: 70 });
+    expect(() => s.app.bonus(REQ, id, { awarded: 50 })).toThrow(); // not theirs
+  });
+
+  it('keeps the bonus pending when nothing was awarded (no X, or the cap)', async () => {
+    const s = setup();
+    const id = await done(s);
+    expect(s.app.bonus(INT, id, { awarded: 0, needsX: true })).toMatchObject({ claimed: false, claim: [id] });
+    expect(s.app.fleet().bonus).toBe(0);
+    expect(s.app.bonus(INT, id, { awarded: 50 }).claimed).toBe(true);
+  });
+
+  it('needs a verified meet', async () => {
+    const s = setup();
+    await done(s, INT, false);
+    expect(s.app.me(INT).claim).toEqual([]);
+  });
+
+  it('rewards a pair once, either way round', async () => {
+    const s = setup();
+    const a = await done(s);
+    await done(s); // same pair again
+    await done(s, REQ, true, INT); // swapped roles
+    expect(Object.keys(s.app.s.bonuses)).toEqual([a]);
+  });
+
+  it('allows two bonuses a day per introer', async () => {
+    const s = setup();
+    const reqs = [1, 2, 3].map((n) => ({ user: `u-r${n}`, badge: `BR${n}` }));
+    const ids: string[] = [];
+    for (const r of reqs) ids.push(await done(s, INT, true, r));
+    expect(s.app.me(INT).claim).toEqual(ids.slice(0, 2));
+    s.app.bonus(INT, ids[0]!, { awarded: 50 });
+    s.app.bonus(INT, ids[1]!, { awarded: 50 });
+    expect(s.app.me(INT).claim).toEqual([]);
+    expect(() => s.app.bonus(INT, ids[2]!, { awarded: 50 })).toThrow('bonus limit');
+    s.at(86_400_000);
+    expect(s.app.me(INT).claim).toEqual([ids[2]]);
+  });
+});
+
 describe('routes', () => {
   it('maps paths to the app', async () => {
     const s = setup();
@@ -248,7 +312,7 @@ describe('routes', () => {
       esc: string;
     };
     expect(r.esc).toBe('ESC-GQD4T2WC');
-    expect(await route(s.app, 'GET', '/api/fleet', REQ, {})).toEqual({ paid: 0, jobs: 0 });
+    expect(await route(s.app, 'GET', '/api/fleet', REQ, {})).toEqual({ paid: 0, jobs: 0, bonus: 0, made: 0 });
     await expect(route(s.app, 'GET', '/api/nope', REQ, {})).rejects.toThrow(/not found/);
   });
 });

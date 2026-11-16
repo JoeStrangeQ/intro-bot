@@ -147,7 +147,10 @@ local function new_badge(name, id, user)
     clear = function() B.objs, B.labels, B.qr = 0, {}, nil end,
     bg = function() end,
     rect = function(_, _, _, _, opts) local o = obj("rect", "") o.c = opts and opts.color return o end,
-    label = function(_, _, t, opts) local o = obj("label", t) o.c = opts and opts.color return o end,
+    label = function(_, _, t, opts)
+      if t == "+50 !LAMPs bonus" then B.saw_bonus = true end
+      local o = obj("label", t) o.c = opts and opts.color return o
+    end,
     hint = function(t) B.hint = t end,
     qr = function(_, _, size, t) B.qr, B.qr_size = t, size return obj("qr", t) end,
     toast = function(t) B.toasts[#B.toasts + 1] = t end,
@@ -188,6 +191,17 @@ local function new_badge(name, id, user)
   }
   env.lamps = {
     balance = function(cb) schedule(1, function() cb(true, 100) end) end,
+    -- B.award: "ok" (default), "needsX" (no X linked) or "capped" (the app's daily cap is used up)
+    award = function(amount, reason, cb)
+      check(math.type(amount) == "integer" and amount == 50, name .. ": award 50")
+      B.awards = (B.awards or 0) + 1
+      local mode = B.award or "ok"
+      schedule(1, function()
+        if mode == "needsX" then cb(true, {awarded = 0, balance = 100, needsX = true})
+        elseif mode == "capped" then cb(true, {awarded = 0, balance = 100})
+        else B.awarded = (B.awarded or 0) + amount cb(true, {awarded = amount, balance = 150}) end
+      end)
+    end,
     deposit = function(addr, amount, memo, cb)
       if B.deny then B.denied = amount return schedule(1, function() cb(false, B.deny) end) end
       check(addr == "ESC-GQD4T2WC", name .. ": deposits go to the app escrow")
@@ -428,15 +442,37 @@ check(last_toast(A):find("Paid!") ~= nil, "confirm pays")
 local pays = json.decode(sh("curl -s " .. q(FAKE .. "/test/pays")))
 check(pays and pays[1] and pays[1].to == "INT001" and pays[1].amount == 50, "escrow paid the introer 50")
 
--- The introer's badge plays JOB DONE; the Badge Fleet MAV counts it.
+-- The introer's badge plays JOB DONE with the bonus line, and claims the bonus. Without X
+-- linked nothing is awarded and it stays pending; once X is linked it is paid.
+I.award = "needsX"
 tab(I, "board")
 run(I, 20000)
 if has(I, "JOB DONE!") then I.saw_done = true run(I, 3000) end
 check(I.saw_done, "introer sees JOB DONE")
+check(I.saw_bonus, "JOB DONE shows +50 !LAMPs bonus")
+check((I.awards or 0) >= 1 and not I.awarded, "award asked, nothing given without X")
+local saw_x = false
+for _, t in ipairs(I.toasts) do if t == "Link X to get the 50 !LAMP bonus" then saw_x = true end end
+check(saw_x, "toast asks to link X")
 tab(I, "fleet")
-check(has(I, "50 !LAMPs") and has(I, "1 intro paid"), "Badge Fleet MAV: " .. texts(I))
+check(has(I, "50 !LAMPs") and has(I, "1 intro paid"), "Badge Fleet MAV before the bonus: " .. texts(I))
+I.award = "capped"
+local asked = I.awards
+run(I, 30000)
+check(I.awards == asked, "waits an hour before asking again")
+run(I, 3600000)
+check(I.awards > asked and not I.awarded, "capped: asked again, still pending")
+I.award = "ok"
+run(I, 3600000 + 30000)
+check(I.awarded == 50, "bonus awarded once X is linked")
+check(last_toast(I) == "+50 !LAMPs bonus", "bonus toast")
+local n = I.awards
+run(I, 3600000 + 30000)
+check(I.awards == n, "claimed bonus is not asked again")
+tab(I, "fleet")
+check(has(I, "100 !LAMPs") and has(I, "1 intro paid"), "Badge Fleet MAV counts the bonus: " .. texts(I))
 tab(I, "profile")
-check(has(I, "earned 50 !LAMPs") and has(I, "40 !LAMPs"), "machine value from earned: " .. texts(I))
+check(has(I, "earned 50 !LAMPs") and has(I, "80 !LAMPs"), "machine value from earned + bonus: " .. texts(I))
 
 -- Cancel refunds an open job.
 tab(A, "board")

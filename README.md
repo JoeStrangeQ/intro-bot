@@ -7,6 +7,15 @@ Post who you want to meet with a bid in !LAMPs; it's on the board at once. Fund 
 confirm the intro. Every confirmed intro raises the introer's machine value, and the
 **Badge Fleet MAV** counts every !LAMP the introers produced: BotBot's idea, in miniature.
 
+## Rewards
+
+Introers get a **50 !LAMP bonus** for each confirmed intro, on top of the bid.
+
+- Up to 100 !LAMPs a day per person (two bonuses).
+- One bonus per pair of people, ever.
+- The intro needs a verified badge meet, and the introer needs X linked.
+- The app's daily limit is set by the badge team.
+
 - `badge/`: the badge app (Lua)
 - `services/relay`: the server at relay.botbotcap.com (Node, on Railway)
 - `badge-test/`: an end-to-end test with two simulated badges

@@ -9,6 +9,8 @@ export const MAX_BID = 500; // a player can pay at most 500 !LAMPs a day
 export const MAX_OFFERS = 16;
 export const MAX_OPEN = 3; // live jobs per requester
 export const BOARD_SHOW = 10;
+export const BONUS = 50; // !LAMPs awarded to the introer per confirmed intro (lamps.award)
+export const BONUS_DAY = 2; // bonuses per introer per UTC day: 100 !LAMPs
 export const PAY_WAIT = 72 * 3_600_000; // an unpaid job no one was picked for stays up to 72 h
 export const WORK = 7 * 86_400_000; // approved -> made
 export const CONFIRM = 72 * 3_600_000; // made -> confirm
@@ -34,7 +36,17 @@ export type Job = {
   met?: boolean;
   outcome?: 'paid' | 'refunded';
 };
-export type Introer = { user: string; badge: string; name: string; jobs: number; earned: number; created: number };
+export type Introer = {
+  user: string;
+  badge: string;
+  name: string;
+  jobs: number;
+  earned: number;
+  created: number;
+  bonus?: number; // !LAMPs awarded on top of bids
+};
+/** A reward the introer's badge claims with lamps.award. */
+export type Bonus = { user: string; claimed: boolean; at?: number; amount?: number };
 export type Payout = { to: string; amount: number; memo: string; done: boolean };
 export type State = {
   seq: number;
@@ -45,8 +57,11 @@ export type State = {
   deposits: Record<string, true>; // ledger ids already handled
   ledgerAfter: string;
   meetsAfter: string;
-  paid: number; // Badge Fleet MAV: !LAMPs paid to introers
+  paid: number; // !LAMPs paid to introers
   paidJobs: number;
+  bonuses: Record<string, Bonus>; // job id -> reward
+  pairs: Record<string, string>; // the two users, sorted -> job id; one reward per pair, ever
+  bonusPaid: number; // !LAMPs awarded; Badge Fleet MAV = paid + bonusPaid
 };
 
 export type Deposit = { id: string; amount: number; memo: string; user: string; badge: string };
@@ -79,6 +94,9 @@ export function emptyState(): State {
     meetsAfter: '0',
     paid: 0,
     paidJobs: 0,
+    bonuses: {},
+    pairs: {},
+    bonusPaid: 0,
   };
 }
 
@@ -88,10 +106,10 @@ function text(v: unknown, what: string): string {
   return s.slice(0, TEXT);
 }
 
-/** Machine value, as on the badge: earned × 0.8 × wear */
+/** Machine value, as on the badge: (earned + bonuses) × 0.8 × wear */
 export function machineValue(i: Introer, now: number): number {
   const days = Math.floor((now - i.created) / 86_400_000); // whole days, as on the badge before
-  return Math.floor(i.earned * 0.8 * Math.max(0.5, 1 - 0.01 * days));
+  return Math.floor((i.earned + (i.bonus ?? 0)) * 0.8 * Math.max(0.5, 1 - 0.01 * days));
 }
 
 export class App {
@@ -104,6 +122,9 @@ export class App {
     this.s = s;
     // Unpaid posts used to wait off the board as 'pending'; now they are open, just not funded.
     for (const j of Object.values(s.jobs)) if (j.status === 'pending') j.status = 'open';
+    s.bonuses ??= {};
+    s.pairs ??= {};
+    s.bonusPaid ??= 0;
     this.bank = bank;
     this.now = now;
     this.save = save;
@@ -146,14 +167,33 @@ export class App {
       name: i?.name ?? '',
       jobs: i?.jobs ?? 0,
       earned: i?.earned ?? 0,
+      bonus: i?.bonus ?? 0,
       value: i ? machineValue(i, this.now()) : 0,
       mine: this.jobs((j) => j.requester === c.user && j.status !== 'closed', c.user, 6),
       offers: this.jobs((j) => j.offers.includes(c.user) && j.status !== 'closed', c.user, 6),
+      claim: this.claimable(c.user),
     };
   }
 
+  /** Bonuses this user's badge may claim now: unclaimed, within today's limit. */
+  private claimable(user: string): string[] {
+    const left = BONUS_DAY - this.claimedToday(user);
+    if (left <= 0) return [];
+    return Object.entries(this.s.bonuses)
+      .filter(([, b]) => b.user === user && !b.claimed)
+      .map(([id]) => id)
+      .slice(0, left);
+  }
+
+  private claimedToday(user: string): number {
+    const day = Math.floor(this.now() / 86_400_000);
+    return Object.values(this.s.bonuses).filter(
+      (b) => b.user === user && b.claimed && Math.floor((b.at ?? 0) / 86_400_000) === day,
+    ).length;
+  }
+
   fleet() {
-    return { paid: this.s.paid, jobs: this.s.paidJobs };
+    return { paid: this.s.paid, jobs: this.s.paidJobs, bonus: this.s.bonusPaid, made: this.s.paid + this.s.bonusPaid };
   }
 
   private get(id: string): Job {
@@ -310,6 +350,12 @@ export class App {
       }
       this.s.paid += j.bid;
       this.s.paidJobs += 1;
+      // Reward: a verified meet, and a pair never rewarded before.
+      const pair = [j.requester, u].sort().join('|'); // either way round counts once
+      if (j.met && !this.s.pairs[pair]) {
+        this.s.pairs[pair] = j.id;
+        this.s.bonuses[j.id] = { user: u, claimed: false };
+      }
       this.close(j, 'paid', this.s.badges[u] ?? u, `Intro Bot: intro ${j.id} confirmed`);
     } else if (act === 'cancel' || act === 'refund') {
       this.close(j, 'refunded', j.rbadge || j.requester, `Intro Bot: job ${j.id} refunded`);
@@ -317,6 +363,28 @@ export class App {
     this.save();
     await this.flush();
     return this.job(c, id);
+  }
+
+  /** The introer's badge reports what lamps.award gave for job `id`'s bonus. */
+  bonus(c: Caller, id: string, body: { awarded?: unknown; needsX?: unknown }) {
+    this.seen(c);
+    const b = this.s.bonuses[id];
+    if (!b || b.user !== c.user) throw new Err(404, 'no bonus for this job');
+    if (b.claimed) return { claimed: true, amount: b.amount ?? 0, claim: this.claimable(c.user) };
+    const got = Number(body.awarded);
+    if (Number.isInteger(got) && got > 0) {
+      if (this.claimedToday(c.user) >= BONUS_DAY) throw new Err(409, 'bonus limit for today');
+      const amount = Math.min(got, BONUS);
+      b.claimed = true;
+      b.at = this.now();
+      b.amount = amount;
+      const i = this.s.introers[c.user];
+      if (i) i.bonus = (i.bonus ?? 0) + amount;
+      this.s.bonusPaid += amount;
+      this.save();
+    }
+    // Nothing awarded (no X linked, or the app's daily cap): it stays to claim later.
+    return { claimed: b.claimed, amount: b.amount ?? 0, claim: this.claimable(c.user) };
   }
 
   private close(j: Job, outcome: 'paid' | 'refunded', to: string, why: string) {

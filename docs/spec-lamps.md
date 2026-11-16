@@ -27,9 +27,22 @@ Max 3 live jobs per requester, 16 offers per job. A player can pay at most 500 !
 
 ## MAV
 
-- **Machine value** (an introer's): earned x 0.8 x wear, wear = 1 - 1% per day
+- **Machine value** (an introer's): (earned + bonuses) x 0.8 x wear, wear = 1 - 1% per day
   (at least 0.5).
-- **Badge Fleet MAV**: total !LAMPs paid to introers, and how many intros were paid.
+- **Badge Fleet MAV**: total !LAMPs introers produced (bids paid + bonuses), and how many
+  intros were paid.
+
+## Rewards
+
+- On confirm, the introer gets a 50 !LAMP bonus if the job has a verified meet and this
+  pair of people (either way round) was never rewarded before.
+- `GET /me` lists `claim`: bonuses the badge may claim now, at most 2 a day (100 !LAMPs, UTC
+  day). The badge calls `lamps.award(50, "intro <id>")`, then `POST /jobs/<id>/bonus
+  {awarded, needsX}`. The server marks it claimed only when something was awarded, once.
+- Nothing awarded (no X linked, or the app's daily cap): it stays pending; the badge tries
+  again an hour later. The cap itself is set by the badge team.
+- `lamps.award` runs on the badge, so a changed badge could claim without the server. The
+  cap limits that; the server's counts only include bonuses reported.
 
 ## Trust
 
@@ -47,9 +60,10 @@ All under `https://relay.botbotcap.com/api`, signed by the badge server.
 | Call | Does |
 | --- | --- |
 | `GET /board` | open jobs, funded first, then newest; 10. Rows carry `f` (funded) |
-| `GET /me` | introer profile, machine value, my jobs, my offers |
-| `GET /fleet` | `{paid, jobs}`: the Badge Fleet MAV |
+| `GET /me` | introer profile, machine value, my jobs, my offers, `claim` (bonuses to claim) |
+| `GET /fleet` | `{paid, jobs, bonus, made}`: the Badge Fleet MAV is `made` = paid + bonus |
 | `GET /jobs/<id>` | one job, what I may do (`acts`), the offer pool for the requester |
+| `POST /jobs/<id>/bonus {awarded, needsX}` | record a claimed bonus (once) |
 | `POST /introer {name}` | rename (the first offer creates the introer) |
 | `POST /jobs {who, co, tg, bid}` | new job: `{id, memo, esc}`; then deposit |
 | `POST /jobs/<id>/<act>` | `paid`, `offer`, `withdraw`, `approve {n}`, `made`, `confirm`, `cancel` (bid back), `refund`, `edit {who, co, tg}`, `remove` (unpaid) |
