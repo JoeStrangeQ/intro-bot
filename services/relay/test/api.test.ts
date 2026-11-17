@@ -47,37 +47,32 @@ async function openJob(s: ReturnType<typeof setup>, bid = 50) {
 }
 
 describe('posting and deposits', () => {
-  it('lists a job right away, unpaid, and marks it funded once the deposit is in the ledger', async () => {
+  it('keeps a post off the board until its deposit lands, then lists it', async () => {
     const s = setup();
     const { id, memo } = s.app.post(REQ, { who: 'Toly', co: 'Solana', tg: 'req', bid: 50 });
     expect(memo).toBe(`job ${id}`);
-    expect(s.app.board(OTHER).jobs.map((j) => [j.id, j.f])).toEqual([[id, false]]);
+    expect(s.app.s.jobs[id]?.status).toBe('pending');
+    expect(s.app.board(OTHER).jobs).toEqual([]);
+    await expect(s.app.act(INT, id, 'offer', { name: '@i' })).rejects.toThrow(/can not offer/);
     s.bank.deposit(REQ.user, REQ.badge, 50, memo);
     await s.app.sync();
     expect(s.app.board(OTHER).jobs.map((j) => [j.id, j.f])).toEqual([[id, true]]);
     expect(s.app.s.jobs[id]?.tg).toBe('@req');
   });
 
-  it('puts funded jobs first on the board', async () => {
+  it('gives a waiting post only pay and remove', async () => {
     const s = setup();
-    const a = s.app.post(REQ, { who: 'A', co: 'B', tg: '@x', bid: 50 });
-    s.bank.deposit(REQ.user, REQ.badge, 50, a.memo);
-    await s.app.sync();
-    s.at(1000);
-    const b = s.app.post(REQ, { who: 'C', co: 'D', tg: '@x', bid: 20 });
-    expect(s.app.board(OTHER).jobs.map((j) => j.id)).toEqual([a.id, b.id]);
+    const { id } = s.app.post(REQ, { who: 'A', co: 'B', tg: '@x', bid: 50 });
+    expect(s.app.acts(s.app.s.jobs[id]!, REQ.user)).toEqual(['pay', 'remove']);
+    await expect(s.app.act(REQ, id, 'raise', { bid: 60 })).rejects.toThrow(/can not raise/);
   });
 
-  it('lets an unpaid job get offers and a pick, but pays before confirm', async () => {
+  it('a paid job gets offers and a pick, then confirms', async () => {
     const s = setup();
-    const { id, memo } = s.app.post(REQ, { who: 'A', co: 'B', tg: '@x', bid: 50 });
-    await s.app.act(INT, id, "offer", { name: "@intro" });
+    const id = await openJob(s, 50);
+    await s.app.act(INT, id, 'offer', { name: '@intro' });
     await s.app.act(REQ, id, 'approve', { n: 0 });
-    expect(s.app.job(REQ, id).acts).toEqual(['pay', 'remove', 'meet']);
-    await expect(s.app.act(REQ, id, 'confirm', {})).rejects.toThrow(/can not confirm/);
-    s.bank.deposit(REQ.user, REQ.badge, 50, memo);
-    await s.app.sync();
-    expect(s.app.job(REQ, id).acts).toEqual(['confirm', 'meet']);
+    expect(s.app.job(REQ, id).acts).toEqual(['confirm', 'meet', 'raise']);
     await s.app.act(REQ, id, 'confirm', {});
     expect([...s.bank.paid.values()]).toEqual([{ to: INT.badge, amount: 50 }]);
   });
@@ -113,29 +108,26 @@ describe('posting and deposits', () => {
     expect(() => s.app.post(REQ, { who: ' ', co: 'B', tg: 'x', bid: 10 })).toThrow(/who/);
   });
 
-  it('drops unpaid posts after 72 hours', () => {
+  it('drops posts never paid after 30 minutes', () => {
     const s = setup();
     const { id } = s.app.post(REQ, { who: 'A', co: 'B', tg: 'x', bid: 10 });
-    s.at(PAY_WAIT + 1);
+    s.at(PAY_WAIT - 1);
+    s.app.sweep();
+    expect(s.app.s.jobs[id]?.status).toBe('pending');
+    s.at(2);
     s.app.sweep();
     expect(s.app.s.jobs[id]).toBeUndefined();
   });
 
-  it('keeps an unpaid job someone was picked for past 72 hours', async () => {
-    const s = setup();
-    const { id } = s.app.post(REQ, { who: 'A', co: 'B', tg: 'x', bid: 10 });
-    await s.app.act(INT, id, 'offer', { name: '@i' });
-    await s.app.act(REQ, id, 'approve', { n: 0 });
-    s.at(PAY_WAIT + 1);
-    s.app.sweep();
-    expect(s.app.s.jobs[id]?.status).toBe('approved');
-  });
 
-  it('migrates old pending jobs to open on load', () => {
+  it('sends old unpaid jobs back to waiting for their deposit on load', () => {
     const st = emptyState();
-    st.jobs['1'] = { id: '1', requester: 'u', rbadge: 'B', who: 'A', co: 'B', tg: '@x', bid: 10, status: 'pending', created: 1, offers: [] };
+    st.jobs['1'] = { id: '1', requester: 'u', rbadge: 'B', who: 'A', co: 'B', tg: '@x', bid: 10, status: 'approved', created: 1, offers: ['i'], approved: 'i', approvedAt: 1 };
+    st.jobs['2'] = { id: '2', requester: 'u', rbadge: 'B', who: 'A', co: 'B', tg: '@x', bid: 10, status: 'open', created: 1, offers: [], deposit: '9' };
     const app = new App(st, new FakeBank(), () => 2);
-    expect(app.s.jobs['1']?.status).toBe('open');
+    expect(app.s.jobs['1']).toMatchObject({ status: 'pending', created: 2, offers: [] });
+    expect(app.s.jobs['1']?.approved).toBeUndefined();
+    expect(app.s.jobs['2']?.status).toBe('open');
   });
 
   it('allows three live jobs per requester', () => {
@@ -194,14 +186,14 @@ describe('the intro flow', () => {
     expect(s.bank.paid.get(`refund-${id}`)).toEqual({ to: REQ.badge, amount: 20 });
   });
 
-  it('requester can edit a job, and remove it before paying', async () => {
+  it('requester can edit a job, and remove a post before paying it', async () => {
     const s = setup();
     const id = await openJob(s, 20);
     await s.app.act(REQ, id, 'edit', { who: 'Mert', co: 'Helius', tg: 'new' });
     expect(s.app.s.jobs[id]).toMatchObject({ who: 'Mert', co: 'Helius', tg: '@new' });
     await expect(s.app.act(INT, id, 'edit', { who: 'x' })).rejects.toThrow();
     const { id: un } = s.app.post(REQ, { who: 'A', co: 'B', tg: 'req', bid: 30 });
-    expect(s.app.acts(s.app.s.jobs[un]!, REQ.user)).toEqual(['pay', 'edit', 'remove']);
+    expect(s.app.acts(s.app.s.jobs[un]!, REQ.user)).toEqual(['pay', 'remove']);
     await s.app.act(REQ, un, 'remove', {});
     expect(s.app.s.jobs[un]).toBeUndefined();
     s.bank.deposit(REQ.user, REQ.badge, 30, `job ${un}`); // paid late: given back
@@ -376,5 +368,50 @@ describe('signed headers', () => {
     expect(await v.check('GET', U, '', await sign('GET', U, '', t, 'r3', 'other'))).toBeNull(); // other app
     expect(await v.check('POST', U, '{}', await sign('POST', U, '{"x":1}', t, 'r4'))).toBeNull(); // body changed
     expect(await v.check('GET', `${U}?x`, '', await sign('GET', U, '', t, 'r5'))).toBeNull(); // url changed
+  });
+});
+
+describe('raising the bid', () => {
+  it('checks the new bid', async () => {
+    const s = setup();
+    const id = await openJob(s, 50);
+    await expect(s.app.act(REQ, id, 'raise', { bid: 50 })).rejects.toThrow(/more than 50/);
+    await expect(s.app.act(REQ, id, 'raise', { bid: 501 })).rejects.toThrow(/up to 500/);
+    await expect(s.app.act(OTHER, id, 'raise', { bid: 90 })).rejects.toThrow(/can not raise/);
+  });
+
+  it('raises a funded bid once the difference lands, and returns a wrong one', async () => {
+    const s = setup();
+    const id = await openJob(s, 50);
+    const r = (await s.app.act(REQ, id, 'raise', { bid: 90 })) as { bid: number; raise: { memo: string; diff: number } };
+    expect(r.bid).toBe(50);
+    expect(r.raise).toEqual({ memo: `job ${id} +40`, diff: 40 });
+    s.bank.deposit(REQ.user, REQ.badge, 30, `job ${id} +30`); // wrong amount
+    s.bank.deposit(REQ.user, REQ.badge, 40, `job ${id} +40`);
+    await s.app.sync();
+    expect(s.app.s.jobs[id]?.bid).toBe(90);
+    s.bank.deposit(REQ.user, REQ.badge, 40, `job ${id} +40`); // twice: nothing pending
+    await s.app.sync();
+    await s.app.flush();
+    expect([...s.bank.paid.values()]).toEqual([
+      { to: REQ.badge, amount: 30 },
+      { to: REQ.badge, amount: 40 },
+    ]);
+    await s.app.act(INT, id, 'offer', { name: '@i' });
+    await s.app.act(REQ, id, 'approve', { n: 0 });
+    await s.app.act(REQ, id, 'confirm', {});
+    await s.app.flush();
+    expect([...s.bank.paid.values()].at(-1)).toEqual({ to: INT.badge, amount: 90 });
+  });
+
+  it('counts what a user deposited today for the badge\'s 500 a day', async () => {
+    const s = setup();
+    const id = await openJob(s, 300);
+    s.app.post(REQ, { who: 'C', co: 'D', tg: '@x', bid: 20 });
+    expect(s.app.me(REQ).dep_today).toBe(300);
+    await s.app.act(REQ, id, 'cancel', {}); // the refund doesn't count back
+    expect(s.app.me(REQ).dep_today).toBe(300);
+    s.at(86_400_000);
+    expect(s.app.me(REQ).dep_today).toBe(0);
   });
 });

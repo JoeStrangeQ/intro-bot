@@ -16,6 +16,7 @@ export function toDeposit(it: Raw): Deposit | null {
     memo: str(it.memo),
     user: str(it.user ?? it.userId ?? from.user),
     badge: str(it.badge ?? it.badgeId ?? from.badge),
+    at: it.at === undefined || it.at === null ? undefined : Number(it.at),
   };
 }
 

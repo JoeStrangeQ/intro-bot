@@ -155,6 +155,7 @@ local function new_badge(name, id, user)
     qr = function(_, _, size, t) B.qr, B.qr_size = t, size return obj("qr", t) end,
     toast = function(t) B.toasts[#B.toasts + 1] = t end,
     input = function(prompt, max, cb)
+      B.prompt = prompt
       local a = table.remove(B.answers, 1)
       assert(a ~= nil, name .. ": no answer for " .. prompt)
       check(#a <= max, name .. ": answer fits " .. prompt)
@@ -190,7 +191,7 @@ local function new_badge(name, id, user)
     post = function(url, body, cb) request("POST", url, body, cb) end,
   }
   env.lamps = {
-    balance = function(cb) schedule(1, function() cb(true, 100) end) end,
+    balance = function(cb) schedule(1, function() cb(true, B.balance or 1000) end) end,
     -- B.award: "ok" (default), "needsX" (no X linked) or "capped" (the app's daily cap is used up)
     award = function(amount, reason, cb)
       check(math.type(amount) == "integer" and amount == 50, name .. ": award 50")
@@ -208,7 +209,7 @@ local function new_badge(name, id, user)
       check(math.type(amount) == "integer" and amount <= 500, name .. ": whole bid within 500")
       local r = fake("/test/deposit", {user = user, badge = id, amount = amount, memo = memo})
       B.deposits = (B.deposits or 0) + 1
-      B.last_amount = amount
+      B.last_amount, B.last_memo = amount, memo
       schedule(1, function() cb(true, {balance = 1000, id = r.id}) end)
     end,
   }
@@ -354,37 +355,30 @@ tab(I, "profile")
 check(has(I, "Offer on a job to start earning"), "no register step")
 check(not has(I, "Register"), "no register row")
 
--- Requester posts a job: it is on the board at once, unpaid; funding is optional.
+-- Every bid is paid when posted. A refused payment leaves nothing behind.
 pick(A, "+ Request an intro", {"Toly", "Solana", "5"})
 check(last_toast(A) == "10 to 500 !LAMPs", "bid under 10 refused")
-A.say_no = true
+A.deny = "cancelled"
 pick(A, "+ Request an intro", {"Vitalik", "Ethereum", "20", "reqtg"})
 run(A, 500)
-A.say_no = nil
-check(A.confirmed == "Fund 20 !LAMPs now? Funded jobs show first.", "asks to fund: " .. tostring(A.confirmed))
-check((A.deposits or 0) == 0, "no deposit when declined")
-tab(I, "board")
-run(I, 300)
-local un = item(I, "Vitalik @ Ethereum")
-check(un ~= nil and lst(I).its[un].right == "Unpaid", "unpaid job is on the board, marked Unpaid")
+A.deny = nil
+check(A.confirmed == nil, "no fund-it-now question")
+check(last_toast(A) == "Not paid: cancelled", "refusal shown: " .. last_toast(A))
+check((A.deposits or 0) == 0, "no deposit when refused")
 tab(A, "myjobs")
-pick(A, "Vitalik @ Ethereum")
 run(A, 300)
-check(item(A, "Pay the bid") and item(A, "Remove (not paid)"), "unpaid job: pay or remove (list scrolls)")
-pick(A, "Remove (not paid)")
-run(A, 300)
-tab(I, "profile")
+check(item(A, "Vitalik @ Ethereum") == nil, "refused post removed: " .. texts(A))
 tab(I, "board")
 run(I, 300)
-check(item(I, "Vitalik @ Ethereum") == nil, "removed unpaid job leaves the board")
+check(item(I, "Vitalik @ Ethereum") == nil, "refused post never on the board")
 
--- Now a job funded right after posting.
+-- A paid post goes on the board.
 tab(A, "board")
 pick(A, "+ Request an intro", {"Toly", "Solana", "50"})
 run(A, 500)
 check(A.deposits == 1, "one deposit")
 check(A.last_amount == 50 and math.type(A.last_amount) == "integer", "deposit amount is a whole number")
-check(last_toast(A) == "Funded!", "funded after the deposit: " .. last_toast(A))
+check(last_toast(A) == "Posted!", "listed after the deposit: " .. last_toast(A))
 check(item(A, "Toly @ Solana") ~= nil, "my jobs lists the job")
 
 -- Introer sees it on the board and offers.
@@ -480,7 +474,7 @@ pick(A, "+ Request an intro", {"Mert", "Helius", "20"})
 run(A, 500)
 pick(A, "Mert @ Helius")
 run(A, 300)
-check(has(A, "New bid? Remove and post again."), "bid change hint")
+check(has(A, "Raise the bid in the list."), "bid change hint")
 -- The introer offers, then withdraws.
 tab(I, "board")
 run(I, 20000)
@@ -495,12 +489,24 @@ check(item(I, "Offer to make this intro") ~= nil, "offer withdrawn")
 pick(A, "Edit", {"Mert", "Helius Labs", ""})
 run(A, 300)
 check(last_toast(A) == "Saved" and has(A, "Mert @ Helius Labs"), "edited: " .. texts(A))
+-- Raise a funded bid: the badge pays the difference, the server adds it once it lands.
+pick(A, "Raise the bid", {"35"})
+run(A, 300)
+check(A.prompt:find("New bid, now 20", 1, true) and A.prompt:find("have 1000", 1, true), "raise prompt shows the balance: " .. A.prompt)
+check(A.last_amount == 15 and A.last_memo:match("^job %d+ %+15$"), "raise pays the difference: " .. tostring(A.last_memo))
+run(A, 20000)
+pick(A, "Mert @ Helius Labs")
+run(A, 300)
+check(has(A, "bid 35 !LAMPs"), "raised bid shows: " .. texts(A))
+pick(A, "Raise the bid", {"30"})
+run(A, 300)
+check(last_toast(A) == "More than 35 !LAMPs, up to 500", "can't lower the bid")
 pick(A, "Remove: bid back")
 run(A, 300)
 pays = json.decode(sh("curl -s " .. q(FAKE .. "/test/pays")))
-check(pays and pays[2] and pays[2].to == "REQ001" and pays[2].amount == 20, "cancel refunded 20")
+check(pays and pays[2] and pays[2].to == "REQ001" and pays[2].amount == 35, "cancel refunded the raised 35")
 
--- A refused deposit shows the OS's own words and leaves the job unpaid.
+-- A refused deposit shows the OS's own words and the post is removed.
 A.deny = "denied"
 tab(A, "board")
 run(A, 300)
@@ -509,15 +515,31 @@ run(A, 500)
 check(A.denied == 100 and math.type(A.denied) == "integer", "denied deposit got a whole 100")
 check(last_toast(A) == "Not paid: denied", "raw reason shown: " .. last_toast(A))
 A.deny = nil
--- The unpaid job can be removed.
 tab(A, "myjobs")
 run(A, 300)
-pick(A, "Raj @ Solana")
+check(item(A, "Raj @ Solana") == nil, "refused post removed: " .. texts(A))
+
+-- A bid over the balance is refused before paying, and the prompt shows the balance.
+local paid_before = A.deposits
+A.balance = 30
+tab(A, "board")
 run(A, 300)
-check(item(A, "Pay the bid") ~= nil and item(A, "Remove (not paid)") ~= nil, "unpaid: pay or remove")
-pick(A, "Remove (not paid)")
+pick(A, "+ Request an intro", {"Bo", "Pyth", "50"})
 run(A, 500)
-check(last_toast(A) == "Removed" and item(A, "Raj @ Solana") == nil, "unpaid job removed: " .. texts(A))
+check(A.prompt == "Bid in !LAMPs (you have 30)", "bid prompt shows the balance: " .. A.prompt)
+check(last_toast(A) == "You have 30 !LAMPs" and A.deposits == paid_before, "over balance: refused")
+tab(A, "myjobs")
+run(A, 300)
+check(item(A, "Bo @ Pyth") == nil, "nothing posted over the balance")
+A.balance = nil
+
+-- Over the badge's 500 a day: the prompt shows what's left today, and it's refused.
+tab(A, "board")
+run(A, 20000)
+pick(A, "+ Request an intro", {"Max", "Phantom", "490"})
+run(A, 500)
+check(A.prompt:find("(have 1000, ", 1, true) and A.prompt:find(" today)", 1, true), "prompt shows today's room: " .. A.prompt)
+check(last_toast(A):find("today (badge limit 500)", 1, true) and A.deposits == paid_before, "over today's room: refused: " .. last_toast(A))
 
 -- Unsigned calls are refused.
 local raw = sh("curl -s -o /dev/null -w '%{http_code}' " .. q((os.getenv("LOCAL") or "http://127.0.0.1:8791") .. "/api/board"))

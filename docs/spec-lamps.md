@@ -2,12 +2,13 @@
 
 ## Flow
 
-1. **Request an intro.** Who, company, bid (10 to 500 !LAMPs) and your Telegram. The job goes
-   on the public board right away, marked **Unpaid**.
-2. **Fund (optional, any time).** The badge pays the bid into the app's escrow `ESC-GQD4T2WC`
-   with `lamps.deposit` (memo `job <id>`); the OS asks you to approve. Once the server sees it
-   in the escrow ledger, the job shows **Funded**. Funded jobs are listed first. An unpaid job
-   nobody was picked for goes away after 72 hours.
+1. **Request an intro.** Who, company, bid (10 to 500 !LAMPs) and your Telegram. The bid
+   prompt shows your balance and what's left of the badge's 500 a day; a bid you can't pay is
+   refused before anything is posted.
+2. **Pay.** Every bid is paid into escrow when posted. The badge pays the bid into the app's escrow `ESC-GQD4T2WC`
+   with `lamps.deposit` (memo `job <id>`); the OS asks you to approve. The post waits off the
+   board until the server sees the deposit in the escrow ledger, then it's listed. If the
+   payment is refused, the badge removes the post. A post never paid is dropped after 30 minutes.
 3. **Offer.** Anyone can offer; no sign-up. The first offer makes your introer profile, named by your Telegram. Offering shows the
    requester's Telegram.
 4. **Approve.** The requester picks one offer.
@@ -16,14 +17,14 @@
    marks the job **met** when the requester and the picked introer met.
 6. **Made, confirm.** The introer can mark the intro made only after a verified meet. The
    requester confirms (any time after approving) and the server pays the bid from the
-   escrow to the introer. An unpaid job must be funded first ("Pay the bid", then confirm).
-7. **Edit and remove.** Edit who, company and Telegram any time before approving. Remove an unpaid job any time (nothing to give back), or remove a funded open one to get the bid back. To change the bid, remove and post again. Introers can withdraw an offer until they are picked.
+   escrow to the introer.
+7. **Edit and remove.** Edit who, company and Telegram any time before approving. Remove an open job to get the bid back. **Raise the bid** any time before it closes: the badge pays the difference (memo `job <id> +<diff>`), and the server adds it once it lands; a wrong one is returned. Introers can withdraw an offer until they are picked.
 8. **Refunds.** After approving: 7 days for made, then 72 hours to
    confirm; when a window passes the requester can refund. The server refunds by itself
    72 hours after that.
 
 Max 3 live jobs per requester, 16 offers per job. A player can pay at most 500 !LAMPs a day
-(badge rule).
+(badge rule; refunds don't count back). `GET /me` returns `dep_today`, what the user deposited today (UTC).
 
 ## MAV
 
@@ -59,13 +60,13 @@ All under `https://relay.botbotcap.com/api`, signed by the badge server.
 
 | Call | Does |
 | --- | --- |
-| `GET /board` | open jobs, funded first, then newest; 10. Rows carry `f` (funded) |
-| `GET /me` | introer profile, machine value, my jobs, my offers, `claim` (bonuses to claim) |
+| `GET /board` | open (paid) jobs, newest first; 10 |
+| `GET /me` | introer profile, machine value, my jobs, my offers, `claim` (bonuses to claim), `dep_today` |
 | `GET /fleet` | `{paid, jobs, bonus, made}`: the Badge Fleet MAV is `made` = paid + bonus |
 | `GET /jobs/<id>` | one job, what I may do (`acts`), the offer pool for the requester |
 | `POST /jobs/<id>/bonus {awarded, needsX}` | record a claimed bonus (once) |
 | `POST /introer {name}` | rename (the first offer creates the introer) |
 | `POST /jobs {who, co, tg, bid}` | new job: `{id, memo, esc}`; then deposit |
-| `POST /jobs/<id>/<act>` | `paid`, `offer`, `withdraw`, `approve {n}`, `made`, `confirm`, `cancel` (bid back), `refund`, `edit {who, co, tg}`, `remove` (unpaid) |
+| `POST /jobs/<id>/<act>` | `paid`, `offer`, `withdraw`, `approve {n}`, `made`, `confirm`, `cancel` (bid back), `refund`, `edit {who, co, tg}`, `raise {bid}` (returns `raise {memo, diff}` to pay), `remove` (a post not paid yet) |
 
 State is one JSON file on a Railway volume (`DATA_DIR`).

@@ -24,17 +24,15 @@ local LABEL = {
   offer = "Offer to make this intro", withdraw = "Withdraw my offer", cancel = "Remove: bid back",
   edit = "Edit who, company, Telegram", remove = "Remove (not paid)",
   confirm = "Confirm: pay the introer", refund = "Refund my bid", made = "Intro made",
-  meet = "We met: verify badges", pay = "Pay the bid",
+  meet = "We met: verify badges", pay = "Pay the bid", raise = "Raise the bid",
 }
 local STATUS = {open = "Open", approved = "Picked", made = "Made", closed = "Closed"}
 
--- A job's status in one word or two. Jobs are on the board from posting; funding
--- (the bid in escrow) is optional until the payout.
+-- A job's status in a word. Every bid is paid into escrow when posted; a post waits
+-- off the board ("Paying") until its deposit lands.
 local function status(j)
-  if j.st == "open" or j.st == "pending" then return j.f and "Funded" or "Unpaid" end
-  local s = STATUS[j.st] or j.st or ""
-  if (j.st == "approved" or j.st == "made") and not j.f then s = s .. ", unpaid" end
-  return s
+  if j.st == "pending" then return "Paying" end
+  return STATUS[j.st] or j.st or ""
 end
 local TABHINT = "LEFT/RIGHT screens   CANCEL home"
 -- LEDs while the app is open: the logo's rainbow bands across the top (1..6, same
@@ -191,28 +189,65 @@ end
 
 -- Paying: the OS asks the owner, then the server sees it in the escrow -----
 
-local function pay(id, bid)
+local DAY_CAP = 500  -- the badge lets a user pay at most 500 !LAMPs a day
+
+-- `posting`: a new post; if the OS refuses, the post is removed so nothing unpaid is left.
+local function pay(id, bid, memo, posting)
   if not lamps then return ui.toast("Needs the lamps permission") end
   -- JSON numbers can come back as floats (100.0); the OS wants a whole number.
   local amount = math.tointeger(tonumber(bid))
   if not amount then return ui.toast("Bad bid") end
+  if st.bal and amount > st.bal then return ui.toast("You have " .. lp(st.bal)) end
   local function sent(ok, res)
     if not ok then
-      ui.toast("Not paid: " .. tostring(res))
+      local today = st.me and tonumber(st.me.dep_today) or 0
+      if res == "denied" and today + amount > DAY_CAP then
+        ui.toast("Badge limit: 500 !LAMPs a day, refunds don't count back")
+      else
+        ui.toast("Not paid: " .. tostring(res))
+      end
       -- Tell the server exactly what the OS said (and the balance), for its logs.
       lamps.balance(function(okb, bal)
         call("POST", "/log", {what = "deposit", job = id, amount = amount, why = tostring(res),
           balance = okb and bal or tostring(bal)}, function() end)
       end)
+      if posting then call("POST", "/jobs/" .. id .. "/remove", {}, function() poll(true) end) end
       return
     end
     call("POST", "/jobs/" .. id .. "/paid", {deposit = res and res.id}, function(ok2, j)
-      ui.toast(ok2 and j.f and "Funded!" or "Paid. Funded in a moment.")
+      if memo then ui.toast("Paid. Bid raised in a moment.")
+      else ui.toast(ok2 and j.st == "open" and "Posted!" or "Paid. On the board in a moment.") end
       poll(true)
       show_later("myjobs")
     end)
   end
-  lamps.deposit(tostring(ESCROW), amount, "job " .. tostring(id), sent)
+  lamps.deposit(tostring(ESCROW), amount, memo or ("job " .. tostring(id)), sent)
+end
+
+-- Asks for a bid, showing what the owner can pay: their balance, and what is left of the
+-- badge's 500 a day (the server counts today's deposits). cb(bid, can_pay) or nothing.
+local function ask_bid(title, cb)
+  local function ask()
+    local today = st.me and tonumber(st.me.dep_today) or 0
+    local left = math.max(0, DAY_CAP - today)
+    local prompt = title
+    if st.bal then
+      left = math.min(left, st.bal)
+      prompt = title .. (left < st.bal and (" (have " .. st.bal .. ", " .. left .. " today)")
+        or (" (you have " .. st.bal .. ")"))
+    end
+    input(prompt, 3, function(amount)
+      if not amount then return end
+      local bid = math.tointeger(tonumber(amount))
+      if not bid then return ui.toast("Use a whole number like 50") end
+      cb(bid, left)
+    end)
+  end
+  if not lamps then return ask() end
+  lamps.balance(function(ok, bal)
+    st.bal = ok and math.tointeger(tonumber(bal)) or nil
+    ask()
+  end)
 end
 
 -- Request an intro ---------------------------------------------------------
@@ -234,19 +269,15 @@ local function ask_job()
     if not who or who:gsub("%s", "") == "" then return end
     input("Their company", TEXT, function(co)
       if not co or co:gsub("%s", "") == "" then return end
-      input("Your bid in !LAMPs", 3, function(amount)
-        local bid = math.tointeger(tonumber(amount or ""))
-        if not bid then ui.toast("Use a whole number like 50") return end
+      ask_bid("Bid in !LAMPs", function(bid, left)
         if bid < MIN_BID or bid > MAX_BID then ui.toast(MIN_BID .. " to " .. MAX_BID .. " !LAMPs") return end
+        -- Every bid is paid when posted: refuse what the owner can't pay now.
+        if st.bal and bid > st.bal then return ui.toast("You have " .. lp(st.bal)) end
+        if bid > left then return ui.toast("You can pay " .. lp(left) .. " today (badge limit 500)") end
         local function post(tg)
           call("POST", "/jobs", {who = who, co = co, tg = tg, bid = bid}, function(ok, r)
             if not ok then return ui.toast(tostring(r)) end
-            ui.toast("Posted to the board!")
-            poll(true)
-            -- Funding is optional; funded jobs show first and draw introers.
-            confirm("Fund " .. lp(bid) .. " now? Funded jobs show first.", function(y)
-              if y then pay(r.id, bid) else show_later("myjobs") end
-            end)
+            pay(r.id, bid, nil, true)
           end)
         end
         if st.tg then post(st.tg) else ask_tg(post) end
@@ -344,6 +375,24 @@ local function build_myoffers() build_jobs("myoffers", "introer", "No offers yet
 local function do_act(j, a, n)
   if a == "meet" then st.meet = {job = j.id} return show("meet") end
   if a == "pay" then return pay(j.id, j.bid) end
+  if a == "raise" then
+    return ask_bid("New bid, now " .. math.tointeger(tonumber(j.bid) or 0), function(bid, left)
+      if bid <= (tonumber(j.bid) or 0) or bid > MAX_BID then
+        return ui.toast("More than " .. lp(j.bid) .. ", up to " .. MAX_BID)
+      end
+      local diff = bid - math.tointeger(tonumber(j.bid))
+      if st.bal and diff > st.bal then return ui.toast("You have " .. lp(st.bal)) end
+      if diff > left then return ui.toast("You can pay " .. lp(left) .. " today (badge limit 500)") end
+      call("POST", "/jobs/" .. j.id .. "/raise", {bid = bid}, function(ok, d)
+        if not ok then return ui.toast(tostring(d)) end
+        st.pick = d
+        poll(true)
+        -- Pay the difference; the server adds it once it lands.
+        if d.raise then return pay(j.id, d.raise.diff, d.raise.memo) end
+        ui.toast(tostring(d.error or "Not raised"))
+      end)
+    end)
+  end
   if a == "offer" and not st.tg then return ask_tg(function() do_act(j, a, n) end) end
   local function go()
     call("POST", "/jobs/" .. j.id .. "/" .. a, {n = n, name = st.tg}, function(ok, d)
@@ -436,10 +485,10 @@ local function build_job()
       if a then do_act(j, a[1], a[2]) end
     end})
   end
-  if j.mine and (j.st == "approved" or j.st == "made") and not j.f then
-    line(178, "Pay the bid, then confirm.", C.ink)
-  elseif j.mine and (j.st == "open" or j.st == "pending") then
-    line(178, "New bid? Remove and post again.", C.dim)
+  if j.mine and j.st == "pending" then
+    line(178, "Not paid yet: pay or remove.", C.ink)
+  elseif j.mine and j.st == "open" then
+    line(178, "Raise the bid in the list.", C.dim)
   elseif j.me and j.st == "approved" and not j.met then
     line(178, "Meet badge to badge, then mark made.", C.ink)
   elseif j.mine and j.st == "made" then
