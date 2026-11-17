@@ -1,31 +1,26 @@
-# Intro Bot relay
+# Intro Bot server
 
-Solana Pay transaction requests for the badge. See `docs/spec.md`.
-
-- `POST /tx {"message":"<hex>"}` → `{"url":"solana:https://intro-bot-relay-production.nav-keeper.workers.dev/tx/<id>"}`
-- Wallet: `GET /tx/<id>` → label and icon. `POST /tx/<id> {"account"}` → the
-  transaction, with the wallet as fee payer and a fresh blockhash. Each id
-  works once and lasts 10 minutes.
-- Connect: `POST /connect` → `{"id","url"}`. The wallet that scans `url` signs a
-  memo; the badge reads its address from `GET /tx/<id>/who` → `{"wallet"}`.
-
-Only legacy messages, one signer (32 × `0x01` at key 0), and only
-intro_escrow instructions are accepted.
-
-## RPC
-
-`RPC_URL` is set per environment. Local dev uses public devnet from
-`wrangler.toml`. Production has no default; set it as a secret:
-
-```sh
-wrangler secret put RPC_URL --env production
-```
-
-Without it the relay answers 502 instead of using the wrong cluster.
+Keeps the intro board and pays out of the app's !LAMP escrow. See `docs/spec-lamps.md`.
 
 ## Run
 
 ```sh
-pnpm test      # vitest
-pnpm dev       # wrangler dev
+ESCROW_KEY=... APP_KEY=... DATA_DIR=./data node src/server.ts
 ```
+
+| Variable | What |
+| --- | --- |
+| `ESCROW_KEY` | the escrow's key (payouts, ledger) |
+| `APP_KEY` | the app's server key (meets) |
+| `DATA_DIR` | where `state.json` lives (a Railway volume) |
+| `PUBLIC_URL` | `https://relay.botbotcap.com`: the URL the badge server signs |
+| `BADGE_API` | `https://badge-api.solana.com` (tests point it at a fake) |
+
+## Hosting
+
+Railway project `intro-bot-relay`, service `relay`, domain `relay.botbotcap.com`. Keys are
+Railway variables only.
+
+## Tests
+
+`pnpm test` here; `bash badge-test/e2e.sh` from the repo root for the badges.

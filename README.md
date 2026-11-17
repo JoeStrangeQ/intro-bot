@@ -2,14 +2,27 @@
 
 A Solana Breakpoint 2026 badge app by [BotBot](https://botbotcap.com).
 
-Your badge becomes a machine whose job is making intros. Anyone can post a public
-intro request with a SOL bid. The bid waits in an on-chain escrow and is paid to
-the introer only once the intro is confirmed. Every confirmed intro is a receipt
-that raises the badge's machine value: BotBot's idea, in miniature.
+A !LAMP escrow app for the badge. Your badge becomes a machine whose job is making intros.
+Post who you want to meet with a bid in !LAMPs. Every bid is paid into escrow when posted, so
+everything on the board is backed. Once you pick an introer, pay them **in person** (your
+badges meet over the mesh: the full bid) or **over Telegram** (half the bid, half back to you).
+Every paid intro raises the introer's machine value, and the
+**Badge Fleet MAV** counts every !LAMP the introers produced: BotBot's idea, in miniature.
 
-- `programs/intro-escrow`: the escrow program (Anchor)
-- `apps/intro-bot`: the web app at intro.botbotcap.com
-- `services/intro-bot`: the API (Cloudflare Worker)
+## Rewards
+
+Introers get a **50 !LAMP bonus** for each intro paid in person, or 25 over Telegram, on top of the bid.
+
+- Up to 100 !LAMPs a day per person (two bonuses).
+- One bonus per pair of people, ever.
+- The introer needs X linked.
+- The app's daily limit is set by the badge team.
+
 - `badge/`: the badge app (Lua)
+- `services/relay`: the server at relay.botbotcap.com (Node, on Railway)
+- `badge-test/`: an end-to-end test with two simulated badges
 
-See [docs/spec.md](docs/spec.md). Ask us about BotBot at [botbotcap.com](https://botbotcap.com).
+How it works: [docs/spec-lamps.md](docs/spec-lamps.md). Tests: `pnpm test` (server) and
+`bash badge-test/e2e.sh` (badges + server).
+
+Ask us about BotBot at [botbotcap.com](https://botbotcap.com).

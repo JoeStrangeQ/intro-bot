@@ -1,9 +1,0 @@
-{
-  "name": "propose_admin",
-  "program_id": "GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC",
-  "accounts": [
-    { "pubkey": "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9", "signer": true, "writable": false },
-    { "pubkey": "oXmMGdwAxABJH3h21nEhPBiBS6JoYe2dVMUevoKCF46", "signer": false, "writable": true }
-  ],
-  "data_hex": "79d6c7d4572775ea8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"
-}

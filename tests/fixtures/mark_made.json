@@ -1,9 +1,0 @@
-{
-  "name": "mark_made",
-  "program_id": "GgViYsZgeTfkEh67JTK8MYmWegnsvNcsR6GJCF5EeMcC",
-  "accounts": [
-    { "pubkey": "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu", "signer": true, "writable": false },
-    { "pubkey": "Fy31zdAYkcXAthT74fLypXaBV3BdiNe65rzpF2GQz1GK", "signer": false, "writable": true }
-  ],
-  "data_hex": "8aacbff25a16c159"
-}

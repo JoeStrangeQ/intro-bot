@@ -1,81 +1,46 @@
 # Intro Bot badge app
 
 Request an intro at Breakpoint. Say who you want to meet, their company and your bid in
-SOL. Introers offer to make the intro. You talk on Telegram, pick one, and they are paid
-only when you confirm. We trust you to keep your word.
+!LAMPs. Introers offer. You talk on Telegram and pick one. Pay them in person (your badges
+meet: the full bid) or over Telegram (half, the rest back to you).
 
-The bid waits in an on-chain escrow. The badge never holds keys: it builds each
-transaction, the relay turns it into a QR, and you sign on your phone wallet.
-To connect, scan one QR with your phone wallet: the badge learns your address. No typing.
+Every bid is paid into the app's !LAMP escrow when you post; the job goes on the board once
+the payment lands. Raise the bid any time from the job. The badge holds no keys: the server at
+relay.botbotcap.com keeps the board and pays out, and the badge server signs who is asking.
 
 ## Screens
 
-LEFT / RIGHT moves between screens. CANCEL goes back, or exits from a main screen.
+LEFT / RIGHT moves between screens. CANCEL goes back, or home from a main screen.
 
-- **Request an intro** (opens here): who, company, bid, Telegram (remembered), then a QR.
-  "Your Telegram is shown to people who offer."
-- **Intro board**: the newest jobs: who, company, bid, offers. SELECT one to offer. After
-  you offer, you see the requester's Telegram.
-- **My jobs**: your jobs. Open: the offer pool (name, jobs done, earned); SELECT one to
-  approve, or cancel. Then confirm, or refund when the time is up.
-- **My offers**: jobs you offered on. When you're picked: "Intro made". Closed jobs: get
-  your offer rent back.
-- **Profile**: your wallet, register as an introer, machine value (a demo value), demo mode,
-  the botbotcap.com QR and "Robots that earn: botbotcap.com".
+- **Home** (opens here): BotBot and a big QR to x.com/botbotcap, so people can scan your badge and follow.
+  SELECT enters the app; CANCEL here exits.
 
-When a job you made is confirmed, the badge plays "JOB DONE!" and flashes its lights.
+- **Intro board**: "+ Request an intro", then jobs. Every bid listed is held in escrow. SELECT one to
+  offer; after you offer you see the requester's Telegram.
+- **Badge Fleet**: the "Badge Fleet MAV", every !LAMP introers produced (bids paid plus bonuses), and intros paid.
+- **Request an intro**: who, company, bid, Telegram (remembered). The bid prompt shows your
+  balance and what's left of the badge's 500 a day. You pay the bid right away; if you say no,
+  nothing is posted.
+- **My jobs**: your jobs. Approve an offer, raise the bid, cancel, pay in person, pay over
+  Telegram, or refund.
+- **My offers**: jobs you offered on. When picked: "Get paid in person".
+- **Profile**: your Telegram and machine value. No sign-up: everyone can request and offer.
 
-## How it talks to the chain
+Paying in person: the introer opens "Get paid in person" on the job. The requester opens
+"Pay in person", picks the introer from the badges nearby and confirms. Both badges sign a
+mesh meet and the server pays the full bid at once. The introer's badge plays "JOB DONE!".
 
-- Reads with `rpc` (`getAccountInfo`, `getMultipleAccounts`), every 20 s, within 30 calls
-  a minute: the Board account (a ring of the newest jobs), your jobs by nonce, and the jobs
-  you offered on. A job is ~700 bytes, so 3 are read per call.
-- Posts each transaction message to `https://intro-bot-relay-production.nav-keeper.workers.dev/tx` and shows the
-  `solana:` link it returns as a QR, then watches the changed account. If a step doesn't
-  land, SELECT retries it.
-- Program id and cluster are at the top of `lib/escrow.lua`.
+## Rewards
 
-## Try it
-
-1. Open https://solana.com/breakpoint/badge/apps/submit and sign in.
-2. Drop this `badge/` folder on the editor.
-3. Press **Try in emulator**. Turn on **Demo mode** in Setup to try every screen with no
-   network, or connect your phone wallet to use the chain.
-
-Testing `rpc` and `http` needs your account to have X linked. Needs Solana OS 2.1.0 or
-later (the `solana` module).
+After a paid intro the introer's badge claims a bonus with `lamps.award`: 50 in person, 25
+over Telegram, at most two a day, one per pair of people, and only with X linked. If nothing is given (no X, or the app's cap), it tries again an hour later. The
+cap is set by the badge team.
 
 ## Publish
 
-Link X at `/profile`, then press **Publish**. Permissions: `rpc`, `http` (host
-`intro-bot-relay-production.nav-keeper.workers.dev`), `led`. Storage is always allowed.
+Permissions: `lamps`, `mesh`, `http` (host `relay.botbotcap.com`), `led`.
 
-## Local checks
+## Tests
 
-From the repo root:
-
-```sh
-for f in badge/main.lua badge/lib/*.lua; do luac -p "$f"; done
-lua badge-test/sim.lua
-```
-
-The test lives outside `badge/` so it isn't uploaded. It needs `python3` (`pda.py`).
-It also checks the badge's instructions and account decoding against the program's
-fixtures in `tests/fixtures` (or set `FIXTURES=<dir>`).
-
-## Local end-to-end
-
-```sh
-pnpm install
-pnpm e2e
-```
-
-Runs the whole flow on your machine, nothing public: the program on a local chain,
-the relay under `wrangler dev`, `badge-test/wallet.mjs` as the phone wallet, and
-`badge-test/e2e.lua` using the badge's own `lib/` code. Throwaway keys go in
-`target/e2e` (gitignored).
-
-It runs twice: on `solana-test-validator` (program loaded upgradeable), then on
-`surfpool --offline` with time travel for withdraw (24h) and both refunds (72h, 7 days).
-Needs the Solana CLI, `cargo build-sbf`, surfpool, Lua, Node, Python 3 and curl, with
-ports 8899, 8787, 18899 and 18787 free.
+From the repo root: `bash badge-test/e2e.sh`. It runs two simulated badges against the real
+server and a fake badge API. Needs Lua and Node 24+.
