@@ -67,13 +67,14 @@ describe('posting and deposits', () => {
     await expect(s.app.act(REQ, id, 'raise', { bid: 60 })).rejects.toThrow(/can not raise/);
   });
 
-  it('a paid job gets offers and a pick, then confirms', async () => {
+  it('a paid job gets offers and a pick, then pays in person', async () => {
     const s = setup();
     const id = await openJob(s, 50);
     await s.app.act(INT, id, 'offer', { name: '@intro' });
     await s.app.act(REQ, id, 'approve', { n: 0 });
-    expect(s.app.job(REQ, id).acts).toEqual(['confirm', 'meet', 'raise']);
-    await s.app.act(REQ, id, 'confirm', {});
+    expect(s.app.job(REQ, id).acts).toEqual(['inperson', 'telegram', 'raise']);
+    expect(s.app.job(INT, id).acts).toEqual([]); // the introer just stands nearby
+    await s.app.act(REQ, id, 'inperson', { badge: INT.badge });
     expect([...s.bank.paid.values()]).toEqual([{ to: INT.badge, amount: 50 }]);
   });
 
@@ -138,7 +139,7 @@ describe('posting and deposits', () => {
 });
 
 describe('the intro flow', () => {
-  it('offer, approve, meet, made, confirm pays the introer and the Fleet MAV', async () => {
+  it('offer, approve, pay in person: the full bid to the introer and the Fleet MAV', async () => {
     const s = setup();
     const id = await openJob(s, 100);
     expect(s.app.job(INT, id).tg).toBeUndefined();
@@ -149,30 +150,45 @@ describe('the intro flow', () => {
     expect(s.app.job(REQ, id).pool).toEqual([{ name: 'Ana', jobs: 0, earned: 0 }]);
     await expect(s.app.act(OTHER, id, 'approve', { n: 0 })).rejects.toThrow();
     await s.app.act(REQ, id, 'approve', { n: 0 });
-    // Made needs a verified meet first.
-    expect(s.app.job(INT, id).acts).toEqual(['meet']);
-    await expect(s.app.act(INT, id, 'made', {})).rejects.toThrow();
-    s.bank.meetItems.push({ id: '1', users: [OTHER.user, INT.user], jobs: [id] }); // wrong pair
-    await s.app.syncMeets();
-    expect(s.app.s.jobs[id]?.met).toBeFalsy();
-    s.bank.meetItems.push({ id: '2', users: [INT.user, REQ.user], jobs: [id] });
-    await s.app.syncMeets();
-    expect(s.app.job(INT, id).met).toBe(true);
-    await s.app.act(INT, id, 'made', {});
-    const out = await s.app.act(REQ, id, 'confirm', {});
+    expect(s.app.job(REQ, id).pbadge).toBe(INT.badge);
+    expect(s.app.job(INT, id).pbadge).toBeUndefined();
+    // The badge met nearby must be the picked introer's.
+    await expect(s.app.act(REQ, id, 'inperson', { badge: OTHER.badge })).rejects.toThrow("That's not Ana");
+    await expect(s.app.act(INT, id, 'inperson', { badge: INT.badge })).rejects.toThrow(/can not/);
+    const out = await s.app.act(REQ, id, 'inperson', { badge: INT.badge });
     expect(out.st).toBe('closed');
+    expect(s.app.s.jobs[id]).toMatchObject({ met: true, outcome: 'paid' });
     expect(s.bank.paid.get(`pay-${id}`)).toEqual({ to: INT.badge, amount: 100 });
+    expect(s.bank.paid.has(`refund-${id}`)).toBe(false);
     expect(s.app.fleet()).toEqual({ paid: 100, jobs: 1, bonus: 0, made: 100 });
-    expect(s.app.me(INT)).toMatchObject({ jobs: 1, earned: 100, value: 80, claim: [id] });
+    expect(s.app.me(INT)).toMatchObject({ jobs: 1, earned: 100, value: 80, claim: [id], csize: { [id]: 50 } });
+    // Paying twice is refused.
+    await expect(s.app.act(REQ, id, 'inperson', { badge: INT.badge })).rejects.toThrow();
+    await expect(s.app.act(REQ, id, 'telegram', {})).rejects.toThrow();
   });
 
-  it('requester can confirm before made', async () => {
+  it('pay over Telegram: half the bid to the introer, half back, a half bonus', async () => {
     const s = setup();
-    const id = await openJob(s);
+    const id = await openJob(s, 51);
     await s.app.act(INT, id, 'offer', { name: 'Ana' });
     await s.app.act(REQ, id, 'approve', { n: 0 });
-    await s.app.act(REQ, id, 'confirm', {});
-    expect(s.app.fleet().jobs).toBe(1);
+    await s.app.act(REQ, id, 'telegram', {});
+    expect(s.app.s.jobs[id]).toMatchObject({ status: 'closed', outcome: 'half' });
+    expect(s.bank.paid.get(`pay-${id}`)).toEqual({ to: INT.badge, amount: 25 });
+    expect(s.bank.paid.get(`refund-${id}`)).toEqual({ to: REQ.badge, amount: 26 });
+    expect(s.app.fleet()).toMatchObject({ paid: 25, jobs: 1 });
+    expect(s.app.me(INT)).toMatchObject({ earned: 25, claim: [id], csize: { [id]: 25 } });
+    expect(s.app.bonus(INT, id, { awarded: 50 })).toMatchObject({ claimed: true, amount: 25 });
+  });
+
+  it('moves jobs saved as made back to waiting for their payout', () => {
+    const st = emptyState();
+    st.jobs['1'] = {
+      id: '1', requester: REQ.user, rbadge: REQ.badge, who: 'A', co: 'B', tg: '@x', bid: 20,
+      status: 'made' as never, created: 1, deposit: '9', approved: INT.user, approvedAt: 1, offers: [INT.user],
+    };
+    const app = new App(st, new FakeBank(), () => 2);
+    expect(app.s.jobs['1']?.status).toBe('approved');
   });
 
   it('cancel refunds an open job; withdraw removes an offer', async () => {
@@ -234,22 +250,19 @@ describe('the intro flow', () => {
 });
 
 describe('rewards', () => {
-  // A confirmed intro between REQ and `who`, with or without a verified meet.
-  async function done(s: ReturnType<typeof setup>, who = INT, met = true, req = REQ) {
+  // An intro between REQ and `who`, paid in person (or over Telegram).
+  async function done(s: ReturnType<typeof setup>, who = INT, inPerson = true, req = REQ) {
     const { id } = s.app.post(req, { who: 'Toly', co: 'Solana', tg: 'req', bid: 20 });
     s.bank.deposit(req.user, req.badge, 20, `job ${id}`);
     await s.app.act(req, id, 'paid', {});
     await s.app.act(who, id, 'offer', { name: 'Ana' });
     await s.app.act(req, id, 'approve', { n: 0 });
-    if (met) {
-      s.bank.meetItems.push({ id: String(s.bank.meetItems.length + 1), users: [who.user, req.user], jobs: [id] });
-      await s.app.syncMeets();
-    }
-    await s.app.act(req, id, 'confirm', {});
+    if (inPerson) await s.app.act(req, id, 'inperson', { badge: who.badge });
+    else await s.app.act(req, id, 'telegram', {});
     return id;
   }
 
-  it('offers a bonus after a met, confirmed intro, and counts it once claimed', async () => {
+  it('offers a bonus after an in-person intro, and counts it once claimed', async () => {
     const s = setup();
     const id = await done(s);
     expect(s.app.me(INT).claim).toEqual([id]);
@@ -268,17 +281,17 @@ describe('rewards', () => {
     expect(s.app.bonus(INT, id, { awarded: 50 }).claimed).toBe(true);
   });
 
-  it('needs a verified meet', async () => {
+  it('gives half a bonus over Telegram', async () => {
     const s = setup();
-    await done(s, INT, false);
-    expect(s.app.me(INT).claim).toEqual([]);
+    const id = await done(s, INT, false);
+    expect(s.app.me(INT).csize).toEqual({ [id]: 25 });
   });
 
   it('rewards a pair once, either way round', async () => {
     const s = setup();
     const a = await done(s);
     await done(s); // same pair again
-    await done(s, REQ, true, INT); // swapped roles
+    await done(s, REQ, false, INT); // swapped roles, over Telegram
     expect(Object.keys(s.app.s.bonuses)).toEqual([a]);
   });
 
@@ -399,7 +412,7 @@ describe('raising the bid', () => {
     ]);
     await s.app.act(INT, id, 'offer', { name: '@i' });
     await s.app.act(REQ, id, 'approve', { n: 0 });
-    await s.app.act(REQ, id, 'confirm', {});
+    await s.app.act(REQ, id, 'inperson', { badge: INT.badge });
     await s.app.flush();
     expect([...s.bank.paid.values()].at(-1)).toEqual({ to: INT.badge, amount: 90 });
   });

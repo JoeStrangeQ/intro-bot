@@ -12,12 +12,12 @@ export const BOARD_SHOW = 10;
 export const BONUS = 50; // !LAMPs awarded to the introer per confirmed intro (lamps.award)
 export const BONUS_DAY = 2; // bonuses per introer per UTC day: 100 !LAMPs
 export const PAY_WAIT = 30 * 60_000; // a post must be paid within 30 min, or it is dropped
-export const WORK = 7 * 86_400_000; // approved -> made
-export const CONFIRM = 72 * 3_600_000; // made -> confirm
+export const WORK = 7 * 86_400_000; // approved -> paid; after this the requester can refund
+export const CONFIRM = 72 * 3_600_000; // then anyone's sweep refunds
 export const TEXT = 31;
 
 // 'pending': posted, waiting for its deposit. Private; it goes on the board as 'open' once paid.
-export type Status = 'pending' | 'open' | 'approved' | 'made' | 'closed';
+export type Status = 'pending' | 'open' | 'approved' | 'closed';
 export type Job = {
   id: string;
   requester: string;
@@ -31,10 +31,9 @@ export type Job = {
   deposit?: string; // the ledger id of the bid; every listed job has one
   approved?: string;
   approvedAt?: number;
-  madeAt?: number;
   offers: string[];
   met?: boolean;
-  outcome?: 'paid' | 'refunded';
+  outcome?: 'paid' | 'half' | 'refunded'; // half: paid over Telegram
   raiseTo?: number; // a funded job's new bid, waiting for the difference to land
 };
 export type Introer = {
@@ -47,7 +46,7 @@ export type Introer = {
   bonus?: number; // !LAMPs awarded on top of bids
 };
 /** A reward the introer's badge claims with lamps.award. */
-export type Bonus = { user: string; claimed: boolean; at?: number; amount?: number };
+export type Bonus = { user: string; size: number; claimed: boolean; at?: number; amount?: number };
 export type Payout = { to: string; amount: number; memo: string; done: boolean };
 export type State = {
   seq: number;
@@ -126,15 +125,19 @@ export class App {
     // Every bid is paid. Jobs saved while unpaid posts were listed go back to waiting for
     // their deposit, with a fresh 30 min to pay.
     for (const j of Object.values(s.jobs)) {
+      const old = j as unknown as { madeAt?: number; status: string };
       if (j.status !== 'closed' && !j.deposit) {
         j.status = 'pending';
         j.created = now();
         delete j.approved;
         delete j.approvedAt;
-        delete j.madeAt;
         j.offers = [];
       }
+      // "Intro made" is gone: a made job waits for its payout like an approved one.
+      if (old.status === 'made') j.status = 'approved';
+      delete old.madeAt;
     }
+    for (const b of Object.values(s.bonuses ?? {})) b.size ??= BONUS;
     s.bonuses ??= {};
     s.pairs ??= {};
     s.bonusPaid ??= 0;
@@ -186,6 +189,7 @@ export class App {
       mine: this.jobs((j) => j.requester === c.user && j.status !== 'closed', c.user, 6),
       offers: this.jobs((j) => j.offers.includes(c.user) && j.status !== 'closed', c.user, 6),
       claim: this.claimable(c.user),
+      csize: this.claimSizes(c.user),
       dep_today: this.depToday(c.user),
     };
   }
@@ -204,6 +208,13 @@ export class App {
       .filter(([, b]) => b.user === user && !b.claimed)
       .map(([id]) => id)
       .slice(0, left);
+  }
+
+  /** Job id -> bonus size (50 in person, 25 over Telegram) for what the badge may claim. */
+  private claimSizes(user: string): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const id of this.claimable(user)) out[id] = this.s.bonuses[id]?.size ?? BONUS;
+    return out;
   }
 
   private claimedToday(user: string): number {
@@ -228,20 +239,16 @@ export class App {
     const t = this.now();
     const out: string[] = [];
     if (j.requester === user) {
-      const live = j.status === 'approved' || j.status === 'made';
       // A post waits for its deposit; retry paying it or remove it.
       if (j.status === 'pending') out.push('pay', 'remove');
       if (j.status === 'open') out.push('edit', 'cancel');
-      if (live) out.push('confirm');
+      // Picked: pay in person (mesh meet, full bid) or over Telegram (half).
+      if (j.status === 'approved') out.push('inperson', 'telegram');
       if (j.status === 'approved' && t > (j.approvedAt ?? 0) + WORK) out.push('refund');
-      if (j.status === 'made' && t > (j.madeAt ?? 0) + CONFIRM) out.push('refund');
-      if (live) out.push('meet');
-      if (j.status !== 'closed' && j.status !== 'pending') out.push('raise');
+      if (j.status === 'open' || j.status === 'approved') out.push('raise');
     } else if (j.offers.includes(user)) {
-      if (j.approved === user) {
-        if (j.status === 'approved') out.push(j.met ? 'made' : 'meet');
-        else if (j.status === 'made' && !j.met) out.push('meet');
-      } else if (j.status === 'open') out.push('withdraw');
+      // The picked introer just stands nearby with the app open; the requester pays.
+      if (j.status === 'open' && j.approved !== user) out.push('withdraw');
     } else if (j.status === 'open') out.push('offer');
     return out;
   }
@@ -255,6 +262,8 @@ export class App {
       tg: offered ? j.tg : undefined,
       mine,
       picked: j.approved ? (this.s.introers[j.approved]?.name ?? 'introer') : undefined,
+      // The picked introer's badge, so the requester's badge can find it nearby.
+      pbadge: mine && j.approved ? this.s.badges[j.approved] : undefined,
       pool: mine
         ? j.offers.map((u) => {
             const i = this.s.introers[u];
@@ -314,7 +323,7 @@ export class App {
     c: Caller,
     id: string,
     act: string,
-    body: { n?: unknown; name?: unknown; who?: unknown; co?: unknown; tg?: unknown; bid?: unknown },
+    body: { n?: unknown; name?: unknown; who?: unknown; co?: unknown; tg?: unknown; bid?: unknown; badge?: unknown },
   ) {
     this.seen(c);
     const j = this.get(id);
@@ -333,7 +342,7 @@ export class App {
       this.save();
       return this.job(c, id);
     }
-    if (!this.acts(j, c.user).includes(act) || act === 'meet' || act === 'pay') throw new Err(409, `can not ${act} now`);
+    if (!this.acts(j, c.user).includes(act) || act === 'pay') throw new Err(409, `can not ${act} now`);
     if (act === 'offer') {
       if (j.offers.length >= MAX_OFFERS) throw new Err(409, 'this job is full');
       j.offers.push(c.user);
@@ -367,26 +376,16 @@ export class App {
       return { ...this.job(c, id), raise: { memo: raiseMemo(id, bid - j.bid), diff: bid - j.bid } };
     } else if (act === 'withdraw') {
       j.offers = j.offers.filter((u) => u !== c.user);
-    } else if (act === 'made') {
-      if (this.now() > (j.approvedAt ?? 0) + WORK) throw new Err(409, 'too late: 7 days passed');
-      j.status = 'made';
-      j.madeAt = this.now();
-    } else if (act === 'confirm') {
+    } else if (act === 'inperson') {
+      // Both badges signed a meet just now; the request itself is signed by the requester.
       const u = j.approved as string;
-      const i = this.s.introers[u];
-      if (i) {
-        i.jobs += 1;
-        i.earned += j.bid;
+      if (String(body.badge ?? '') !== this.s.badges[u]) {
+        throw new Err(409, `That's not ${this.s.introers[u]?.name ?? 'your introer'}`);
       }
-      this.s.paid += j.bid;
-      this.s.paidJobs += 1;
-      // Reward: a verified meet, and a pair never rewarded before.
-      const pair = [j.requester, u].sort().join('|'); // either way round counts once
-      if (j.met && !this.s.pairs[pair]) {
-        this.s.pairs[pair] = j.id;
-        this.s.bonuses[j.id] = { user: u, claimed: false };
-      }
-      this.close(j, 'paid', this.s.badges[u] ?? u, `Intro Bot: intro ${j.id} confirmed`);
+      j.met = true;
+      this.payIntro(j, j.bid, BONUS);
+    } else if (act === 'telegram') {
+      this.payIntro(j, Math.floor(j.bid / 2), BONUS / 2);
     } else if (act === 'cancel' || act === 'refund') {
       this.close(j, 'refunded', j.rbadge || j.requester, `Intro Bot: job ${j.id} refunded`);
     }
@@ -400,11 +399,11 @@ export class App {
     this.seen(c);
     const b = this.s.bonuses[id];
     if (!b || b.user !== c.user) throw new Err(404, 'no bonus for this job');
-    if (b.claimed) return { claimed: true, amount: b.amount ?? 0, claim: this.claimable(c.user) };
+    if (b.claimed) return { claimed: true, amount: b.amount ?? 0, claim: this.claimable(c.user), csize: this.claimSizes(c.user) };
     const got = Number(body.awarded);
     if (Number.isInteger(got) && got > 0) {
       if (this.claimedToday(c.user) >= BONUS_DAY) throw new Err(409, 'bonus limit for today');
-      const amount = Math.min(got, BONUS);
+      const amount = Math.min(got, b.size);
       b.claimed = true;
       b.at = this.now();
       b.amount = amount;
@@ -414,13 +413,37 @@ export class App {
       this.save();
     }
     // Nothing awarded (no X linked, or the app's daily cap): it stays to claim later.
-    return { claimed: b.claimed, amount: b.amount ?? 0, claim: this.claimable(c.user) };
+    return { claimed: b.claimed, amount: b.amount ?? 0, claim: this.claimable(c.user), csize: this.claimSizes(c.user) };
   }
 
-  private close(j: Job, outcome: 'paid' | 'refunded', to: string, why: string) {
+  /** Pays `amount` of the bid to the picked introer, the rest back to the requester. */
+  private payIntro(j: Job, amount: number, bonus: number) {
+    const u = j.approved as string;
+    const i = this.s.introers[u];
+    if (i) {
+      i.jobs += 1;
+      i.earned += amount;
+    }
+    this.s.paid += amount;
+    this.s.paidJobs += 1;
+    // Reward: a pair never rewarded before, either way round.
+    const pair = [j.requester, u].sort().join('|');
+    if (!this.s.pairs[pair]) {
+      this.s.pairs[pair] = j.id;
+      this.s.bonuses[j.id] = { user: u, size: bonus, claimed: false };
+    }
+    j.status = 'closed';
+    j.outcome = amount === j.bid ? 'paid' : 'half';
+    this.queue(`pay-${j.id}`, this.s.badges[u] ?? u, amount, `Intro Bot: intro ${j.id} paid`);
+    if (amount < j.bid) {
+      this.queue(`refund-${j.id}`, j.rbadge || j.requester, j.bid - amount, `Intro Bot: job ${j.id} half back`);
+    }
+  }
+
+  private close(j: Job, outcome: 'refunded', to: string, why: string) {
     j.status = 'closed';
     j.outcome = outcome;
-    this.queue(`${outcome === 'paid' ? 'pay' : 'refund'}-${j.id}`, to, j.bid, why);
+    this.queue(`refund-${j.id}`, to, j.bid, why);
   }
 
   private queue(key: string, to: string, amount: number, memo_: string) {
@@ -452,7 +475,7 @@ export class App {
       this.countDeposit(d);
       const r = raiseOf(d.memo);
       const j = this.s.jobs[r?.id ?? jobOf(d.memo) ?? ''];
-      const live = j && (j.status === 'open' || j.status === 'approved' || j.status === 'made');
+      const live = j && (j.status === 'open' || j.status === 'approved');
       if (r && j && live && j.deposit && j.raiseTo && j.requester === d.user &&
           d.amount === r.diff && j.bid + r.diff === j.raiseTo) {
         j.bid = j.raiseTo; // the raise landed
@@ -475,13 +498,13 @@ export class App {
     this.s.depDay[d.user] = cur && cur.day === day ? { day, sum: cur.sum + d.amount } : { day, sum: d.amount };
   }
 
-  /** Meets between a requester and their approved introer with {job=id} mark the job met. */
+  /** Meets between a requester and their picked introer with {job=id} mark the job met (a record). */
   async syncMeets() {
     const { items, next } = await this.bank.meets(this.s.meetsAfter);
     for (const m of items) {
       for (const id of m.jobs) {
         const j = this.s.jobs[id];
-        if (!j || !j.approved || (j.status !== 'approved' && j.status !== 'made')) continue;
+        if (!j || !j.approved) continue;
         const pair = new Set(m.users);
         if (pair.has(j.requester) && pair.has(j.approved) && j.requester !== j.approved) j.met = true;
       }
@@ -494,9 +517,7 @@ export class App {
   sweep() {
     const t = this.now();
     for (const j of Object.values(this.s.jobs)) {
-      const stalled =
-        (j.status === 'approved' && t > (j.approvedAt ?? 0) + WORK + CONFIRM) ||
-        (j.status === 'made' && t > (j.madeAt ?? 0) + CONFIRM + CONFIRM);
+      const stalled = j.status === 'approved' && t > (j.approvedAt ?? 0) + WORK + CONFIRM;
       if (j.status === 'pending' && t > j.created + PAY_WAIT) delete this.s.jobs[j.id];
       else if (stalled) this.close(j, 'refunded', j.rbadge || j.requester, `Intro Bot: job ${j.id} refunded`);
     }

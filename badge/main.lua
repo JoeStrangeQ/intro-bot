@@ -1,14 +1,14 @@
 -- Intro Bot: the intro board, paid in !LAMPs (docs/spec-lamps.md). Post a job ("introduce me
--- to..."), people offer, you pick one after talking on Telegram, meet badge to badge, and you
--- confirm to pay. The bid waits in the app's !LAMP escrow; our server (lib/api.lua) keeps the
--- board and pays out. The badge holds no keys: the badge server signs who is asking.
+-- to..."), people offer, you pick one after talking on Telegram, then pay in person (the
+-- badges meet: full bid) or over Telegram (half). The bid waits in the app's !LAMP escrow;
+-- our server (lib/api.lua) keeps the board and pays out. The badge holds no keys: the badge server signs who is asking.
 local api = require("lib.api")
 local art = require("lib.art")
 local list = require("lib.list")
 
 local ESCROW = "ESC-GQD4T2WC"
 local MIN_BID, MAX_BID, TEXT = 10, 500, 31
-local BONUS = 50  -- !LAMPs the app awards an introer per confirmed intro (lamps.award)
+local BONUS = 50  -- !LAMPs the app awards an introer per in-person intro (lamps.award); half over Telegram
 local POLL_MS, SPARK_N = 20000, 24
 local C = {
   desk = 0xC9BFF2, brand = 0x6A50D8, ink = 0x000000, paper = 0xF6F3FD,
@@ -18,15 +18,16 @@ local TABS = {"board", "fleet", "request", "myjobs", "myoffers", "profile"}
 local IS_TAB = {request = true, board = true, fleet = true, myjobs = true, myoffers = true, profile = true}
 local TITLE = {
   request = "Request an intro", board = "Intro board", fleet = "Badge Fleet", myjobs = "My jobs",
-  myoffers = "My offers", profile = "Profile", job = "Job", meet = "We met",
+  myoffers = "My offers", profile = "Profile", job = "Job", inperson = "Pay in person",
+  getpaid = "Get paid in person",
 }
 local LABEL = {
   offer = "Offer to make this intro", withdraw = "Withdraw my offer", cancel = "Remove: bid back",
   edit = "Edit who, company, Telegram", remove = "Remove (not paid)",
-  confirm = "Confirm: pay the introer", refund = "Refund my bid", made = "Intro made",
-  meet = "We met: verify badges", pay = "Pay the bid", raise = "Raise the bid",
+  inperson = "Pay in person: full bid", telegram = "Pay over Telegram: half",
+  getpaid = "Get paid in person", refund = "Refund my bid", pay = "Pay the bid", raise = "Raise the bid",
 }
-local STATUS = {open = "Open", approved = "Picked", made = "Made", closed = "Closed"}
+local STATUS = {open = "Open", approved = "Picked", closed = "Closed"}
 
 -- A job's status in a word. Every bid is paid into escrow when posted; a post waits
 -- off the board ("Paying") until its deposit lands.
@@ -296,7 +297,7 @@ local function build_request()
     {title = "My Telegram", right = st.tg or "not set"},
   }, {on_select = function(i) if i == 1 then ask_job() else ask_tg() end end})
   line(144, "Offerers see your Telegram.", C.ink)
-  line(158, "Bid waits in escrow till you confirm.")
+  line(158, "Bid waits in escrow till you pay.")
   ui.rect(5, 174, 310, 1, {color = C.line})
   center(180, CTA, 14, C.ink)
   ui.hint(TABHINT)
@@ -307,11 +308,10 @@ end
 local function job_item(j, role)
   local right = status(j)
   if role == "introer" then
-    right = j.st == "open" and "Waiting" or (j.me and (j.st == "made" and "Made" or "You!") or "Not picked")
+    right = j.st == "open" and "Waiting" or (j.me and "You!" or "Not picked")
   elseif role == "board" and j.o then
     right = "Offered"
   end
-  if j.met and (j.st == "approved" or j.st == "made") then right = right .. " +met" end
   return {
     title = j.who .. " @ " .. j.co,
     sub = lp(j.bid) .. "   " .. (j.n == 1 and "1 offer" or (j.n .. " offers")),
@@ -373,7 +373,8 @@ local function build_myoffers() build_jobs("myoffers", "introer", "No offers yet
 -- One job ------------------------------------------------------------------
 
 local function do_act(j, a, n)
-  if a == "meet" then st.meet = {job = j.id} return show("meet") end
+  if a == "inperson" then st.meet = {job = j.id, who = j.picked, badge = j.pbadge, bid = j.bid} return show("inperson") end
+  if a == "getpaid" then st.meet = {job = j.id, who = j.who} return show("getpaid") end
   if a == "pay" then return pay(j.id, j.bid) end
   if a == "raise" then
     return ask_bid("New bid, now " .. math.tointeger(tonumber(j.bid) or 0), function(bid, left)
@@ -397,7 +398,7 @@ local function do_act(j, a, n)
   local function go()
     call("POST", "/jobs/" .. j.id .. "/" .. a, {n = n, name = st.tg}, function(ok, d)
       if not ok then return ui.toast(tostring(d)) end
-      ui.toast(a == "confirm" and CTA_PAID or (LABEL[a] or a) .. ": done")
+      ui.toast(a == "telegram" and CTA_PAID or (LABEL[a] or a) .. ": done")
       st.pick = d
       poll(true)
       show_later("job")
@@ -435,8 +436,11 @@ local function do_act(j, a, n)
       end)
     end)
   end
-  if a == "confirm" then
-    return confirm("Pay " .. lp(j.bid) .. " to " .. (j.picked or "them") .. "?", function(y) if y then go() end end)
+  if a == "telegram" then
+    local bid = math.tointeger(tonumber(j.bid)) or 0
+    local half = bid // 2
+    return confirm("Paid over Telegram? " .. (j.picked or "They") .. " gets " .. lp(half) .. ", "
+      .. lp(bid - half) .. " back to you.", function(y) if y then go() end end)
   end
   go()
 end
@@ -461,11 +465,14 @@ local function build_job()
     y = y + 16
   end
   if j.picked then
-    line(y, "Picked: " .. j.picked .. (j.met and "   met: verified" or "   met: not yet"), C.ink)
+    line(y, "Picked: " .. j.picked, C.ink)
     y = y + 16
   end
   local items, act = {}, {}
-  for _, a in ipairs(j.acts or {}) do
+  -- The picked introer's side of paying in person (no server action: their badge just signs).
+  local acts = j.acts or {}
+  if j.me and j.st == "approved" then acts = {"getpaid"} end
+  for _, a in ipairs(acts) do
     items[#items + 1] = {title = LABEL[a] or a}
     act[#act + 1] = {a}
   end
@@ -489,33 +496,30 @@ local function build_job()
     line(178, "Not paid yet: pay or remove.", C.ink)
   elseif j.mine and j.st == "open" then
     line(178, "Raise the bid in the list.", C.dim)
-  elseif j.me and j.st == "approved" and not j.met then
-    line(178, "Meet badge to badge, then mark made.", C.ink)
-  elseif j.mine and j.st == "made" then
-    line(178, "Made? Confirm to pay. 72h, then refund.", C.ink)
+  elseif j.mine and j.st == "approved" then
+    line(178, "In person pays more. Meet up!", C.ink)
+  elseif j.me and j.st == "approved" then
+    line(178, "Open Get paid when you meet them.", C.ink)
   end
   ui.hint(#items > 0 and "SELECT choose   CANCEL back" or "CANCEL back")
 end
 
--- We met: both badges sign a meet for this job ------------------------------
+-- Paying in person: the badges meet over the mesh ---------------------------
+-- The requester's badge lists badges nearby, they pick the introer and confirm, both badges
+-- sign a meet {job, pay}, and the server pays the full bid. The introer opens Get paid so
+-- their badge is on the mesh and signs only for this job. Wi-Fi pauses while the mesh is on
+-- (one radio), so the payment call waits for Wi-Fi to come back.
 
 local function meet_text(a, b)
-  if st.screen ~= "meet" or not st.w.m1 then return end
+  if not st.w.m1 then return end
   st.w.m1:text(a)
   st.w.m2:text(b or "")
 end
 
-local function build_meet()
-  frame("meet")
-  art.logo(14, 32, 3)
-  ui.label(60, 34, "Hold your badges close", {size = 14, color = C.brand})
-  ui.label(60, 52, "Both open We met on this job.", {size = 12, color = C.ink})
-  st.w.m1 = center(96, "SELECT to verify", 14, C.ink)
-  st.w.m2 = center(118, "", 12, C.dim)
-  center(150, "Signed by both badges. No Wi-Fi needed.", 12, C.dim)
-  ui.hint("SELECT verify   CANCEL back")
-  if not mesh or not mesh.meet then return meet_text("This badge can't meet", "Update Solana OS") end
+local function mesh_on()
+  if not mesh or not mesh.meet then return false end
   if mesh.resume then mesh.resume() end
+  return true
 end
 
 local function leave_meet()
@@ -523,14 +527,7 @@ local function leave_meet()
   st.meet = nil
 end
 
-local function met(id)
-  ui.toast("Met! Verified in a moment.")
-  if led then
-    led.fill(0x61, 0xBB, 0x46)
-    timer.after(600, brand_led)
-  end
-  leave_meet()
-  -- The meet uploads once Wi-Fi is back; the server marks the job met soon after.
+local function back_to_job(id)
   call("GET", "/jobs/" .. id, nil, function(ok, d)
     if ok then
       st.pick = d
@@ -539,29 +536,120 @@ local function met(id)
   end)
 end
 
-local function try_meet()
-  local m = st.meet
-  if not m then return end
-  if not mesh or not mesh.meet then return end
-  local near
-  for _, p in ipairs(mesh.nearby() or {}) do
-    if p.kind == "badge" then near = p break end
-  end
-  if not near then return meet_text("No badge nearby", "Ask them to open We met too") end
-  meet_text("Asking " .. (near.name or near.id) .. "...", "")
-  local ok, err = mesh.meet(near.id, {job = m.job}, function(done, res)
-    if st.meet ~= m then return end
-    if done then met(m.job) else meet_text("Not met: " .. tostring(res), "SELECT to try again") end
+-- After a meet, Wi-Fi takes a few seconds to rejoin: retry the call until it answers.
+local function call_online(method, path, body, cb, tries)
+  call(method, path, body, function(ok, d)
+    if not ok and d == "offline" and (tries or 0) < 20 then
+      return timer.after(1500, function() call_online(method, path, body, cb, (tries or 0) + 1) end)
+    end
+    cb(ok, d)
   end)
-  if not ok then meet_text("Not met: " .. tostring(err), "SELECT to try again") end
 end
 
--- The other badge asks: sign only for the job open on this screen.
+-- Badges nearby, the picked introer's first.
+local function nearby(m)
+  local out = {}
+  for _, p in ipairs(mesh and mesh.nearby and mesh.nearby() or {}) do
+    if p.kind == "badge" then
+      if p.id == m.badge then table.insert(out, 1, p) else out[#out + 1] = p end
+    end
+  end
+  return out
+end
+
+local function paid_in_person(m, peer)
+  meet_text("Met! Paying " .. lp(m.bid) .. "...", "Waiting for Wi-Fi")
+  if mesh and mesh.pause then mesh.pause() end
+  call_online("POST", "/jobs/" .. m.job .. "/inperson", {badge = peer.id}, function(ok, d)
+    if st.meet ~= m then return end
+    st.meet = nil
+    if not ok then
+      ui.toast(tostring(d))
+      return back_to_job(m.job)
+    end
+    ui.toast(CTA_PAID)
+    if led then
+      led.fill(0x61, 0xBB, 0x46)
+      timer.after(600, brand_led)
+    end
+    st.pick = d
+    poll(true)
+    show_later("job")
+  end)
+end
+
+local function pick_peer(m, peer)
+  local name = peer.name or peer.id
+  confirm("Pay " .. name .. " " .. lp(m.bid) .. " now?", function(y)
+    if not y or st.meet ~= m then return end
+    meet_text("Asking " .. name .. "...", "Their badge signs too")
+    local ok, err = mesh.meet(peer.id, {job = m.job, pay = 1}, function(done, res)
+      if st.meet ~= m then return end
+      if done then return paid_in_person(m, peer) end
+      meet_text("Not met: " .. tostring(res), "Ask them to open Get paid")
+    end)
+    if not ok then meet_text("Not met: " .. tostring(err), "Try again") end
+  end)
+end
+
+local function draw_nearby()
+  local m = st.meet
+  if st.screen ~= "inperson" or not m then return end
+  local peers = nearby(m)
+  local key = ""
+  for _, p in ipairs(peers) do key = key .. p.id .. "," end
+  if key == st.w.near_key then return end
+  st.w.near_key = key
+  if st.w.near then st.w.near:remove() st.w.near = nil end
+  if #peers == 0 then return meet_text("No badges nearby yet", "Ask " .. (m.who or "them") .. " to open Get paid") end
+  meet_text("", "")
+  local items = {}
+  for k, p in ipairs(peers) do
+    items[k] = {title = p.name or p.id, right = p.id == m.badge and "picked" or p.id}
+  end
+  st.w.near = list.new(6, 70, 308, 108, items, {on_select = function(i)
+    local p = peers[i]
+    if p then pick_peer(m, p) end
+  end})
+end
+
+local function build_inperson()
+  frame("inperson")
+  local m = st.meet
+  ui.label(14, 30, "Pick " .. (m.who or "your introer") .. " from badges nearby", {size = 12, color = C.ink, w = 292})
+  ui.label(14, 46, "Pays " .. lp(m.bid) .. ", plus their bonus.", {size = 12, color = C.ink, w = 292})
+  st.w.m1 = center(100, "Looking for badges...", 14, C.ink)
+  st.w.m2 = center(120, "", 12, C.dim)
+  ui.hint("SELECT pay   CANCEL back")
+  if not mesh_on() then return meet_text("This badge can't meet", "Update Solana OS") end
+  st.w.near_t = 0
+  draw_nearby()
+end
+
+local function build_getpaid()
+  frame("getpaid")
+  art.logo(14, 32, 3)
+  ui.label(60, 34, "Stand near them", {size = 14, color = C.brand})
+  ui.label(60, 52, "They pick you on Pay in person.", {size = 12, color = C.ink, w = 250})
+  st.w.m1 = center(100, "Ready to get paid", 14, C.ink)
+  st.w.m2 = center(120, "Keep this screen open", 12, C.dim)
+  ui.hint("CANCEL back")
+  if not mesh_on() then meet_text("This badge can't meet", "Update Solana OS") end
+end
+
+-- The requester's badge asks: sign only on Get paid, for the job open there.
 function on_meet(from, data)
   local m = st.meet
-  if st.screen ~= "meet" or not m or type(data) ~= "table" or tostring(data.job) ~= m.job then return nil end
-  timer.after(10, function() met(m.job) end)
-  return {job = m.job}
+  if st.screen ~= "getpaid" or not m or type(data) ~= "table" or tostring(data.job) ~= m.job then return nil end
+  ui.toast("Getting paid for " .. (m.who or "this intro"))
+  timer.after(10, function()
+    if st.meet ~= m then return end
+    leave_meet()
+    -- Wi-Fi rejoins; JOB DONE plays when the payout shows in /me.
+    timer.after(4000, function() poll(true) end)
+    back_to_job(m.job)
+  end)
+  return {job = m.job, ok = 1}
 end
 
 -- Profile ------------------------------------------------------------------
@@ -681,7 +769,8 @@ end
 
 local BUILD = {
   request = build_request, board = build_board, fleet = build_fleet, myjobs = build_myjobs,
-  myoffers = build_myoffers, profile = build_profile, job = build_job, meet = build_meet,
+  myoffers = build_myoffers, profile = build_profile, job = build_job, inperson = build_inperson,
+  getpaid = build_getpaid,
 }
 
 function show(name)
@@ -712,10 +801,13 @@ function job_done(n)
   local a = {t = 0}
   a.logo, a.shift = art.logo(127, 14, 5, 0), 0
   ui.label(0, 98, "JOB DONE!", {size = 32, color = C.white, w = ui.W, align = "center"})
-  ui.label(0, 134, n > 1 and ("+" .. n .. " intros confirmed") or "+1 intro confirmed",
+  ui.label(0, 134, n > 1 and ("+" .. n .. " intros paid") or "+1 intro paid",
     {size = 14, color = C.desk, w = ui.W, align = "center"})
-  if st.me and st.me.claim and #st.me.claim > 0 then
-    ui.label(0, 152, "+" .. BONUS .. " !LAMPs bonus", {size = 14, color = C.white, w = ui.W, align = "center"})
+  local ids = st.me and st.me.claim
+  if ids and #ids > 0 then
+    local size = st.me.csize and math.tointeger(tonumber(st.me.csize[tostring(ids[1])])) or BONUS
+    ui.label(0, 152, "+" .. size .. " !LAMPs bonus" .. (size < BONUS and " (half: Telegram)" or ""),
+      {size = 14, color = C.white, w = ui.W, align = "center"})
   end
   ui.label(10, 172, CTA_EARNED, {size = 14, color = C.white, w = 300, align = "center"})
   st.anim = a
@@ -754,27 +846,28 @@ local function refresh()
   end
 end
 
--- Rewards: the server lists bonuses this badge may claim (a met, confirmed intro; one per
--- pair; two a day). lamps.award pays them within the app's daily cap; the server records it.
+-- Rewards: the server lists bonuses this badge may claim (50 in person, 25 over Telegram; one
+-- per pair; two a day). lamps.award pays them within the app's daily cap; the server records it.
 local function claim_bonus()
   local ids = st.me and st.me.claim
   if not lamps or not lamps.award or st.claiming or not ids or #ids == 0 then return end
   if st.bonus_next and sys.millis() < st.bonus_next then return end
   local id = tostring(ids[1])
+  local size = st.me.csize and math.tointeger(tonumber(st.me.csize[id])) or BONUS
   st.claiming = true
-  lamps.award(BONUS, "intro " .. id, function(ok, r)
+  lamps.award(size, "intro " .. id, function(ok, r)
     local got = ok and type(r) == "table" and math.tointeger(tonumber(r.awarded)) or 0
     local needs_x = ok and type(r) == "table" and r.needsX and true or false
     call("POST", "/jobs/" .. id .. "/bonus", {awarded = got, needsX = needs_x}, function(ok2, b)
       st.claiming = false
       if got > 0 then
         ui.toast("+" .. got .. " !LAMPs bonus")
-        if ok2 and type(b) == "table" and st.me then st.me.claim = b.claim end
+        if ok2 and type(b) == "table" and st.me then st.me.claim, st.me.csize = b.claim, b.csize end
         return claim_bonus()
       end
       -- Nothing given: no X linked, or the app's cap for today. Try again in an hour.
       st.bonus_next = sys.millis() + 3600000
-      if needs_x then ui.toast("Link X to get the " .. BONUS .. " !LAMP bonus") end
+      if needs_x then ui.toast("Link X to get the " .. size .. " !LAMP bonus") end
     end)
   end)
 end
@@ -844,11 +937,11 @@ function on_key(key)
     if key == "select" then still() show("board") return true end
     return key ~= "back"
   end
-  if (key == "up" or key == "down" or key == "select") and st.screen ~= "meet" and list.key(key) then
+  if (key == "up" or key == "down" or key == "select") and list.key(key) then
     return true
   end
   if key == "back" then
-    if st.screen == "meet" then
+    if st.screen == "inperson" or st.screen == "getpaid" then
       leave_meet()
       show(st.pick and "job" or "board")
       return true
@@ -862,7 +955,6 @@ function on_key(key)
     if IS_TAB[st.screen] then show("splash") flicker(1, true) return true end
     return false
   end
-  if key == "select" and st.screen == "meet" then try_meet() return true end
   local k = tab_index()
   if key == "left" then flicker(1) elseif key == "right" then flicker(-1) end
   if k and (key == "left" or key == "right") then
@@ -874,6 +966,13 @@ end
 function on_tick(ms)
   if st.anim then return anim_tick(ms) end
   sweep_tick(ms)
+  if st.screen == "inperson" and st.w.near_t then
+    st.w.near_t = st.w.near_t + ms
+    if st.w.near_t >= 2000 then
+      st.w.near_t = 0
+      draw_nearby()
+    end
+  end
   st.ago = st.ago + ms
   if st.ago >= 1000 then
     st.ago = st.ago - 1000
@@ -909,7 +1008,7 @@ local function splash()
 end
 BUILD.splash = splash
 
--- Wi-Fi first: the mesh takes the radio only on the We met screen.
+-- Wi-Fi first: the mesh takes the radio only on Pay in person and Get paid.
 if mesh and mesh.pause then mesh.pause() end
 splash()
 flicker(1, true)

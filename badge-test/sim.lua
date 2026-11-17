@@ -398,43 +398,37 @@ pick(A, "Toly @ Solana")
 run(A, 300)
 pick(A, "Approve @ana")
 check(has(A, "Picked: @ana"), "approved @ana")
-check(item(A, "Confirm") ~= nil and item(A, "We met") ~= nil, "requester can confirm or meet")
+check(item(A, "Pay in person") ~= nil and item(A, "Pay over Telegram") ~= nil, "requester can pay in person or over Telegram")
+check(item(A, "Confirm") == nil and item(A, "We met") == nil, "no separate confirm or meet step")
+check(has(A, "In person pays more. Meet up!"), "in person nudge")
 
--- Introer can't mark made before meeting.
+-- The introer has nothing to mark: they open Get paid and stand nearby.
 tab(I, "myoffers")
 check(item(I, "Toly @ Solana") ~= nil, "my offers lists the job")
 pick(I, "Toly @ Solana")
 run(I, 300)
-check(item(I, "Intro made") == nil and item(I, "We met") ~= nil, "meet first, then made")
+check(item(I, "Intro made") == nil and item(I, "Get paid in person") ~= nil, "introer: Get paid, no made step")
+pick(I, "Get paid in person")
+check(I.mesh, "introer: mesh on in Get paid")
 
--- Both open We met; the introer asks, the requester's badge signs.
-pick(I, "We met")
-pick(A, "We met")
-check(I.mesh and A.mesh, "mesh on in We met")
-I.nearby = {{id = "REQ001", name = "@req", kind = "badge", rssi = -40}}
-key(I, "select")
-run(I, 300) run(A, 300)
-check(last_toast(I):find("Met!") ~= nil, "introer: met")
-check(last_toast(A):find("Met!") ~= nil, "requester: met")
-check(not I.mesh and not A.mesh, "mesh paused again after meeting")
-
--- The server reads the meet; then the introer marks made.
-os.execute("sleep 1.5")
-tab(I, "myoffers")
-pick(I, "Toly @ Solana")
+-- The requester picks the introer from badges nearby, confirms, both badges sign, paid.
+pick(A, "Pay in person")
+check(A.mesh, "requester: mesh on in Pay in person")
+check(has(A, "No badges nearby yet"), "nobody nearby yet: " .. texts(A))
+A.nearby = {{id = "OTH009", name = "@zed", kind = "badge", rssi = -60},
+  {id = "INT001", name = "@ana", kind = "badge", rssi = -40}}
+run(A, 2100)
+check(lst(A) and lst(A).its[1].title == "@ana" and lst(A).its[1].right == "picked", "picked introer listed first: " .. texts(A))
+pick(A, "@ana")
+check(A.confirmed == "Pay @ana 50 !LAMPs now?", "confirm before paying: " .. tostring(A.confirmed))
+run(A, 300) run(I, 300)
+check(last_toast(I) == "Getting paid for Toly", "introer: getting paid toast: " .. last_toast(I))
+check(last_toast(A):find("Paid!") ~= nil, "pay in person pays: " .. last_toast(A))
+check(not A.mesh, "requester: mesh paused after paying")
 run(I, 300)
-check(has(I, "met: verified"), "meet verified by the server")
-pick(I, "Intro made")
-check(last_toast(I) == "Intro made: done", "marked made")
-
--- Requester confirms: the introer is paid from the escrow.
-tab(A, "myjobs")
-pick(A, "Toly @ Solana")
-run(A, 300)
-pick(A, "Confirm")
-check(last_toast(A):find("Paid!") ~= nil, "confirm pays")
+check(not I.mesh, "introer: mesh paused after the meet")
 local pays = json.decode(sh("curl -s " .. q(FAKE .. "/test/pays")))
-check(pays and pays[1] and pays[1].to == "INT001" and pays[1].amount == 50, "escrow paid the introer 50")
+check(pays and pays[1] and pays[1].to == "INT001" and pays[1].amount == 50, "escrow paid the introer the full 50")
 
 -- The introer's badge plays JOB DONE with the bonus line, and claims the bonus. Without X
 -- linked nothing is awarded and it stays pending; once X is linked it is paid.
@@ -505,6 +499,32 @@ pick(A, "Remove: bid back")
 run(A, 300)
 pays = json.decode(sh("curl -s " .. q(FAKE .. "/test/pays")))
 check(pays and pays[2] and pays[2].to == "REQ001" and pays[2].amount == 35, "cancel refunded the raised 35")
+
+-- Pay over Telegram: half the bid to the introer, the rest back.
+tab(A, "board")
+pick(A, "+ Request an intro", {"Lily", "Jupiter", "21"})
+run(A, 500)
+tab(I, "board")
+run(I, 20000)
+pick(I, "Lily @ Jupiter")
+run(I, 300)
+pick(I, "Offer to make this intro")
+run(I, 300)
+tab(A, "myjobs")
+run(A, 20000)
+pick(A, "Lily @ Jupiter")
+run(A, 300)
+pick(A, "Approve @ana")
+pick(A, "Pay over Telegram")
+check(A.confirmed == "Paid over Telegram? @ana gets 10 !LAMPs, 11 !LAMPs back to you.", "telegram confirm: " .. tostring(A.confirmed))
+run(A, 300)
+pays = json.decode(sh("curl -s " .. q(FAKE .. "/test/pays")))
+local half, back = false, false
+for _, p in ipairs(pays or {}) do
+  if p.to == "INT001" and p.amount == 10 then half = true end
+  if p.to == "REQ001" and p.amount == 11 then back = true end
+end
+check(half and back, "telegram: 10 to the introer, 11 back")
 
 -- A refused deposit shows the OS's own words and the post is removed.
 A.deny = "denied"

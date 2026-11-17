@@ -12,16 +12,18 @@
 3. **Offer.** Anyone can offer; no sign-up. The first offer makes your introer profile, named by your Telegram. Offering shows the
    requester's Telegram.
 4. **Approve.** The requester picks one offer.
-5. **We met.** Both open "We met" on the job and hold their badges close. The badges sign a
-   mesh meet with `{job = id}`. The server reads the meets with the app's server key and
-   marks the job **met** when the requester and the picked introer met.
-6. **Made, confirm.** The introer can mark the intro made only after a verified meet. The
-   requester confirms (any time after approving) and the server pays the bid from the
-   escrow to the introer.
+5. **Pay in person** (full bid). The introer opens "Get paid in person" on the job (mesh on).
+   The requester opens "Pay in person": the badge lists badges nearby (the picked introer's
+   first), they pick one and confirm, and the badges sign a mesh meet `{job = id, pay = 1}`.
+   The introer's badge signs only on Get paid, for that job. The requester's badge then
+   calls `POST /jobs/<id>/inperson {badge}`; the server checks the badge is the picked
+   introer's ("That's not <name>" otherwise) and pays the full bid at once. The meet upload
+   later marks the job met, as a record.
+6. **Pay over Telegram** (half). The requester confirms; the server pays half the bid (rounded
+   down) to the introer and the rest back to the requester.
 7. **Edit and remove.** Edit who, company and Telegram any time before approving. Remove an open job to get the bid back. **Raise the bid** any time before it closes: the badge pays the difference (memo `job <id> +<diff>`), and the server adds it once it lands; a wrong one is returned. Introers can withdraw an offer until they are picked.
-8. **Refunds.** After approving: 7 days for made, then 72 hours to
-   confirm; when a window passes the requester can refund. The server refunds by itself
-   72 hours after that.
+8. **Refunds.** 7 days after approving with no payout, the requester can refund. The server
+   refunds by itself 72 hours after that.
 
 Max 3 live jobs per requester, 16 offers per job. A player can pay at most 500 !LAMPs a day
 (badge rule; refunds don't count back). `GET /me` returns `dep_today`, what the user deposited today (UTC).
@@ -35,10 +37,10 @@ Max 3 live jobs per requester, 16 offers per job. A player can pay at most 500 !
 
 ## Rewards
 
-- On confirm, the introer gets a 50 !LAMP bonus if the job has a verified meet and this
-  pair of people (either way round) was never rewarded before.
-- `GET /me` lists `claim`: bonuses the badge may claim now, at most 2 a day (100 !LAMPs, UTC
-  day). The badge calls `lamps.award(50, "intro <id>")`, then `POST /jobs/<id>/bonus
+- On a payout the introer gets a bonus, 50 !LAMPs in person or 25 over Telegram, if this pair
+  of people (either way round) was never rewarded before.
+- `GET /me` lists `claim`: bonuses the badge may claim now, at most 2 a day (UTC day), and
+  `csize`: each one's size. The badge calls `lamps.award(<size>, "intro <id>")`, then `POST /jobs/<id>/bonus
   {awarded, needsX}`. The server marks it claimed only when something was awarded, once.
 - Nothing awarded (no X linked, or the app's daily cap): it stays pending; the badge tries
   again an hour later. The cap itself is set by the badge team.
@@ -61,12 +63,12 @@ All under `https://relay.botbotcap.com/api`, signed by the badge server.
 | Call | Does |
 | --- | --- |
 | `GET /board` | open (paid) jobs, newest first; 10 |
-| `GET /me` | introer profile, machine value, my jobs, my offers, `claim` (bonuses to claim), `dep_today` |
+| `GET /me` | introer profile, machine value, my jobs, my offers, `claim` and `csize` (bonuses to claim), `dep_today` |
 | `GET /fleet` | `{paid, jobs, bonus, made}`: the Badge Fleet MAV is `made` = paid + bonus |
-| `GET /jobs/<id>` | one job, what I may do (`acts`), the offer pool for the requester |
+| `GET /jobs/<id>` | one job, what I may do (`acts`), the offer pool and the picked introer's badge (`pbadge`) for the requester |
 | `POST /jobs/<id>/bonus {awarded, needsX}` | record a claimed bonus (once) |
 | `POST /introer {name}` | rename (the first offer creates the introer) |
 | `POST /jobs {who, co, tg, bid}` | new job: `{id, memo, esc}`; then deposit |
-| `POST /jobs/<id>/<act>` | `paid`, `offer`, `withdraw`, `approve {n}`, `made`, `confirm`, `cancel` (bid back), `refund`, `edit {who, co, tg}`, `raise {bid}` (returns `raise {memo, diff}` to pay), `remove` (a post not paid yet) |
+| `POST /jobs/<id>/<act>` | `paid`, `offer`, `withdraw`, `approve {n}`, `inperson {badge}` (full bid), `telegram` (half), `cancel` (bid back), `refund`, `edit {who, co, tg}`, `raise {bid}` (returns `raise {memo, diff}` to pay), `remove` (a post not paid yet) |
 
 State is one JSON file on a Railway volume (`DATA_DIR`).

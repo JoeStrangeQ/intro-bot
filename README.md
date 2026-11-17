@@ -4,16 +4,18 @@ A Solana Breakpoint 2026 badge app by [BotBot](https://botbotcap.com).
 
 A !LAMP escrow app for the badge. Your badge becomes a machine whose job is making intros.
 Post who you want to meet with a bid in !LAMPs. Every bid is paid into escrow when posted, so
-everything on the board is backed; it goes to the introer only once you confirm the intro. Every confirmed intro raises the introer's machine value, and the
+everything on the board is backed. Once you pick an introer, pay them **in person** (your
+badges meet over the mesh: the full bid) or **over Telegram** (half the bid, half back to you).
+Every paid intro raises the introer's machine value, and the
 **Badge Fleet MAV** counts every !LAMP the introers produced: BotBot's idea, in miniature.
 
 ## Rewards
 
-Introers get a **50 !LAMP bonus** for each confirmed intro, on top of the bid.
+Introers get a **50 !LAMP bonus** for each intro paid in person, or 25 over Telegram, on top of the bid.
 
 - Up to 100 !LAMPs a day per person (two bonuses).
 - One bonus per pair of people, ever.
-- The intro needs a verified badge meet, and the introer needs X linked.
+- The introer needs X linked.
 - The app's daily limit is set by the badge team.
 
 - `badge/`: the badge app (Lua)
